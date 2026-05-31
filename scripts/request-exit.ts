@@ -11,7 +11,7 @@ async function main() {
     client: { wallet },
   });
 
-  const pubkey = process.env.PUBKEY ? asHex(process.env.PUBKEY) : await pool.read.validatorPubkeyAt([0n]);
+  const pubkey = process.env.PUBKEY ? asHex(process.env.PUBKEY) : await pool.read.validatorPubkey();
   const fee = await pool.read.currentExitRequestFee();
   const maxFee = envBigInt("MAX_FEE_WEI", fee);
 

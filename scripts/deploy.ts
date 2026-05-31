@@ -4,7 +4,6 @@ import {
   defaultDepositContract,
   defaultValidatorDepositGwei,
   envAddress,
-  envBigInt,
   envNumber,
   parseAddressList,
   parseBigIntList,
@@ -26,7 +25,6 @@ async function main() {
   );
   const validatorDepositGwei = defaultValidatorDepositGwei();
   const validatorDepositWei = validatorDepositGwei * GWEI;
-  const validatorCount = envBigInt("VALIDATOR_COUNT", 1n);
   const deadlineSeconds = envNumber("FUNDING_DEADLINE_SECONDS", 86_400);
   const latestBlock = await publicClient.getBlock();
   const fundingDeadline = latestBlock.timestamp + BigInt(deadlineSeconds);
@@ -36,7 +34,7 @@ async function main() {
     : [deployer.account.address];
   const fundingTargetsGwei = process.env.FUNDING_TARGETS_GWEI
     ? parseBigIntList(process.env.FUNDING_TARGETS_GWEI)
-    : [validatorDepositGwei * validatorCount];
+    : [validatorDepositGwei];
   if (participants.length !== fundingTargetsGwei.length) {
     throw new Error("PARTICIPANTS and FUNDING_TARGETS_GWEI length mismatch");
   }
@@ -46,7 +44,6 @@ async function main() {
     depositContract,
     withdrawalRequestPredeploy,
     validatorDepositWei,
-    validatorCount,
     fundingDeadline,
     participants,
     fundingTargetsWei,
@@ -64,7 +61,6 @@ async function main() {
     depositContract,
     withdrawalRequestPredeploy,
     validatorDepositWei: validatorDepositWei.toString(),
-    validatorCount: validatorCount.toString(),
     fundingDeadline: fundingDeadline.toString(),
     withdrawalCredentials,
     participants,

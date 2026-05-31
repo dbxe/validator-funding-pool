@@ -14,7 +14,6 @@ export interface DeploymentRecord {
   depositContract: Address;
   withdrawalRequestPredeploy: Address;
   validatorDepositWei: string;
-  validatorCount: string;
   fundingDeadline: string;
   withdrawalCredentials: Hex;
   participants: Address[];

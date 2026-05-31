@@ -24,7 +24,6 @@ contract ValidatorFundingPool {
     address public immutable withdrawalRequestPredeploy;
     bytes32 public immutable withdrawalCredentials;
     uint256 public immutable validatorDepositWei;
-    uint256 public immutable validatorCount;
     uint256 public immutable totalFundingTarget;
     uint256 public immutable fundingDeadline;
 
@@ -34,9 +33,12 @@ contract ValidatorFundingPool {
     uint256 public refundedTotal;
     uint256 public canceledSurplusTotalWeight;
     uint256 public canceledSurplusClaimedTotal;
+    bool public validatorDeposited;
+    bool public exitRequested;
+    bytes32 public validatorPubkeyHash;
 
     address[] private _participants;
-    bytes[] private _validatorPubkeys;
+    bytes private _validatorPubkey;
 
     mapping(address participant => uint256 indexPlusOne) private _participantIndexPlusOne;
     mapping(address participant => uint256 targetWei) public fundingTargetOf;
@@ -44,8 +46,6 @@ contract ValidatorFundingPool {
     mapping(address participant => uint256 claimedWei) public claimedOf;
     mapping(address participant => uint256 surplusWeight) public canceledSurplusWeightOf;
     mapping(address participant => uint256 claimedWei) public canceledSurplusClaimedOf;
-    mapping(bytes32 pubkeyHash => bool deposited) public validatorDeposited;
-    mapping(bytes32 pubkeyHash => bool requested) public exitRequestedFor;
 
     uint256 private _reentrancyLock;
 
@@ -53,7 +53,7 @@ contract ValidatorFundingPool {
     event PoolCanceled(address indexed caller);
     event Refunded(address indexed participant, uint256 amount);
     event ValidatorDeposited(bytes indexed pubkey, bytes32 indexed pubkeyHash);
-    event PoolStaked(uint256 validatorCount);
+    event PoolStaked();
     event PoolProceedsReceived(address indexed sender, uint256 amount);
     event Claimed(address indexed participant, uint256 amount);
     event CanceledSurplusClaimed(address indexed participant, uint256 amount);
@@ -64,7 +64,7 @@ contract ValidatorFundingPool {
     error InvalidParticipant();
     error DuplicateParticipant();
     error InvalidFundingTarget();
-    error FundingTargetsDoNotMatchValidators();
+    error FundingTargetsDoNotMatchValidator();
     error InvalidDepositContract();
     error InvalidWithdrawalRequestPredeploy();
     error InvalidValidatorConfig();
@@ -75,11 +75,9 @@ contract ValidatorFundingPool {
     error ZeroAmount();
     error FundingCapExceeded();
     error NotFullyFunded();
-    error InvalidValidatorCount();
     error InvalidPubkey();
     error InvalidSignature();
     error InvalidDepositDataRoot();
-    error DuplicateValidator();
     error UnknownValidator();
     error ExitAlreadyRequested();
     error ExitFeeReadFailed();
@@ -106,17 +104,13 @@ contract ValidatorFundingPool {
         address depositContract_,
         address withdrawalRequestPredeploy_,
         uint256 validatorDepositWei_,
-        uint256 validatorCount_,
         uint256 fundingDeadline_,
         address[] memory participants_,
         uint256[] memory fundingTargets_
     ) {
         if (depositContract_ == address(0)) revert InvalidDepositContract();
         if (withdrawalRequestPredeploy_ == address(0)) revert InvalidWithdrawalRequestPredeploy();
-        if (
-            validatorDepositWei_ == 0 || validatorDepositWei_ % GWEI != 0 || validatorCount_ == 0
-                || fundingDeadline_ <= block.timestamp
-        ) {
+        if (validatorDepositWei_ == 0 || validatorDepositWei_ % GWEI != 0 || fundingDeadline_ <= block.timestamp) {
             revert InvalidValidatorConfig();
         }
         if (participants_.length == 0) revert EmptyParticipantSet();
@@ -126,7 +120,6 @@ contract ValidatorFundingPool {
         depositContract = depositContract_;
         withdrawalRequestPredeploy = withdrawalRequestPredeploy_;
         validatorDepositWei = validatorDepositWei_;
-        validatorCount = validatorCount_;
         fundingDeadline = fundingDeadline_;
         withdrawalCredentials = _makeEth1WithdrawalCredentials(address(this));
 
@@ -144,9 +137,8 @@ contract ValidatorFundingPool {
             targetTotal += target;
         }
 
-        uint256 requiredFunding = validatorDepositWei_ * validatorCount_;
-        if (targetTotal != requiredFunding) revert FundingTargetsDoNotMatchValidators();
-        totalFundingTarget = requiredFunding;
+        if (targetTotal != validatorDepositWei_) revert FundingTargetsDoNotMatchValidator();
+        totalFundingTarget = validatorDepositWei_;
     }
 
     receive() external payable {
@@ -196,43 +188,30 @@ contract ValidatorFundingPool {
         _sendEth(payable(msg.sender), amount);
     }
 
-    function stake(
-        bytes[] calldata pubkeys,
-        bytes[] calldata signatures,
-        bytes32[] calldata depositDataRoots
-    ) external nonReentrant {
+    function stake(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot) external nonReentrant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp > fundingDeadline) revert FundingClosed();
         if (totalFunded != totalFundingTarget) revert NotFullyFunded();
         if (address(this).balance < totalFundingTarget) revert NotFullyFunded();
-        if (
-            pubkeys.length != validatorCount || signatures.length != validatorCount
-                || depositDataRoots.length != validatorCount
-        ) {
-            revert InvalidValidatorCount();
-        }
+        if (validatorDeposited) revert InvalidState();
+        if (pubkey.length != 48) revert InvalidPubkey();
+        if (signature.length != 96) revert InvalidSignature();
+        if (depositDataRoot == bytes32(0)) revert InvalidDepositDataRoot();
 
         bytes memory expectedWithdrawalCredentials = abi.encodePacked(withdrawalCredentials);
-        for (uint256 i; i < validatorCount; ++i) {
-            bytes calldata pubkey = pubkeys[i];
-            if (pubkey.length != 48) revert InvalidPubkey();
-            if (signatures[i].length != 96) revert InvalidSignature();
-            if (depositDataRoots[i] == bytes32(0)) revert InvalidDepositDataRoot();
+        bytes32 pubkeyHash = keccak256(pubkey);
+        validatorDeposited = true;
+        validatorPubkeyHash = pubkeyHash;
+        _validatorPubkey = pubkey;
 
-            bytes32 pubkeyHash = keccak256(pubkey);
-            if (validatorDeposited[pubkeyHash]) revert DuplicateValidator();
-            validatorDeposited[pubkeyHash] = true;
-            _validatorPubkeys.push(pubkey);
+        IBeaconDepositContract(depositContract).deposit{value: validatorDepositWei}(
+            pubkey, expectedWithdrawalCredentials, signature, depositDataRoot
+        );
 
-            IBeaconDepositContract(depositContract).deposit{value: validatorDepositWei}(
-                pubkey, expectedWithdrawalCredentials, signatures[i], depositDataRoots[i]
-            );
-
-            emit ValidatorDeposited(pubkey, pubkeyHash);
-        }
+        emit ValidatorDeposited(pubkey, pubkeyHash);
 
         state = State.Staked;
-        emit PoolStaked(validatorCount);
+        emit PoolStaked();
     }
 
     function requestExit(bytes calldata pubkey, uint256 maxFee) external payable onlyParticipant nonReentrant {
@@ -240,14 +219,14 @@ contract ValidatorFundingPool {
         if (pubkey.length != 48) revert InvalidPubkey();
 
         bytes32 pubkeyHash = keccak256(pubkey);
-        if (!validatorDeposited[pubkeyHash]) revert UnknownValidator();
-        if (exitRequestedFor[pubkeyHash]) revert ExitAlreadyRequested();
+        if (!validatorDeposited || pubkeyHash != validatorPubkeyHash) revert UnknownValidator();
+        if (exitRequested) revert ExitAlreadyRequested();
 
         uint256 fee = currentExitRequestFee();
         if (fee > maxFee) revert ExitFeeTooHigh(fee, maxFee);
         if (msg.value < fee) revert InsufficientExitFee(msg.value, fee);
 
-        exitRequestedFor[pubkeyHash] = true;
+        exitRequested = true;
 
         // EIP-7002 full exit requests use amount = 0, encoded as eight zero bytes.
         (bool ok,) = withdrawalRequestPredeploy.call{value: fee}(bytes.concat(pubkey, bytes8(0)));
@@ -334,12 +313,8 @@ contract ValidatorFundingPool {
         return _participants[index];
     }
 
-    function depositedValidatorCount() external view returns (uint256) {
-        return _validatorPubkeys.length;
-    }
-
-    function validatorPubkeyAt(uint256 index) external view returns (bytes memory) {
-        return _validatorPubkeys[index];
+    function validatorPubkey() external view returns (bytes memory) {
+        return _validatorPubkey;
     }
 
     function withdrawalCredentialsBytes() external view returns (bytes memory) {

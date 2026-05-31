@@ -10,6 +10,7 @@
 - Added accounting coverage for delayed claim timing, cumulative entitlement invariants, integer-division dust, forced ETH before staking, forced ETH after cancellation, and claim rollback when a participant cannot receive ETH.
 - Added test-only mocks for forced ETH and rejecting ETH recipients. Production contract behavior was not changed.
 - Added `sweepCanceledSurplus()` so forced ETH in a canceled pool does not remain stuck. Surplus weights are funded amounts at cancellation, falling back to funding targets if nobody funded.
+- Simplified the contract to exactly one validator. Removed `validatorCount`, array-based staking, multi-validator storage, and multi-validator script paths.
 
 ## Design Decisions
 

@@ -73,7 +73,6 @@ describe("ValidatorFundingPool", async function () {
       deposit.address,
       withdrawal.address,
       VALIDATOR_DEPOSIT,
-      1n,
       deadline,
       [alice.account.address, bob.account.address],
       [ALICE_TARGET, BOB_TARGET],
@@ -95,33 +94,6 @@ describe("ValidatorFundingPool", async function () {
     };
   }
 
-  async function twoValidatorFundedFixture() {
-    const wallets = await viem.getWalletClients();
-    const [, alice, bob] = wallets;
-
-    const deposit = await viem.deployContract("MockDepositContract");
-    const withdrawal = await viem.deployContract("MockWithdrawalRequestPredeploy", [EXIT_FEE]);
-    const latest = await networkHelpers.time.latest();
-    const deadline = BigInt(latest + 3_600);
-
-    const pool = await viem.deployContract("ValidatorFundingPool", [
-      deposit.address,
-      withdrawal.address,
-      VALIDATOR_DEPOSIT,
-      2n,
-      deadline,
-      [alice.account.address, bob.account.address],
-      [parseEther("24"), parseEther("40")],
-    ]);
-
-    const alicePool = await poolAs(pool.address, alice);
-    const bobPool = await poolAs(pool.address, bob);
-    await wait(await alicePool.write.fund({ value: parseEther("24") }));
-    await wait(await bobPool.write.fund({ value: parseEther("40") }));
-
-    return { pool };
-  }
-
   async function awkwardWeightsStakedFixture() {
     const wallets = await viem.getWalletClients();
     const [, alice, bob, charlie, outsider] = wallets;
@@ -137,7 +109,6 @@ describe("ValidatorFundingPool", async function () {
       deposit.address,
       withdrawal.address,
       validatorDeposit,
-      1n,
       deadline,
       [alice.account.address, bob.account.address, charlie.account.address],
       targets,
@@ -150,7 +121,7 @@ describe("ValidatorFundingPool", async function () {
     await wait(await alicePool.write.fund({ value: targets[0] }));
     await wait(await bobPool.write.fund({ value: targets[1] }));
     await wait(await charliePool.write.fund({ value: targets[2] }));
-    await wait(await pool.write.stake([[fixedHex("44", 48)], [fixedHex("ee", 96)], [fixedHex("05", 32)]]));
+    await wait(await pool.write.stake([fixedHex("44", 48), fixedHex("ee", 96), fixedHex("05", 32)]));
 
     return {
       pool,
@@ -178,7 +149,7 @@ describe("ValidatorFundingPool", async function () {
     const signature = fixedHex("aa", 96);
     const depositDataRoot = fixedHex("01", 32);
 
-    await wait(await fixture.pool.write.stake([[pubkey], [signature], [depositDataRoot]]));
+    await wait(await fixture.pool.write.stake([pubkey, signature, depositDataRoot]));
 
     return {
       ...fixture,
@@ -229,16 +200,17 @@ describe("ValidatorFundingPool", async function () {
 
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([[fixedHex("11", 48)], [fixedHex("aa", 96)], [fixedHex("01", 32)]]),
+      pool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]),
       pool,
       "NotFullyFunded",
     );
 
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
-    await wait(await pool.write.stake([[fixedHex("11", 48)], [fixedHex("aa", 96)], [fixedHex("01", 32)]]));
+    await wait(await pool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]));
 
     assert.equal(await pool.read.state(), STATE_STAKED);
-    assert.equal(await pool.read.depositedValidatorCount(), 1n);
+    assert.equal(await pool.read.validatorDeposited(), true);
+    assert.equal(await pool.read.validatorPubkey(), fixedHex("11", 48));
     assert.equal(await deposit.read.depositCount(), 1n);
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
 
@@ -352,7 +324,7 @@ describe("ValidatorFundingPool", async function () {
 
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
-    await wait(await pool.write.stake([[fixedHex("55", 48)], [fixedHex("ff", 96)], [fixedHex("06", 32)]]));
+    await wait(await pool.write.stake([fixedHex("55", 48), fixedHex("ff", 96), fixedHex("06", 32)]));
 
     assert.equal(await pool.read.grossPoolProceeds(), 2n);
     assert.equal(await pool.read.claimable([alice.account.address]), 0n);
@@ -429,7 +401,6 @@ describe("ValidatorFundingPool", async function () {
       deposit.address,
       withdrawal.address,
       VALIDATOR_DEPOSIT,
-      1n,
       deadline,
       [rejectingParticipant.address, bob.account.address],
       [ALICE_TARGET, BOB_TARGET],
@@ -438,7 +409,7 @@ describe("ValidatorFundingPool", async function () {
 
     await wait(await rejectingParticipant.write.fundPool([pool.address], { value: ALICE_TARGET }));
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
-    await wait(await pool.write.stake([[fixedHex("66", 48)], [fixedHex("aa", 96)], [fixedHex("07", 32)]]));
+    await wait(await pool.write.stake([fixedHex("66", 48), fixedHex("aa", 96), fixedHex("07", 32)]));
     await wait(await outsider.sendTransaction({ to: pool.address, value: parseEther("8") }));
 
     assert.equal(await pool.read.claimable([rejectingParticipant.address]), parseEther("3"));
@@ -499,32 +470,22 @@ describe("ValidatorFundingPool", async function () {
     const root = fixedHex("02", 32);
 
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([[fixedHex("22", 47)], [signature], [root]]),
+      pool.write.stake([fixedHex("22", 47), signature, root]),
       pool,
       "InvalidPubkey",
     );
 
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([[pubkey], [fixedHex("bb", 95)], [root]]),
+      pool.write.stake([pubkey, fixedHex("bb", 95), root]),
       pool,
       "InvalidSignature",
     );
 
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([[pubkey], [signature], ["0x0000000000000000000000000000000000000000000000000000000000000000"]]),
+      pool.write.stake([pubkey, signature, "0x0000000000000000000000000000000000000000000000000000000000000000"]),
       pool,
       "InvalidDepositDataRoot",
     );
   });
 
-  it("rejects duplicate validators in a multi-validator staking call", async function () {
-    const { pool } = await networkHelpers.loadFixture(twoValidatorFundedFixture);
-    const pubkey = fixedHex("33", 48);
-
-    await viem.assertions.revertWithCustomError(
-      pool.write.stake([[pubkey, pubkey], [fixedHex("cc", 96), fixedHex("dd", 96)], [fixedHex("03", 32), fixedHex("04", 32)]]),
-      pool,
-      "DuplicateValidator",
-    );
-  });
 });

@@ -1,6 +1,6 @@
 # Validator Funding Pool
 
-Minimal `0x01` withdrawal-credential funding pool for a fixed group of known validator funders.
+Minimal `0x01` withdrawal-credential funding pool for a fixed group of known funders pooling into one validator.
 
 This is not a liquid staking protocol. It mints no ERC-20, ERC-721, ERC-1155, vault share, receipt token, or transferable claim. Economic rights are internal accounting only.
 
@@ -10,7 +10,7 @@ This is not a liquid staking protocol. It mints no ERC-20, ERC-721, ERC-1155, va
 - Each participant has a fixed funding cap.
 - Funding caps are also the post-stake economic weights.
 - Before staking, participants can fund or, after the deadline, cancel and refund exact contributions.
-- Staking happens only after exact full funding.
+- Staking one validator happens only after exact full funding.
 - The pool computes withdrawal credentials as `0x01 || 11 zero bytes || address(pool)`.
 - After all configured validator deposits are submitted, every ETH balance in the pool is pool proceeds.
 - Pool proceeds are claimable pro rata by participant funding weight.
@@ -21,8 +21,8 @@ This is not a liquid staking protocol. It mints no ERC-20, ERC-721, ERC-1155, va
 
 ## Trust Assumptions
 
-- The operator is trusted to provide valid BLS deposit data.
-- The operator is trusted to run validators correctly and avoid slashable behavior.
+- The operator is trusted to provide valid BLS deposit data for the validator.
+- The operator is trusted to run the validator correctly and avoid slashable behavior.
 - The operator is trusted to configure EL fee recipient / MEV recipient as agreed off-chain.
 - The contract enforces custody of consensus withdrawals and pro-rata pool distribution only.
 
@@ -61,12 +61,13 @@ FUNDING_TARGETS_GWEI=16000000000,16000000000 \
 npm run deploy
 ```
 
-The deploy script prints the pool-owned withdrawal credentials. Generate validator deposit data with those credentials, place it at `deposit-data.json` or set `DEPOSIT_DATA_FILE`, then run:
+The deploy script prints the pool-owned withdrawal credentials. Generate one validator deposit data entry with those credentials, place it at `deposit-data.json` or set `DEPOSIT_DATA_FILE`, then run:
 
 ```bash
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run fund
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run stake
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run claim
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run sweep-canceled-surplus
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run request-exit
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
 ```
@@ -75,8 +76,7 @@ Useful deployment variables:
 
 - `DEPOSIT_CONTRACT`: deposit contract address.
 - `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address.
-- `VALIDATOR_DEPOSIT_GWEI`: validator deposit size; defaults to the first deposit data amount, then `32000000000`.
-- `VALIDATOR_COUNT`: number of validators funded by this pool; defaults to `1`.
+- `VALIDATOR_DEPOSIT_GWEI`: validator deposit size; defaults to the deposit data amount, then `32000000000`.
 - `FUNDING_DEADLINE_SECONDS`: funding window from deployment; defaults to `86400`.
 - `PARTICIPANTS`: comma-separated participant addresses; defaults to the deployer.
 - `FUNDING_TARGETS_GWEI`: comma-separated funding caps matching `PARTICIPANTS`.
