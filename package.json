@@ -1,0 +1,26 @@
+{
+  "name": "validator-funding-pool",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "hardhat compile",
+    "typecheck": "hardhat compile && tsc --noEmit",
+    "test": "hardhat test",
+    "test:prod": "hardhat test --build-profile production",
+    "deploy": "hardhat run scripts/deploy.ts --network rpc",
+    "fund": "hardhat run scripts/fund.ts --network rpc",
+    "stake": "hardhat run scripts/stake.ts --network rpc",
+    "claim": "hardhat run scripts/claim.ts --network rpc",
+    "request-exit": "hardhat run scripts/request-exit.ts --network rpc",
+    "status": "hardhat run scripts/status.ts --network rpc"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",
+    "@types/node": "^22.18.0",
+    "hardhat": "^3.0.4",
+    "typescript": "~5.8.0",
+    "viem": "^2.37.2"
+  }
+}
