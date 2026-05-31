@@ -5,6 +5,12 @@
 - Moved the suite into its standalone repository path and renamed the core contract to `ValidatorFundingPool`.
 - Removed network-specific helper scripts and defaults. Runtime scripts now use generic `RPC_URL` / `PRIVATE_KEY` configuration.
 
+## 2026-05-31
+
+- Added accounting coverage for delayed claim timing, cumulative entitlement invariants, integer-division dust, forced ETH before staking, forced ETH after cancellation, and claim rollback when a participant cannot receive ETH.
+- Added test-only mocks for forced ETH and rejecting ETH recipients. Production contract behavior was not changed.
+- Added `sweepCanceledSurplus()` so forced ETH in a canceled pool does not remain stuck. Surplus weights are funded amounts at cancellation, falling back to funding targets if nobody funded.
+
 ## Design Decisions
 
 - Chose the hybrid `0x01` model with one post-stake accounting rule: every ETH held by the pool after staking is distributed pro rata by participant funding weight.

@@ -35,6 +35,14 @@ This is not a liquid staking protocol. It mints no ERC-20, ERC-721, ERC-1155, va
 
 Override any address or path with environment variables when using a test chain.
 
+## Accounting Notes
+
+- Claim timing does not change anyone's cumulative entitlement. Claims move ETH from pool balance to `totalClaimed`, and `grossPoolProceeds()` includes both.
+- Integer division can leave tiny rounding dust. At a fixed final gross amount, dust is bounded below the participant count in wei. Later proceeds can make prior dust claimable.
+- ETH forced into the pool before staking becomes pool proceeds after staking.
+- ETH forced in after cancellation is outside refund accounting, but participants can sweep canceled surplus. If anyone funded, sweep weights are the funded amounts at cancellation; otherwise sweep weights are the deployment funding targets.
+- If a participant cannot receive ETH, their claim reverts and accounting rolls back.
+
 ## Commands
 
 ```bash

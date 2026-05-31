@@ -32,6 +32,8 @@ contract ValidatorFundingPool {
     uint256 public totalFunded;
     uint256 public totalClaimed;
     uint256 public refundedTotal;
+    uint256 public canceledSurplusTotalWeight;
+    uint256 public canceledSurplusClaimedTotal;
 
     address[] private _participants;
     bytes[] private _validatorPubkeys;
@@ -40,6 +42,8 @@ contract ValidatorFundingPool {
     mapping(address participant => uint256 targetWei) public fundingTargetOf;
     mapping(address participant => uint256 fundedWei) public fundedOf;
     mapping(address participant => uint256 claimedWei) public claimedOf;
+    mapping(address participant => uint256 surplusWeight) public canceledSurplusWeightOf;
+    mapping(address participant => uint256 claimedWei) public canceledSurplusClaimedOf;
     mapping(bytes32 pubkeyHash => bool deposited) public validatorDeposited;
     mapping(bytes32 pubkeyHash => bool requested) public exitRequestedFor;
 
@@ -52,6 +56,7 @@ contract ValidatorFundingPool {
     event PoolStaked(uint256 validatorCount);
     event PoolProceedsReceived(address indexed sender, uint256 amount);
     event Claimed(address indexed participant, uint256 amount);
+    event CanceledSurplusClaimed(address indexed participant, uint256 amount);
     event ExitRequested(bytes indexed pubkey, bytes32 indexed pubkeyHash, uint256 fee);
 
     error EmptyParticipantSet();
@@ -167,6 +172,14 @@ contract ValidatorFundingPool {
         if (block.timestamp <= fundingDeadline) revert FundingStillOpen();
 
         state = State.Canceled;
+        uint256 totalWeight = totalFunded == 0 ? totalFundingTarget : totalFunded;
+        canceledSurplusTotalWeight = totalWeight;
+        for (uint256 i; i < _participants.length; ++i) {
+            address participant = _participants[i];
+            uint256 weight = totalFunded == 0 ? fundingTargetOf[participant] : fundedOf[participant];
+            canceledSurplusWeightOf[participant] = weight;
+        }
+
         emit PoolCanceled(msg.sender);
     }
 
@@ -261,6 +274,19 @@ contract ValidatorFundingPool {
         _sendEth(payable(msg.sender), amount);
     }
 
+    function sweepCanceledSurplus() external nonReentrant {
+        if (state != State.Canceled) revert InvalidState();
+
+        uint256 amount = canceledSurplusClaimable(msg.sender);
+        if (amount == 0) revert NothingToClaim();
+
+        canceledSurplusClaimedOf[msg.sender] += amount;
+        canceledSurplusClaimedTotal += amount;
+        emit CanceledSurplusClaimed(msg.sender, amount);
+
+        _sendEth(payable(msg.sender), amount);
+    }
+
     function claimable(address participant) public view returns (uint256) {
         if (state != State.Staked) return 0;
 
@@ -275,6 +301,25 @@ contract ValidatorFundingPool {
 
     function grossPoolProceeds() public view returns (uint256) {
         return address(this).balance + totalClaimed;
+    }
+
+    function canceledSurplusClaimable(address participant) public view returns (uint256) {
+        if (state != State.Canceled) return 0;
+
+        uint256 weight = canceledSurplusWeightOf[participant];
+        if (weight == 0) return 0;
+
+        uint256 entitled = grossCanceledSurplus() * weight / canceledSurplusTotalWeight;
+        uint256 alreadyClaimed = canceledSurplusClaimedOf[participant];
+        if (entitled <= alreadyClaimed) return 0;
+        return entitled - alreadyClaimed;
+    }
+
+    function grossCanceledSurplus() public view returns (uint256) {
+        if (state != State.Canceled) return 0;
+
+        uint256 outstandingRefunds = totalFunded - refundedTotal;
+        return address(this).balance + canceledSurplusClaimedTotal - outstandingRefunds;
     }
 
     function isParticipant(address account) external view returns (bool) {
