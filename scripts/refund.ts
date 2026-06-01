@@ -11,16 +11,16 @@ async function main() {
     client: { wallet },
   });
 
-  const claimable = await pool.read.claimable([wallet.account.address]);
-  console.log(`Claimable for ${wallet.account.address}: ${formatWei(claimable)}`);
-  if (claimable === 0n) return;
+  const refundable = await pool.read.fundedOf([wallet.account.address]);
+  console.log(`Refundable for ${wallet.account.address}: ${formatWei(refundable)}`);
+  if (refundable === 0n) return;
 
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : wallet.account.address;
   const hash = recipient.toLowerCase() === wallet.account.address.toLowerCase()
-    ? await pool.write.claim()
-    : await pool.write.claimTo([recipient]);
+    ? await pool.write.refund()
+    : await pool.write.refundTo([recipient]);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`Claimed to ${recipient} in block ${receipt.blockNumber}`);
+  console.log(`Refunded to ${recipient} in block ${receipt.blockNumber}`);
 }
 
 main().catch((error) => {

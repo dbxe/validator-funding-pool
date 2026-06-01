@@ -11,6 +11,8 @@
 - Added test-only mocks for forced ETH and rejecting ETH recipients. Production contract behavior was not changed.
 - Added `sweepCanceledSurplus()` so forced ETH in a canceled pool does not remain stuck. Surplus weights are funded amounts at cancellation, falling back to funding targets if nobody funded.
 - Simplified the contract to exactly one validator. Removed `validatorCount`, array-based staking, multi-validator storage, and multi-validator script paths.
+- Restricted `stake()` to participants. This prevents a non-participant from choosing the validator key after the pool is fully funded.
+- Added `claimTo`, `refundTo`, and `sweepCanceledSurplusTo` with zero-address rejection. The existing no-argument methods now default to sending to the participant address.
 
 ## Design Decisions
 

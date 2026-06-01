@@ -11,6 +11,7 @@
     "test:prod": "hardhat test --build-profile production",
     "deploy": "hardhat run scripts/deploy.ts --network rpc",
     "fund": "hardhat run scripts/fund.ts --network rpc",
+    "refund": "hardhat run scripts/refund.ts --network rpc",
     "stake": "hardhat run scripts/stake.ts --network rpc",
     "claim": "hardhat run scripts/claim.ts --network rpc",
     "sweep-canceled-surplus": "hardhat run scripts/sweep-canceled-surplus.ts --network rpc",

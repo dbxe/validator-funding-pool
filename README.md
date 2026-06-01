@@ -10,7 +10,7 @@ This is not a liquid staking protocol. It mints no ERC-20, ERC-721, ERC-1155, va
 - Each participant has a fixed funding cap.
 - Funding caps are also the post-stake economic weights.
 - Before staking, participants can fund or, after the deadline, cancel and refund exact contributions.
-- Staking one validator happens only after exact full funding.
+- Any participant may stake one validator after exact full funding and before the funding deadline.
 - The pool computes withdrawal credentials as `0x01 || 11 zero bytes || address(pool)`.
 - After all configured validator deposits are submitted, every ETH balance in the pool is pool proceeds.
 - Pool proceeds are claimable pro rata by participant funding weight.
@@ -41,7 +41,7 @@ Override any address or path with environment variables when using a test chain.
 - Integer division can leave tiny rounding dust. At a fixed final gross amount, dust is bounded below the participant count in wei. Later proceeds can make prior dust claimable.
 - ETH forced into the pool before staking becomes pool proceeds after staking.
 - ETH forced in after cancellation is outside refund accounting, but participants can sweep canceled surplus. If anyone funded, sweep weights are the funded amounts at cancellation; otherwise sweep weights are the deployment funding targets.
-- If a participant cannot receive ETH, their claim reverts and accounting rolls back.
+- Participants can call `claimTo`, `refundTo`, and `sweepCanceledSurplusTo` to send ETH to a nonzero recipient address. The no-argument wrappers send to the participant address.
 
 ## Commands
 
@@ -65,6 +65,7 @@ The deploy script prints the pool-owned withdrawal credentials. Generate one val
 
 ```bash
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run fund
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run refund
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run stake
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run claim
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run sweep-canceled-surplus
@@ -80,6 +81,7 @@ Useful deployment variables:
 - `FUNDING_DEADLINE_SECONDS`: funding window from deployment; defaults to `86400`.
 - `PARTICIPANTS`: comma-separated participant addresses; defaults to the deployer.
 - `FUNDING_TARGETS_GWEI`: comma-separated funding caps matching `PARTICIPANTS`.
+- `RECIPIENT`: optional nonzero recipient for `claim`, `refund`, and `sweep-canceled-surplus`.
 
 ## License
 

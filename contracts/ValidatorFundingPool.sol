@@ -51,12 +51,12 @@ contract ValidatorFundingPool {
 
     event ParticipantFunded(address indexed participant, uint256 amount, uint256 participantTotal, uint256 poolTotal);
     event PoolCanceled(address indexed caller);
-    event Refunded(address indexed participant, uint256 amount);
+    event Refunded(address indexed participant, address indexed recipient, uint256 amount);
     event ValidatorDeposited(bytes indexed pubkey, bytes32 indexed pubkeyHash);
     event PoolStaked();
     event PoolProceedsReceived(address indexed sender, uint256 amount);
-    event Claimed(address indexed participant, uint256 amount);
-    event CanceledSurplusClaimed(address indexed participant, uint256 amount);
+    event Claimed(address indexed participant, address indexed recipient, uint256 amount);
+    event CanceledSurplusClaimed(address indexed participant, address indexed recipient, uint256 amount);
     event ExitRequested(bytes indexed pubkey, bytes32 indexed pubkeyHash, uint256 fee);
 
     error EmptyParticipantSet();
@@ -86,6 +86,7 @@ contract ValidatorFundingPool {
     error ExitRequestFailed();
     error NothingToRefund();
     error NothingToClaim();
+    error InvalidRecipient();
     error EthTransferFailed();
 
     modifier onlyParticipant() {
@@ -175,20 +176,29 @@ contract ValidatorFundingPool {
         emit PoolCanceled(msg.sender);
     }
 
-    function refund() external nonReentrant {
+    function refund() external {
+        refundTo(payable(msg.sender));
+    }
+
+    function refundTo(address payable recipient) public onlyParticipant nonReentrant {
         if (state != State.Canceled) revert InvalidState();
+        if (recipient == address(0)) revert InvalidRecipient();
 
         uint256 amount = fundedOf[msg.sender];
         if (amount == 0) revert NothingToRefund();
 
         fundedOf[msg.sender] = 0;
         refundedTotal += amount;
-        emit Refunded(msg.sender, amount);
+        emit Refunded(msg.sender, recipient, amount);
 
-        _sendEth(payable(msg.sender), amount);
+        _sendEth(recipient, amount);
     }
 
-    function stake(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot) external nonReentrant {
+    function stake(
+        bytes calldata pubkey,
+        bytes calldata signature,
+        bytes32 depositDataRoot
+    ) external onlyParticipant nonReentrant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp > fundingDeadline) revert FundingClosed();
         if (totalFunded != totalFundingTarget) revert NotFullyFunded();
@@ -240,30 +250,40 @@ contract ValidatorFundingPool {
         emit ExitRequested(pubkey, pubkeyHash, fee);
     }
 
-    function claim() external nonReentrant {
+    function claim() external {
+        claimTo(payable(msg.sender));
+    }
+
+    function claimTo(address payable recipient) public onlyParticipant nonReentrant {
         if (state != State.Staked) revert InvalidState();
+        if (recipient == address(0)) revert InvalidRecipient();
 
         uint256 amount = claimable(msg.sender);
         if (amount == 0) revert NothingToClaim();
 
         claimedOf[msg.sender] += amount;
         totalClaimed += amount;
-        emit Claimed(msg.sender, amount);
+        emit Claimed(msg.sender, recipient, amount);
 
-        _sendEth(payable(msg.sender), amount);
+        _sendEth(recipient, amount);
     }
 
-    function sweepCanceledSurplus() external nonReentrant {
+    function sweepCanceledSurplus() external {
+        sweepCanceledSurplusTo(payable(msg.sender));
+    }
+
+    function sweepCanceledSurplusTo(address payable recipient) public onlyParticipant nonReentrant {
         if (state != State.Canceled) revert InvalidState();
+        if (recipient == address(0)) revert InvalidRecipient();
 
         uint256 amount = canceledSurplusClaimable(msg.sender);
         if (amount == 0) revert NothingToClaim();
 
         canceledSurplusClaimedOf[msg.sender] += amount;
         canceledSurplusClaimedTotal += amount;
-        emit CanceledSurplusClaimed(msg.sender, amount);
+        emit CanceledSurplusClaimed(msg.sender, recipient, amount);
 
-        _sendEth(payable(msg.sender), amount);
+        _sendEth(recipient, amount);
     }
 
     function claimable(address participant) public view returns (uint256) {

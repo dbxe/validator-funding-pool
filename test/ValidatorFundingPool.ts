@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { network } from "hardhat";
-import { parseEther, type Address, type Hex } from "viem";
+import { parseEther, zeroAddress, type Address, type Hex } from "viem";
 
 const STATE_FUNDING = 0;
 const STATE_STAKED = 1;
@@ -121,7 +121,7 @@ describe("ValidatorFundingPool", async function () {
     await wait(await alicePool.write.fund({ value: targets[0] }));
     await wait(await bobPool.write.fund({ value: targets[1] }));
     await wait(await charliePool.write.fund({ value: targets[2] }));
-    await wait(await pool.write.stake([fixedHex("44", 48), fixedHex("ee", 96), fixedHex("05", 32)]));
+    await wait(await alicePool.write.stake([fixedHex("44", 48), fixedHex("ee", 96), fixedHex("05", 32)]));
 
     return {
       pool,
@@ -149,7 +149,7 @@ describe("ValidatorFundingPool", async function () {
     const signature = fixedHex("aa", 96);
     const depositDataRoot = fixedHex("01", 32);
 
-    await wait(await fixture.pool.write.stake([pubkey, signature, depositDataRoot]));
+    await wait(await fixture.alicePool.write.stake([pubkey, signature, depositDataRoot]));
 
     return {
       ...fixture,
@@ -176,7 +176,7 @@ describe("ValidatorFundingPool", async function () {
   });
 
   it("keeps funding separate from live proceeds and refunds exact contributions on cancel", async function () {
-    const { pool, alicePool, bobPool, alice, deadline } = await networkHelpers.loadFixture(deployFixture);
+    const { pool, alicePool, bobPool, alice, charlie, deadline } = await networkHelpers.loadFixture(deployFixture);
 
     await wait(await alicePool.write.fund({ value: parseEther("5") }));
     assert.equal(await pool.read.claimable([alice.account.address]), 0n);
@@ -189,24 +189,40 @@ describe("ValidatorFundingPool", async function () {
 
     await viem.assertions.revertWithCustomError(bobPool.write.refund(), pool, "NothingToRefund");
 
-    await wait(await alicePool.write.refund());
+    await viem.assertions.revertWithCustomError(
+      alicePool.write.refundTo([zeroAddress]),
+      pool,
+      "InvalidRecipient",
+    );
+
+    const charlieBalanceBefore = await publicClient.getBalance({ address: charlie.account.address });
+    await wait(await alicePool.write.refundTo([charlie.account.address]));
     assert.equal(await pool.read.fundedOf([alice.account.address]), 0n);
     assert.equal(await pool.read.refundedTotal(), parseEther("5"));
+    assert.equal(
+      await publicClient.getBalance({ address: charlie.account.address }),
+      charlieBalanceBefore + parseEther("5"),
+    );
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
   });
 
   it("deposits only after exact full funding and passes pool-owned 0x01 credentials", async function () {
-    const { pool, deposit, alicePool, bobPool } = await networkHelpers.loadFixture(deployFixture);
+    const { pool, deposit, alicePool, bobPool, outsiderPool } = await networkHelpers.loadFixture(deployFixture);
 
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]),
+      alicePool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]),
       pool,
       "NotFullyFunded",
     );
 
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
-    await wait(await pool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]));
+    await viem.assertions.revertWithCustomError(
+      outsiderPool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]),
+      pool,
+      "NotParticipant",
+    );
+    await wait(await alicePool.write.stake([fixedHex("11", 48), fixedHex("aa", 96), fixedHex("01", 32)]));
 
     assert.equal(await pool.read.state(), STATE_STAKED);
     assert.equal(await pool.read.validatorDeposited(), true);
@@ -221,7 +237,8 @@ describe("ValidatorFundingPool", async function () {
   });
 
   it("treats every post-stake ETH inflow as pro-rata pool proceeds", async function () {
-    const { pool, alicePool, bobPool, alice, bob, outsider } = await networkHelpers.loadFixture(stakedFixture);
+    const { pool, alicePool, bobPool, alice, bob, charlie, outsider } =
+      await networkHelpers.loadFixture(stakedFixture);
 
     await wait(await outsider.sendTransaction({ to: pool.address, value: parseEther("6") }));
 
@@ -249,7 +266,8 @@ describe("ValidatorFundingPool", async function () {
   });
 
   it("keeps cumulative entitlements fair when participants claim at different times", async function () {
-    const { pool, alicePool, bobPool, alice, bob, outsider } = await networkHelpers.loadFixture(stakedFixture);
+    const { pool, alicePool, bobPool, alice, bob, charlie, outsider } =
+      await networkHelpers.loadFixture(stakedFixture);
     const participants = [alice.account.address, bob.account.address];
 
     await wait(await outsider.sendTransaction({ to: pool.address, value: parseEther("10") }));
@@ -257,10 +275,17 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.claimable([bob.account.address]), parseEther("6.25"));
     await assertAccountingInvariants(pool.address, participants);
 
+    await viem.assertions.revertWithCustomError(alicePool.write.claimTo([zeroAddress]), pool, "InvalidRecipient");
+
     const grossBeforeClaim = await pool.read.grossPoolProceeds();
-    await wait(await alicePool.write.claim());
+    const charlieBalanceBefore = await publicClient.getBalance({ address: charlie.account.address });
+    await wait(await alicePool.write.claimTo([charlie.account.address]));
     assert.equal(await pool.read.grossPoolProceeds(), grossBeforeClaim);
     assert.equal(await pool.read.claimedOf([alice.account.address]), parseEther("3.75"));
+    assert.equal(
+      await publicClient.getBalance({ address: charlie.account.address }),
+      charlieBalanceBefore + parseEther("3.75"),
+    );
     assert.equal(await pool.read.claimable([bob.account.address]), parseEther("6.25"));
     await assertAccountingInvariants(pool.address, participants);
 
@@ -324,7 +349,7 @@ describe("ValidatorFundingPool", async function () {
 
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
-    await wait(await pool.write.stake([fixedHex("55", 48), fixedHex("ff", 96), fixedHex("06", 32)]));
+    await wait(await alicePool.write.stake([fixedHex("55", 48), fixedHex("ff", 96), fixedHex("06", 32)]));
 
     assert.equal(await pool.read.grossPoolProceeds(), 2n);
     assert.equal(await pool.read.claimable([alice.account.address]), 0n);
@@ -355,10 +380,17 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await publicClient.getBalance({ address: pool.address }), parseEther("5") + 2n);
 
     await viem.assertions.revertWithCustomError(bobPool.write.sweepCanceledSurplus(), pool, "NothingToClaim");
-    await wait(await alicePool.write.sweepCanceledSurplus());
+    await viem.assertions.revertWithCustomError(
+      alicePool.write.sweepCanceledSurplusTo([zeroAddress]),
+      pool,
+      "InvalidRecipient",
+    );
+    const outsiderBalanceBefore = await publicClient.getBalance({ address: outsider.account.address });
+    await wait(await alicePool.write.sweepCanceledSurplusTo([outsider.account.address]));
     assert.equal(await pool.read.canceledSurplusClaimedOf([alice.account.address]), 2n);
     assert.equal(await pool.read.canceledSurplusClaimedTotal(), 2n);
     assert.equal(await pool.read.grossCanceledSurplus(), 2n);
+    assert.equal(await publicClient.getBalance({ address: outsider.account.address }), outsiderBalanceBefore + 2n);
 
     await wait(await alicePool.write.refund());
     assert.equal(await pool.read.refundedTotal(), parseEther("5"));
@@ -409,7 +441,7 @@ describe("ValidatorFundingPool", async function () {
 
     await wait(await rejectingParticipant.write.fundPool([pool.address], { value: ALICE_TARGET }));
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
-    await wait(await pool.write.stake([fixedHex("66", 48), fixedHex("aa", 96), fixedHex("07", 32)]));
+    await wait(await bobPool.write.stake([fixedHex("66", 48), fixedHex("aa", 96), fixedHex("07", 32)]));
     await wait(await outsider.sendTransaction({ to: pool.address, value: parseEther("8") }));
 
     assert.equal(await pool.read.claimable([rejectingParticipant.address]), parseEther("3"));
@@ -424,9 +456,18 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.totalClaimed(), 0n);
     assert.equal(await pool.read.claimable([rejectingParticipant.address]), parseEther("3"));
 
+    const outsiderBalanceBefore = await publicClient.getBalance({ address: outsider.account.address });
+    await wait(await rejectingParticipant.write.claimPoolTo([pool.address, outsider.account.address]));
+    assert.equal(await pool.read.claimedOf([rejectingParticipant.address]), parseEther("3"));
+    assert.equal(await pool.read.totalClaimed(), parseEther("3"));
+    assert.equal(
+      await publicClient.getBalance({ address: outsider.account.address }),
+      outsiderBalanceBefore + parseEther("3"),
+    );
+
     await wait(await bobPool.write.claim());
     assert.equal(await pool.read.claimedOf([bob.account.address]), parseEther("5"));
-    assert.equal(await publicClient.getBalance({ address: pool.address }), parseEther("3"));
+    assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
     await assertAccountingInvariants(pool.address, [rejectingParticipant.address, bob.account.address]);
   });
 
@@ -464,25 +505,25 @@ describe("ValidatorFundingPool", async function () {
   });
 
   it("rejects malformed validator data", async function () {
-    const { pool } = await networkHelpers.loadFixture(fullyFundedFixture);
+    const { pool, alicePool } = await networkHelpers.loadFixture(fullyFundedFixture);
     const pubkey = fixedHex("22", 48);
     const signature = fixedHex("bb", 96);
     const root = fixedHex("02", 32);
 
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([fixedHex("22", 47), signature, root]),
+      alicePool.write.stake([fixedHex("22", 47), signature, root]),
       pool,
       "InvalidPubkey",
     );
 
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([pubkey, fixedHex("bb", 95), root]),
+      alicePool.write.stake([pubkey, fixedHex("bb", 95), root]),
       pool,
       "InvalidSignature",
     );
 
     await viem.assertions.revertWithCustomError(
-      pool.write.stake([pubkey, signature, "0x0000000000000000000000000000000000000000000000000000000000000000"]),
+      alicePool.write.stake([pubkey, signature, "0x0000000000000000000000000000000000000000000000000000000000000000"]),
       pool,
       "InvalidDepositDataRoot",
     );

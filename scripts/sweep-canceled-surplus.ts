@@ -1,6 +1,6 @@
 import { network } from "hardhat";
 
-import { formatWei, readDeployment } from "./lib/common.js";
+import { asAddress, formatWei, readDeployment } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
@@ -15,9 +15,12 @@ async function main() {
   console.log(`Canceled surplus claimable for ${wallet.account.address}: ${formatWei(claimable)}`);
   if (claimable === 0n) return;
 
-  const hash = await pool.write.sweepCanceledSurplus();
+  const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : wallet.account.address;
+  const hash = recipient.toLowerCase() === wallet.account.address.toLowerCase()
+    ? await pool.write.sweepCanceledSurplus()
+    : await pool.write.sweepCanceledSurplusTo([recipient]);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`Swept canceled surplus in block ${receipt.blockNumber}`);
+  console.log(`Swept canceled surplus to ${recipient} in block ${receipt.blockNumber}`);
 }
 
 main().catch((error) => {
