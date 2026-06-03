@@ -30,7 +30,7 @@ contract MockDepositContract {
         require(withdrawal_credentials.length == 32, "bad withdrawal credentials");
         require(signature.length == 96, "bad signature");
         require(deposit_data_root != bytes32(0), "bad root");
-        require(msg.value != 0, "missing value");
+        require(msg.value == 32 ether, "bad value");
 
         _deposits.push(
             DepositRecord({

@@ -10,6 +10,7 @@
     "test": "hardhat test",
     "test:prod": "hardhat test --build-profile production",
     "deploy": "hardhat run scripts/deploy.ts --network rpc",
+    "commit-validator": "hardhat run scripts/commit-validator.ts --network rpc",
     "fund": "hardhat run scripts/fund.ts --network rpc",
     "refund": "hardhat run scripts/refund.ts --network rpc",
     "stake": "hardhat run scripts/stake.ts --network rpc",

@@ -1,12 +1,14 @@
 import { network } from "hardhat";
 
-import { envBigInt, formatWei, readDeployment } from "./lib/common.js";
+import { assertDeploymentChain, envBigInt, formatWei, readDeployment } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  await assertDeploymentChain(publicClient, deployment);
+
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });

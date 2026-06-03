@@ -1,12 +1,13 @@
 import { network } from "hardhat";
 
 import {
+  assertHasCode,
   defaultDepositContract,
-  defaultValidatorDepositGwei,
   envAddress,
-  envNumber,
+  envBigInt,
   parseAddressList,
   parseBigIntList,
+  VALIDATOR_DEPOSIT_GWEI,
   writeDeployment,
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
 } from "./lib/common.js";
@@ -23,18 +24,18 @@ async function main() {
     "WITHDRAWAL_REQUEST_PREDEPLOY",
     DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
   );
-  const validatorDepositGwei = defaultValidatorDepositGwei();
-  const validatorDepositWei = validatorDepositGwei * GWEI;
-  const deadlineSeconds = envNumber("FUNDING_DEADLINE_SECONDS", 86_400);
-  const latestBlock = await publicClient.getBlock();
-  const fundingDeadline = latestBlock.timestamp + BigInt(deadlineSeconds);
+  await assertHasCode(publicClient, depositContract, "DEPOSIT_CONTRACT");
+  await assertHasCode(publicClient, withdrawalRequestPredeploy, "WITHDRAWAL_REQUEST_PREDEPLOY");
+
+  const operator = envAddress("OPERATOR", deployer.account.address);
+  const fundingWindowDuration = envBigInt("FUNDING_WINDOW_SECONDS", 86_400n);
 
   const participants = process.env.PARTICIPANTS
     ? parseAddressList(process.env.PARTICIPANTS)
     : [deployer.account.address];
   const fundingTargetsGwei = process.env.FUNDING_TARGETS_GWEI
     ? parseBigIntList(process.env.FUNDING_TARGETS_GWEI)
-    : [validatorDepositGwei];
+    : [VALIDATOR_DEPOSIT_GWEI];
   if (participants.length !== fundingTargetsGwei.length) {
     throw new Error("PARTICIPANTS and FUNDING_TARGETS_GWEI length mismatch");
   }
@@ -43,8 +44,8 @@ async function main() {
   const pool = await viem.deployContract("ValidatorFundingPool", [
     depositContract,
     withdrawalRequestPredeploy,
-    validatorDepositWei,
-    fundingDeadline,
+    operator,
+    fundingWindowDuration,
     participants,
     fundingTargetsWei,
   ]);
@@ -53,6 +54,7 @@ async function main() {
   const withdrawalCredentials = await pool.read.withdrawalCredentials();
 
   console.log("Pool deployed:", pool.address);
+  console.log("Operator:", operator);
   console.log("Withdrawal credentials:", withdrawalCredentials);
 
   writeDeployment({
@@ -60,8 +62,8 @@ async function main() {
     pool: pool.address,
     depositContract,
     withdrawalRequestPredeploy,
-    validatorDepositWei: validatorDepositWei.toString(),
-    fundingDeadline: fundingDeadline.toString(),
+    operator,
+    fundingWindowDuration: fundingWindowDuration.toString(),
     withdrawalCredentials,
     participants,
     fundingTargetsWei: fundingTargetsWei.map((value) => value.toString()),
