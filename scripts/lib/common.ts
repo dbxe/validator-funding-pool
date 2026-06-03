@@ -214,7 +214,7 @@ function normalizeHexLength(value: string, bytes: number, field: string): Hex {
   return hex;
 }
 
-function computeDepositDataRoot(pubkey: Hex, withdrawalCredentials: Hex, amountGwei: bigint, signature: Hex): Hex {
+export function computeDepositDataRoot(pubkey: Hex, withdrawalCredentials: Hex, amountGwei: bigint, signature: Hex): Hex {
   const pubkeyRoot = sha256(Buffer.concat([fromHex(pubkey), Buffer.alloc(16)]));
   const signatureBytes = fromHex(signature);
   const signatureRoot = sha256(
