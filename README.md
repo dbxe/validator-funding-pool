@@ -88,16 +88,16 @@ Useful deployment variables:
 - `EXPECTED_PUBKEY`: optional pubkey check for `commit-validator`.
 - `DEPOSIT_NETWORK_NAME` / `DEPOSIT_FORK_VERSION`: optional deposit-file metadata checks.
 - `RECIPIENT`: optional nonzero recipient for `claim`, `refund`, and `sweep-canceled-surplus`.
-- `BEACON_NODE_URL`: optional beacon REST URL for request-exit preflight checks.
+- `BEACON_NODE_URL`: optional beacon REST URL for validator pubkey absence checks before commit/stake and validator status checks before request-exit.
 
 ## Operational Flow
 
 1. Deploy the pool with participants, funding targets, operator, and system contract addresses.
 2. Read the pool address and withdrawal credentials.
 3. Generate deposit data with regular `0x01` withdrawal credentials pointing to the pool address.
-4. Run `commit-validator`; it checks the amount, credentials, hex sizes, optional metadata, and recomputes the deposit data root.
+4. Run `commit-validator`; it checks the amount, credentials, hex sizes, optional metadata, recomputes the deposit data root, and fails if `BEACON_NODE_URL` shows the pubkey already in beacon state.
 5. Participants inspect the committed pubkey, root, signature, and withdrawal credentials, then fund.
-6. The operator calls `stake()` after exact `32 ETH` funding.
+6. The operator calls `stake()` after exact `32 ETH` funding; with `BEACON_NODE_URL` set, the script checks the pubkey is still absent before submitting the deposit.
 7. Any participant can request an EIP-7002 full exit. Exit requests are attempts; retries are allowed because CL-side processing can ignore an accepted request.
 
 The contract cannot practically verify BLS proof-of-possession or whether the pubkey was previously used. Those checks belong in the operator runbook before funding.

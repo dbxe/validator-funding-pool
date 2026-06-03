@@ -1,6 +1,6 @@
 import { network } from "hardhat";
 
-import { assertDeploymentChain, readDeployment } from "./lib/common.js";
+import { assertBeaconValidatorAbsent, assertDeploymentChain, readDeployment } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
@@ -18,6 +18,7 @@ async function main() {
   });
   const pubkey = await pool.read.validatorPubkey();
   const depositDataRoot = await pool.read.validatorDepositDataRoot();
+  await assertBeaconValidatorAbsent(pubkey, "stake");
 
   console.log(`Submitting committed validator deposit through ${deployment.pool}`);
   console.log(`Validator pubkey: ${pubkey}`);

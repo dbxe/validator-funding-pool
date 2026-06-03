@@ -1,6 +1,7 @@
 import { network } from "hardhat";
 
 import {
+  assertBeaconValidatorAbsent,
   assertDeploymentChain,
   asHex,
   readDeployment,
@@ -26,6 +27,8 @@ async function main() {
   if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
     throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);
   }
+
+  await assertBeaconValidatorAbsent(validated.pubkey, "commit-validator");
 
   console.log(`Committing validator ${validated.pubkey} to ${deployment.pool}`);
   const hash = await pool.write.commitValidator([

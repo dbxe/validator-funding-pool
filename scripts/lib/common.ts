@@ -33,6 +33,16 @@ export interface DeploymentRecord {
   fundingTargetsWei: string[];
 }
 
+interface BeaconValidatorResponse {
+  data: {
+    status: string;
+    validator: {
+      pubkey: string;
+      withdrawal_credentials: string;
+    };
+  };
+}
+
 export function asHex(value: string): Hex {
   return (value.startsWith("0x") ? value : `0x${value}`) as Hex;
 }
@@ -119,6 +129,31 @@ export async function assertHasCode(
   if (code === undefined || code === "0x") {
     throw new Error(`${label} has no code at ${address}`);
   }
+}
+
+export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
+  const beaconNodeUrl = process.env.BEACON_NODE_URL;
+  if (!beaconNodeUrl) {
+    console.log(`Skipping ${label} beacon preflight: BEACON_NODE_URL not set`);
+    return;
+  }
+
+  const url = new URL(`/eth/v1/beacon/states/head/validators/${pubkey}`, beaconNodeUrl);
+  const response = await fetch(url);
+  if (response.status === 404) {
+    console.log(`${label} beacon preflight passed: validator pubkey is not in head state`);
+    return;
+  }
+  if (!response.ok) {
+    throw new Error(`${label} beacon validator lookup failed: ${response.status} ${response.statusText}`);
+  }
+
+  const body = (await response.json()) as BeaconValidatorResponse;
+  throw new Error(
+    `${label} beacon preflight failed: validator ${pubkey} already exists with status ${
+      body.data.status
+    } and withdrawal_credentials ${body.data.validator.withdrawal_credentials}`,
+  );
 }
 
 export function readSingleDepositData(file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE): DepositData {

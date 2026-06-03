@@ -23,6 +23,7 @@
 - Replaced the one-shot exit latch with retryable exit-attempt accounting. EIP-7002 requests are attempts because accepted EL requests can still be ignored by CL-side processing.
 - Rejected `address(0)` and `address(this)` for user-selected payout recipients.
 - Added `commit-validator` script and deployment chain checks across runtime scripts. The commit script validates amount, withdrawal credentials, hex sizes, optional metadata, and recomputes the deposit data root.
+- Added optional beacon REST preflight checks before commit/stake so scripts fail if the validator pubkey is already visible in beacon state.
 
 ## Design Decisions
 
