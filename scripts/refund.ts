@@ -13,7 +13,7 @@ async function main() {
     client: { wallet },
   });
 
-  const refundable = await pool.read.fundedOf([wallet.account.address]);
+  const refundable = await pool.read.fundedWeiOf([wallet.account.address]);
   console.log(`Refundable for ${wallet.account.address}: ${formatWei(refundable)}`);
   if (refundable === 0n) return;
 

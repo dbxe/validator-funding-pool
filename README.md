@@ -56,7 +56,7 @@ The contract only enforces custody and pro-rata distribution of ETH that reaches
 
 - Funding targets must sum exactly to `32 ETH`.
 - A participant's funding cap is also their proceeds weight.
-- Claims use cumulative entitlement: `grossPoolProceeds() = address(pool).balance + totalClaimed`.
+- Claims use cumulative entitlement: `grossPoolProceeds() = address(pool).balance + totalClaimedWei()`.
 - Claim timing does not change anyone's cumulative entitlement.
 - Integer division can leave tiny rounding dust. At a fixed final gross amount, dust is bounded below the participant count in wei. Later proceeds can make prior dust claimable.
 - User-selected payout recipients for `claimTo`, `refundTo`, and `sweepCanceledSurplusTo` cannot be `address(0)` or the pool itself.

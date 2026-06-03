@@ -44,20 +44,20 @@ describe("ValidatorFundingPool", async function () {
   async function assertAccountingInvariants(poolAddress: Address, participants: Address[]) {
     const pool = await viem.getContractAt("ValidatorFundingPool", poolAddress);
     const balance = await publicClient.getBalance({ address: poolAddress });
-    const totalClaimed = await pool.read.totalClaimed();
+    const totalClaimedWei = await pool.read.totalClaimedWei();
     const gross = await pool.read.grossPoolProceeds();
 
-    assert.equal(gross, balance + totalClaimed);
-    assert.ok(totalClaimed <= gross);
+    assert.equal(gross, balance + totalClaimedWei);
+    assert.ok(totalClaimedWei <= gross);
 
     let sumClaimed = 0n;
     let sumClaimable = 0n;
     for (const participant of participants) {
-      sumClaimed += await pool.read.claimedOf([participant]);
+      sumClaimed += await pool.read.claimedWeiOf([participant]);
       sumClaimable += await pool.read.claimable([participant]);
     }
 
-    assert.equal(sumClaimed, totalClaimed);
+    assert.equal(sumClaimed, totalClaimedWei);
     assert.ok(sumClaimable <= balance);
   }
 
@@ -129,11 +129,11 @@ describe("ValidatorFundingPool", async function () {
       (await pool.read.operator()).toLowerCase(),
       (await viem.getWalletClients())[0].account.address.toLowerCase(),
     );
-    assert.equal(await pool.read.totalFundingTarget(), VALIDATOR_DEPOSIT);
+    assert.equal(await pool.read.fundingTargetWei(), VALIDATOR_DEPOSIT);
     assert.equal(await pool.read.VALIDATOR_DEPOSIT_WEI(), VALIDATOR_DEPOSIT);
     assert.equal(await pool.read.fundingDeadline(), 0n);
-    assert.equal(await pool.read.fundingTargetOf([alice.account.address]), ALICE_TARGET);
-    assert.equal(await pool.read.fundingTargetOf([bob.account.address]), BOB_TARGET);
+    assert.equal(await pool.read.fundingTargetWeiOf([alice.account.address]), ALICE_TARGET);
+    assert.equal(await pool.read.fundingTargetWeiOf([bob.account.address]), BOB_TARGET);
     assert.equal((await pool.read.withdrawalCredentials()).toLowerCase(), expectedWithdrawalCredentials(pool.address));
 
     await viem.assertions.revertWithCustomError(
@@ -212,10 +212,10 @@ describe("ValidatorFundingPool", async function () {
 
     assert.equal(await pool.read.state(), STATE_FUNDING);
     assert.equal(deadline, committedAt + FUNDING_WINDOW);
-    assert.equal(await pool.read.validatorPubkey(), pubkey);
-    assert.equal(await pool.read.validatorSignature(), signature);
-    assert.equal(await pool.read.validatorDepositDataRoot(), depositDataRoot);
-    assert.equal(await pool.read.validatorPubkeyHash(), keccak256(pubkey));
+    assert.equal(await pool.read.committedPubkey(), pubkey);
+    assert.equal(await pool.read.committedSignature(), signature);
+    assert.equal(await pool.read.committedDepositDataRoot(), depositDataRoot);
+    assert.equal(await pool.read.committedPubkeyHash(), keccak256(pubkey));
 
     await viem.assertions.revertWithCustomError(
       pool.write.commitValidator([fixedHex("22", 48), signature, fixedHex("02", 32)]),
@@ -274,8 +274,8 @@ describe("ValidatorFundingPool", async function () {
 
     const charlieBalanceBefore = await publicClient.getBalance({ address: charlie.account.address });
     await wait(await alicePool.write.refundTo([charlie.account.address]));
-    assert.equal(await pool.read.fundedOf([alice.account.address]), 0n);
-    assert.equal(await pool.read.refundedTotal(), parseEther("5"));
+    assert.equal(await pool.read.fundedWeiOf([alice.account.address]), 0n);
+    assert.equal(await pool.read.totalRefundedWei(), parseEther("5"));
     assert.equal(
       await publicClient.getBalance({ address: charlie.account.address }),
       charlieBalanceBefore + parseEther("5"),
@@ -287,7 +287,7 @@ describe("ValidatorFundingPool", async function () {
     const fundingFixture = await networkHelpers.loadFixture(committedFixture);
     await networkHelpers.time.setNextBlockTimestamp(fundingFixture.deadline);
     await wait(await fundingFixture.alicePool.write.fund({ value: 1n, gas: 100_000n }));
-    assert.equal(await fundingFixture.pool.read.fundedOf([fundingFixture.alice.account.address]), 1n);
+    assert.equal(await fundingFixture.pool.read.fundedWeiOf([fundingFixture.alice.account.address]), 1n);
 
     const cancelAtDeadlineFixture = await networkHelpers.loadFixture(committedFixture);
     await networkHelpers.time.setNextBlockTimestamp(cancelAtDeadlineFixture.deadline);
@@ -315,15 +315,15 @@ describe("ValidatorFundingPool", async function () {
     await viem.assertions.revertWithCustomError(alicePool.write.stake(), pool, "NotOperator");
 
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
-    await viem.assertions.revertWithCustomError(pool.write.stake(), pool, "NotFullyFunded");
+    await viem.assertions.revertWithCustomError(pool.write.stake(), pool, "FundingIncomplete");
 
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
     await viem.assertions.revertWithCustomError(outsiderPool.write.stake(), pool, "NotOperator");
     await wait(await pool.write.stake());
 
     assert.equal(await pool.read.state(), STATE_STAKED);
-    assert.equal(await pool.read.validatorDeposited(), true);
-    assert.equal(await pool.read.validatorPubkey(), pubkey);
+    assert.equal(await pool.read.validatorDepositSubmitted(), true);
+    assert.equal(await pool.read.committedPubkey(), pubkey);
     assert.equal(await deposit.read.depositCount(), 1n);
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
 
@@ -345,8 +345,8 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.claimable([bob.account.address]), parseEther("3.75"));
 
     await wait(await alicePool.write.claim());
-    assert.equal(await pool.read.claimedOf([alice.account.address]), parseEther("2.25"));
-    assert.equal(await pool.read.totalClaimed(), parseEther("2.25"));
+    assert.equal(await pool.read.claimedWeiOf([alice.account.address]), parseEther("2.25"));
+    assert.equal(await pool.read.totalClaimedWei(), parseEther("2.25"));
 
     await wait(await outsider.sendTransaction({ to: pool.address, value: VALIDATOR_DEPOSIT }));
 
@@ -357,8 +357,8 @@ describe("ValidatorFundingPool", async function () {
     await wait(await alicePool.write.claim());
     await wait(await bobPool.write.claim());
 
-    assert.equal(await pool.read.claimedOf([alice.account.address]), parseEther("14.25"));
-    assert.equal(await pool.read.claimedOf([bob.account.address]), parseEther("23.75"));
+    assert.equal(await pool.read.claimedWeiOf([alice.account.address]), parseEther("14.25"));
+    assert.equal(await pool.read.claimedWeiOf([bob.account.address]), parseEther("23.75"));
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
   });
 
@@ -379,7 +379,7 @@ describe("ValidatorFundingPool", async function () {
     const charlieBalanceBefore = await publicClient.getBalance({ address: charlie.account.address });
     await wait(await alicePool.write.claimTo([charlie.account.address]));
     assert.equal(await pool.read.grossPoolProceeds(), grossBeforeClaim);
-    assert.equal(await pool.read.claimedOf([alice.account.address]), parseEther("3.75"));
+    assert.equal(await pool.read.claimedWeiOf([alice.account.address]), parseEther("3.75"));
     assert.equal(
       await publicClient.getBalance({ address: charlie.account.address }),
       charlieBalanceBefore + parseEther("3.75"),
@@ -394,12 +394,12 @@ describe("ValidatorFundingPool", async function () {
 
     await wait(await bobPool.write.claim());
     assert.equal(await pool.read.grossPoolProceeds(), parseEther("24"));
-    assert.equal(await pool.read.claimedOf([bob.account.address]), parseEther("15"));
+    assert.equal(await pool.read.claimedWeiOf([bob.account.address]), parseEther("15"));
     assert.equal(await pool.read.claimable([alice.account.address]), parseEther("5.25"));
 
     await wait(await alicePool.write.claim());
-    assert.equal(await pool.read.claimedOf([alice.account.address]), parseEther("9"));
-    assert.equal(await pool.read.claimedOf([bob.account.address]), parseEther("15"));
+    assert.equal(await pool.read.claimedWeiOf([alice.account.address]), parseEther("9"));
+    assert.equal(await pool.read.claimedWeiOf([bob.account.address]), parseEther("15"));
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
     await assertAccountingInvariants(pool.address, participants);
   });
@@ -424,7 +424,7 @@ describe("ValidatorFundingPool", async function () {
     await wait(await alicePool.write.claim());
     await wait(await bobPool.write.claim());
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
-    assert.equal(await pool.read.totalClaimed(), 32n);
+    assert.equal(await pool.read.totalClaimedWei(), 32n);
     await assertAccountingInvariants(pool.address, participants);
   });
 
@@ -466,7 +466,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.grossCanceledSurplus(), 2n);
     assert.equal(await pool.read.canceledSurplusClaimable([alice.account.address]), 2n);
     assert.equal(await pool.read.canceledSurplusClaimable([bob.account.address]), 0n);
-    assert.equal(await pool.read.refundedTotal(), 0n);
+    assert.equal(await pool.read.totalRefundedWei(), 0n);
     assert.equal(await publicClient.getBalance({ address: pool.address }), parseEther("5") + 2n);
 
     await viem.assertions.revertWithCustomError(bobPool.write.sweepCanceledSurplus(), pool, "NothingToClaim");
@@ -482,13 +482,13 @@ describe("ValidatorFundingPool", async function () {
     );
     const outsiderBalanceBefore = await publicClient.getBalance({ address: outsider.account.address });
     await wait(await alicePool.write.sweepCanceledSurplusTo([outsider.account.address]));
-    assert.equal(await pool.read.canceledSurplusClaimedOf([alice.account.address]), 2n);
-    assert.equal(await pool.read.canceledSurplusClaimedTotal(), 2n);
+    assert.equal(await pool.read.canceledSurplusClaimedWeiOf([alice.account.address]), 2n);
+    assert.equal(await pool.read.totalCanceledSurplusClaimedWei(), 2n);
     assert.equal(await pool.read.grossCanceledSurplus(), 2n);
     assert.equal(await publicClient.getBalance({ address: outsider.account.address }), outsiderBalanceBefore + 2n);
 
     await wait(await alicePool.write.refund());
-    assert.equal(await pool.read.refundedTotal(), parseEther("5"));
+    assert.equal(await pool.read.totalRefundedWei(), parseEther("5"));
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
   });
 
@@ -503,15 +503,15 @@ describe("ValidatorFundingPool", async function () {
     await wait(await outsider.sendTransaction({ to: forceSend.address, value: 32n }));
     await wait(await forceSend.write.forceSend([pool.address]));
 
-    assert.equal(await pool.read.refundedTotal(), 0n);
+    assert.equal(await pool.read.totalRefundedWei(), 0n);
     assert.equal(await pool.read.grossCanceledSurplus(), 32n);
     assert.equal(await pool.read.canceledSurplusClaimable([alice.account.address]), 12n);
     assert.equal(await pool.read.canceledSurplusClaimable([bob.account.address]), 20n);
 
     await wait(await alicePool.write.sweepCanceledSurplus());
     await wait(await bobPool.write.sweepCanceledSurplus());
-    assert.equal(await pool.read.canceledSurplusClaimedOf([alice.account.address]), 12n);
-    assert.equal(await pool.read.canceledSurplusClaimedOf([bob.account.address]), 20n);
+    assert.equal(await pool.read.canceledSurplusClaimedWeiOf([alice.account.address]), 12n);
+    assert.equal(await pool.read.canceledSurplusClaimedWeiOf([bob.account.address]), 20n);
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
   });
 
@@ -544,23 +544,23 @@ describe("ValidatorFundingPool", async function () {
     await viem.assertions.revertWithCustomError(
       rejectingParticipant.write.claimPool([pool.address]),
       pool,
-      "EthTransferFailed",
+      "EthPayoutFailed",
     );
-    assert.equal(await pool.read.claimedOf([rejectingParticipant.address]), 0n);
-    assert.equal(await pool.read.totalClaimed(), 0n);
+    assert.equal(await pool.read.claimedWeiOf([rejectingParticipant.address]), 0n);
+    assert.equal(await pool.read.totalClaimedWei(), 0n);
     assert.equal(await pool.read.claimable([rejectingParticipant.address]), parseEther("3"));
 
     const outsiderBalanceBefore = await publicClient.getBalance({ address: outsider.account.address });
     await wait(await rejectingParticipant.write.claimPoolTo([pool.address, outsider.account.address]));
-    assert.equal(await pool.read.claimedOf([rejectingParticipant.address]), parseEther("3"));
-    assert.equal(await pool.read.totalClaimed(), parseEther("3"));
+    assert.equal(await pool.read.claimedWeiOf([rejectingParticipant.address]), parseEther("3"));
+    assert.equal(await pool.read.totalClaimedWei(), parseEther("3"));
     assert.equal(
       await publicClient.getBalance({ address: outsider.account.address }),
       outsiderBalanceBefore + parseEther("3"),
     );
 
     await wait(await bobPool.write.claim());
-    assert.equal(await pool.read.claimedOf([bob.account.address]), parseEther("5"));
+    assert.equal(await pool.read.claimedWeiOf([bob.account.address]), parseEther("5"));
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
     await assertAccountingInvariants(pool.address, [rejectingParticipant.address, bob.account.address]);
   });
@@ -588,7 +588,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await withdrawal.read.lastPubkey(), pubkey);
     assert.equal(await withdrawal.read.lastAmountData(), "0x0000000000000000");
     assert.equal(await withdrawal.read.lastValue(), EXIT_FEE);
-    assert.equal(await pool.read.exitRequestCount(), 1n);
+    assert.equal(await pool.read.exitRequestAttemptCount(), 1n);
     assert.equal(await pool.read.exitRequested(), true);
     assert.equal(await publicClient.getBalance({ address: withdrawal.address }), EXIT_FEE);
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
@@ -598,8 +598,8 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await withdrawal.read.requestCount(), 2n);
     assert.equal((await withdrawal.read.lastSourceAddress()).toLowerCase(), pool.address.toLowerCase());
     assert.equal(await withdrawal.read.lastPubkey(), pubkey);
-    assert.equal(await pool.read.exitRequestCount(), 2n);
-    assert.equal(await pool.read.lastExitRequestFee(), EXIT_FEE);
+    assert.equal(await pool.read.exitRequestAttemptCount(), 2n);
+    assert.equal(await pool.read.lastExitRequestFeePaid(), EXIT_FEE);
     assert.equal(await publicClient.getBalance({ address: withdrawal.address }), EXIT_FEE * 2n);
   });
 });

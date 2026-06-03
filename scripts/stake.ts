@@ -16,8 +16,8 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const pubkey = await pool.read.validatorPubkey();
-  const depositDataRoot = await pool.read.validatorDepositDataRoot();
+  const pubkey = await pool.read.committedPubkey();
+  const depositDataRoot = await pool.read.committedDepositDataRoot();
   await assertBeaconValidatorAbsent(pubkey, "stake");
 
   console.log(`Submitting committed validator deposit through ${deployment.pool}`);

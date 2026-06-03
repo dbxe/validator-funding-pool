@@ -13,8 +13,8 @@ async function main() {
     client: { wallet },
   });
 
-  const target = await pool.read.fundingTargetOf([wallet.account.address]);
-  const funded = await pool.read.fundedOf([wallet.account.address]);
+  const target = await pool.read.fundingTargetWeiOf([wallet.account.address]);
+  const funded = await pool.read.fundedWeiOf([wallet.account.address]);
   const remaining = target - funded;
   if (remaining <= 0n) {
     throw new Error(`No remaining funding cap for ${wallet.account.address}`);

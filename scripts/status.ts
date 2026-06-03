@@ -22,22 +22,22 @@ async function main() {
   console.log(`Balance: ${formatWei(balance)}`);
   console.log(`Gross proceeds: ${formatWei(await pool.read.grossPoolProceeds())}`);
   console.log(`Gross canceled surplus: ${formatWei(await pool.read.grossCanceledSurplus())}`);
-  console.log(`Total funded: ${formatWei(await pool.read.totalFunded())}`);
-  console.log(`Total claimed: ${formatWei(await pool.read.totalClaimed())}`);
-  console.log(`Validator deposited: ${await pool.read.validatorDeposited()}`);
-  console.log(`Validator pubkey: ${await pool.read.validatorPubkey()}`);
-  console.log(`Validator pubkey hash: ${await pool.read.validatorPubkeyHash()}`);
-  console.log(`Deposit data root: ${await pool.read.validatorDepositDataRoot()}`);
-  console.log(`Exit request count: ${await pool.read.exitRequestCount()}`);
-  console.log(`Last exit request fee: ${formatWei(await pool.read.lastExitRequestFee())}`);
+  console.log(`Total funded: ${formatWei(await pool.read.totalFundedWei())}`);
+  console.log(`Total claimed: ${formatWei(await pool.read.totalClaimedWei())}`);
+  console.log(`Validator deposit submitted: ${await pool.read.validatorDepositSubmitted()}`);
+  console.log(`Validator pubkey: ${await pool.read.committedPubkey()}`);
+  console.log(`Validator pubkey hash: ${await pool.read.committedPubkeyHash()}`);
+  console.log(`Deposit data root: ${await pool.read.committedDepositDataRoot()}`);
+  console.log(`Exit request count: ${await pool.read.exitRequestAttemptCount()}`);
+  console.log(`Last exit request fee: ${formatWei(await pool.read.lastExitRequestFeePaid())}`);
 
   for (let i = 0; i < participantCount; ++i) {
     const participant = await pool.read.participantAt([BigInt(i)]);
     console.log(
       `Participant ${i}: ${participant} target=${formatWei(
-        await pool.read.fundingTargetOf([participant]),
-      )} funded=${formatWei(await pool.read.fundedOf([participant]))} claimed=${formatWei(
-        await pool.read.claimedOf([participant]),
+        await pool.read.fundingTargetWeiOf([participant]),
+      )} funded=${formatWei(await pool.read.fundedWeiOf([participant]))} claimed=${formatWei(
+        await pool.read.claimedWeiOf([participant]),
       )} claimable=${formatWei(await pool.read.claimable([participant]))} canceledSurplusClaimable=${formatWei(
         await pool.read.canceledSurplusClaimable([participant]),
       )}`,

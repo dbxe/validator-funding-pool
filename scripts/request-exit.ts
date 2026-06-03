@@ -23,7 +23,7 @@ async function main() {
     client: { wallet },
   });
 
-  const pubkey = await pool.read.validatorPubkey();
+  const pubkey = await pool.read.committedPubkey();
   await assertBeaconExitPreflight(pubkey, deployment.withdrawalCredentials);
 
   const fee = await pool.read.currentExitRequestFee();
