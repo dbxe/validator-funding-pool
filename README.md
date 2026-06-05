@@ -63,6 +63,19 @@ The contract only enforces custody and pro-rata distribution of ETH that reaches
 
 Every post-stake wei held by the pool is treated as pool proceeds. The contract intentionally does not distinguish principal from rewards because consensus exit timing and CL-side exits make that harder to reason about.
 
+## Event Reconciliation
+
+Events are reconciliation aids, not the source of entitlement accounting.
+
+- `EthReceivedViaCall(sender, amount)` is emitted only when ETH reaches `receive()` while the pool is staked.
+- `AccountingSnapshot(...)` is emitted after selected accounting actions and records the post-action observed state.
+- Snapshots are emitted after validator commitment, successful funding, staking, callable staked ETH receipt, cancellation, claims, refunds, and canceled-surplus sweeps.
+- Snapshot events include balance, funded totals, claimed totals, canceled-surplus claimed totals, `grossPoolProceeds()`, and `grossCanceledSurplus()`.
+- Silent balance increases can occur between snapshots. Consensus withdrawals, priority-fee / coinbase balance increases, and forced ETH can increase the pool balance without executing contract code and without emitting a pool event.
+- A later snapshot-bearing transaction reveals those silent balance changes through the observed balance and gross accounting values.
+
+Authoritative entitlement accounting remains balance-based. Events are useful for operations, audit trails, and reconciliation, but they are not a complete proceeds ledger or source-of-funds classifier.
+
 ## Forced ETH
 
 Ordinary ETH transfers are accepted only during `Funding` and `Staked`. Forced ETH can still arrive through `selfdestruct`.
@@ -76,7 +89,7 @@ There is no sender rescue path for forced ETH.
 
 ## Consensus Caveats
 
-- Consensus withdrawals to `0x01` credentials increase the pool balance without calling `receive()` or emitting `PoolProceedsReceived`.
+- Consensus withdrawals to `0x01` credentials increase the pool balance without calling `receive()` or emitting `EthReceivedViaCall`.
 - The deposit contract checks the deposit data root but does not verify BLS proof-of-possession. The script recomputes the deposit root and includes a Lodestar-cross-checked fixture test, but BLS validity remains an off-chain responsibility.
 - Committed deposit data is public before `stake()`. A third party could copy it and submit their own 32 ETH deposit first, but the withdrawal credentials still point to the pool. This is operational griefing, not theft.
 - Beacon preflight checks only observe current beacon state. They cannot detect a deposit submitted to the EL deposit contract but not yet processed by CL.

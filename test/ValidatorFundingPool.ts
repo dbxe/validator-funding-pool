@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { network } from "hardhat";
-import { keccak256, parseEther, zeroAddress, type Address, type Hex } from "viem";
+import { keccak256, parseEther, parseEventLogs, zeroAddress, type Address, type Hex } from "viem";
 
 const STATE_UNINITIALIZED = 0;
 const STATE_FUNDING = 1;
@@ -31,8 +31,85 @@ describe("ValidatorFundingPool", async function () {
   const { viem, networkHelpers } = await network.create();
   const publicClient = await viem.getPublicClient();
 
+  async function waitForReceipt(hash: Hex) {
+    return publicClient.waitForTransactionReceipt({ hash });
+  }
+
   async function wait(hash: Hex) {
-    await publicClient.waitForTransactionReceipt({ hash });
+    await waitForReceipt(hash);
+  }
+
+  function parsePoolEvents(pool: any, receipt: any) {
+    const poolLogs = receipt.logs.filter((log: { address: Address }) => {
+      return log.address.toLowerCase() === pool.address.toLowerCase();
+    });
+    return parseEventLogs({ abi: pool.abi, logs: poolLogs, strict: false }) as unknown as Array<{
+      eventName: string;
+      args: Record<string, unknown>;
+    }>;
+  }
+
+  function numericArg(args: Record<string, unknown>, name: string) {
+    const value = args[name];
+    if (typeof value === "number") return value;
+    if (typeof value === "bigint") return Number(value);
+    throw new Error(`Expected numeric event arg ${name}`);
+  }
+
+  function bigintArg(args: Record<string, unknown>, name: string) {
+    const value = args[name];
+    if (typeof value !== "bigint") throw new Error(`Expected bigint event arg ${name}`);
+    return value;
+  }
+
+  async function assertAccountingSnapshot(pool: any, receipt: any, expectedEventNames: string[]) {
+    const events = parsePoolEvents(pool, receipt);
+    assert.deepEqual(
+      events.map((event) => event.eventName),
+      expectedEventNames,
+    );
+
+    const snapshot = events.find((event) => event.eventName === "AccountingSnapshot");
+    assert.ok(snapshot, "AccountingSnapshot event missing");
+    const args = snapshot.args;
+
+    const balance = await publicClient.getBalance({ address: pool.address });
+    const totalFundedWei = await pool.read.totalFundedWei();
+    const totalClaimedWei = await pool.read.totalClaimedWei();
+    const totalRefundedWei = await pool.read.totalRefundedWei();
+    const totalCanceledSurplusClaimedWei = await pool.read.totalCanceledSurplusClaimedWei();
+    const grossPoolProceeds = await pool.read.grossPoolProceeds();
+    const grossCanceledSurplus = await pool.read.grossCanceledSurplus();
+    const state = Number(await pool.read.state());
+
+    assert.equal(numericArg(args, "state"), state);
+    assert.equal(bigintArg(args, "balance"), balance);
+    assert.equal(bigintArg(args, "totalFundedWei"), totalFundedWei);
+    assert.equal(bigintArg(args, "totalClaimedWei"), totalClaimedWei);
+    assert.equal(bigintArg(args, "totalRefundedWei"), totalRefundedWei);
+    assert.equal(bigintArg(args, "totalCanceledSurplusClaimedWei"), totalCanceledSurplusClaimedWei);
+    assert.equal(bigintArg(args, "grossPoolProceeds"), grossPoolProceeds);
+    assert.equal(bigintArg(args, "grossCanceledSurplus"), grossCanceledSurplus);
+
+    assert.equal(grossPoolProceeds, balance + totalClaimedWei);
+    const expectedCanceledSurplus =
+      state === STATE_CANCELED ? balance + totalCanceledSurplusClaimedWei - (totalFundedWei - totalRefundedWei) : 0n;
+    assert.equal(grossCanceledSurplus, expectedCanceledSurplus);
+
+    return {
+      state,
+      balance,
+      totalFundedWei,
+      totalClaimedWei,
+      totalRefundedWei,
+      totalCanceledSurplusClaimedWei,
+      grossPoolProceeds,
+      grossCanceledSurplus,
+    };
+  }
+
+  function assertNoPoolEvents(pool: any, receipt: any) {
+    assert.deepEqual(parsePoolEvents(pool, receipt), []);
   }
 
   async function poolAs(poolAddress: Address, wallet: Awaited<ReturnType<typeof viem.getWalletClients>>[number]) {
@@ -253,6 +330,132 @@ describe("ValidatorFundingPool", async function () {
       pool,
       "InvalidDepositDataRoot",
     );
+  });
+
+  it("snapshots validator commitment, funding, and staking boundaries", async function () {
+    const { pool, alicePool, bobPool, outsider } = await networkHelpers.loadFixture(deployFixture);
+
+    const commitReceipt = await waitForReceipt(
+      await pool.write.commitValidator([DEFAULT_PUBKEY, DEFAULT_SIGNATURE, DEFAULT_DEPOSIT_ROOT]),
+    );
+    const commitSnapshot = await assertAccountingSnapshot(pool, commitReceipt, [
+      "ValidatorCommitted",
+      "AccountingSnapshot",
+    ]);
+    assert.equal(commitSnapshot.state, STATE_FUNDING);
+    assert.equal(commitSnapshot.balance, 0n);
+    assert.equal(commitSnapshot.totalFundedWei, 0n);
+    assert.equal(commitSnapshot.grossPoolProceeds, 0n);
+
+    const forceSend = await viem.deployContract("ForceSend");
+    await wait(await outsider.sendTransaction({ to: forceSend.address, value: 2n }));
+    const forcedReceipt = await waitForReceipt(await forceSend.write.forceSend([pool.address]));
+    assertNoPoolEvents(pool, forcedReceipt);
+
+    const firstFundingReceipt = await waitForReceipt(await alicePool.write.fund({ value: parseEther("5") }));
+    const firstFundingSnapshot = await assertAccountingSnapshot(pool, firstFundingReceipt, [
+      "ParticipantFunded",
+      "AccountingSnapshot",
+    ]);
+    assert.equal(firstFundingSnapshot.state, STATE_FUNDING);
+    assert.equal(firstFundingSnapshot.balance, parseEther("5") + 2n);
+    assert.equal(firstFundingSnapshot.totalFundedWei, parseEther("5"));
+    assert.equal(firstFundingSnapshot.grossPoolProceeds, parseEther("5") + 2n);
+
+    await wait(await alicePool.write.fund({ value: ALICE_TARGET - parseEther("5") }));
+    await wait(await bobPool.write.fund({ value: BOB_TARGET }));
+
+    const stakeReceipt = await waitForReceipt(await pool.write.stake());
+    const stakeSnapshot = await assertAccountingSnapshot(pool, stakeReceipt, [
+      "ValidatorDepositSubmitted",
+      "PoolStaked",
+      "AccountingSnapshot",
+    ]);
+    assert.equal(stakeSnapshot.state, STATE_STAKED);
+    assert.equal(stakeSnapshot.balance, 2n);
+    assert.equal(stakeSnapshot.totalFundedWei, VALIDATOR_DEPOSIT);
+    assert.equal(stakeSnapshot.grossPoolProceeds, 2n);
+    assert.equal(stakeSnapshot.grossCanceledSurplus, 0n);
+  });
+
+  it("snapshots callable staked ETH and excludes EIP-7002 request attempts", async function () {
+    const { pool, alicePool, outsider, withdrawal, pubkey } = await networkHelpers.loadFixture(stakedFixture);
+
+    const receiveReceipt = await waitForReceipt(await outsider.sendTransaction({ to: pool.address, value: 6n }));
+    const receiveSnapshot = await assertAccountingSnapshot(pool, receiveReceipt, [
+      "EthReceivedViaCall",
+      "AccountingSnapshot",
+    ]);
+    assert.equal(receiveSnapshot.state, STATE_STAKED);
+    assert.equal(receiveSnapshot.balance, 6n);
+    assert.equal(receiveSnapshot.grossPoolProceeds, 6n);
+
+    const exitReceipt = await waitForReceipt(await alicePool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
+    assert.deepEqual(
+      parsePoolEvents(pool, exitReceipt).map((event) => event.eventName),
+      ["ExitRequestSubmitted"],
+    );
+    assert.equal(await withdrawal.read.requestCount(), 1n);
+    assert.equal(await withdrawal.read.lastPubkey(), pubkey);
+    assert.equal(await pool.read.grossPoolProceeds(), 6n);
+  });
+
+  it("uses claim snapshots to reconcile silent staked balance increases", async function () {
+    const { pool, alicePool, alice, bob, outsider } = await networkHelpers.loadFixture(stakedFixture);
+    const forceSend = await viem.deployContract("ForceSend");
+
+    await wait(await outsider.sendTransaction({ to: forceSend.address, value: VALIDATOR_DEPOSIT }));
+    const forcedReceipt = await waitForReceipt(await forceSend.write.forceSend([pool.address]));
+    assertNoPoolEvents(pool, forcedReceipt);
+
+    const grossBeforeClaim = await pool.read.grossPoolProceeds();
+    assert.equal(grossBeforeClaim, VALIDATOR_DEPOSIT);
+
+    const claimReceipt = await waitForReceipt(await alicePool.write.claim());
+    const claimSnapshot = await assertAccountingSnapshot(pool, claimReceipt, ["Claimed", "AccountingSnapshot"]);
+    assert.equal(claimSnapshot.state, STATE_STAKED);
+    assert.equal(claimSnapshot.balance, BOB_TARGET);
+    assert.equal(claimSnapshot.totalClaimedWei, ALICE_TARGET);
+    assert.equal(claimSnapshot.grossPoolProceeds, grossBeforeClaim);
+
+    assert.equal(await pool.read.claimedWeiOf([alice.account.address]), ALICE_TARGET);
+    assert.equal(await pool.read.claimable([bob.account.address]), BOB_TARGET);
+  });
+
+  it("snapshots canceled surplus and refunds after silent balance increases", async function () {
+    const { pool, alicePool, alice, outsider, deadline } = await networkHelpers.loadFixture(committedFixture);
+    const forceSend = await viem.deployContract("ForceSend");
+
+    await wait(await alicePool.write.fund({ value: parseEther("5") }));
+    await networkHelpers.time.increaseTo(deadline + 1n);
+
+    const cancelReceipt = await waitForReceipt(await alicePool.write.cancel());
+    const cancelSnapshot = await assertAccountingSnapshot(pool, cancelReceipt, ["PoolCanceled", "AccountingSnapshot"]);
+    assert.equal(cancelSnapshot.state, STATE_CANCELED);
+    assert.equal(cancelSnapshot.balance, parseEther("5"));
+    assert.equal(cancelSnapshot.totalFundedWei, parseEther("5"));
+    assert.equal(cancelSnapshot.grossCanceledSurplus, 0n);
+
+    await wait(await outsider.sendTransaction({ to: forceSend.address, value: 2n }));
+    const forcedReceipt = await waitForReceipt(await forceSend.write.forceSend([pool.address]));
+    assertNoPoolEvents(pool, forcedReceipt);
+    assert.equal(await pool.read.grossCanceledSurplus(), 2n);
+
+    const sweepReceipt = await waitForReceipt(await alicePool.write.sweepCanceledSurplus());
+    const sweepSnapshot = await assertAccountingSnapshot(pool, sweepReceipt, [
+      "CanceledSurplusClaimed",
+      "AccountingSnapshot",
+    ]);
+    assert.equal(sweepSnapshot.balance, parseEther("5"));
+    assert.equal(sweepSnapshot.totalCanceledSurplusClaimedWei, 2n);
+    assert.equal(sweepSnapshot.grossCanceledSurplus, 2n);
+
+    const refundReceipt = await waitForReceipt(await alicePool.write.refund());
+    const refundSnapshot = await assertAccountingSnapshot(pool, refundReceipt, ["Refunded", "AccountingSnapshot"]);
+    assert.equal(refundSnapshot.balance, 0n);
+    assert.equal(refundSnapshot.totalRefundedWei, parseEther("5"));
+    assert.equal(refundSnapshot.grossCanceledSurplus, 2n);
+    assert.equal(await pool.read.fundedWeiOf([alice.account.address]), 0n);
   });
 
   it("keeps funding separate from live proceeds and refunds exact contributions on cancel", async function () {

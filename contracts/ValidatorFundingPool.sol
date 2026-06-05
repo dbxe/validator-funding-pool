@@ -119,7 +119,30 @@ contract ValidatorFundingPool {
         bytes32 depositDataRoot
     );
     event PoolStaked();
-    event PoolProceedsReceived(address indexed sender, uint256 amount);
+    /// @notice Emitted only when ETH is received through an EVM call while staked.
+    /// @dev This event is not a complete proceeds ledger. Consensus withdrawals,
+    ///      priority-fee / coinbase balance increases, and forced ETH can increase
+    ///      this contract's balance without executing receive() and without emitting
+    ///      this event. Authoritative pool accounting is balance-based:
+    ///      address(this).balance + totalClaimedWei().
+    event EthReceivedViaCall(address indexed sender, uint256 amount);
+    /// @notice Emitted after selected accounting actions to record observed pool state.
+    /// @dev This is a reconciliation aid only. It is not a complete proceeds ledger,
+    ///      not a source-of-funds classifier, and not evidence that no silent balance
+    ///      changes occurred between snapshots. Consensus withdrawals, priority-fee /
+    ///      coinbase balance increases, and forced ETH can increase this contract's
+    ///      balance without executing contract code and without emitting a pool event.
+    ///      Authoritative entitlement accounting remains balance-based.
+    event AccountingSnapshot(
+        State state,
+        uint256 balance,
+        uint256 totalFundedWei,
+        uint256 totalClaimedWei,
+        uint256 totalRefundedWei,
+        uint256 totalCanceledSurplusClaimedWei,
+        uint256 grossPoolProceeds,
+        uint256 grossCanceledSurplus
+    );
     event Claimed(address indexed participant, address indexed recipient, uint256 amount);
     event CanceledSurplusClaimed(
         address indexed participant,
@@ -246,7 +269,8 @@ contract ValidatorFundingPool {
         }
 
         if (state == State.Staked) {
-            emit PoolProceedsReceived(msg.sender, msg.value);
+            emit EthReceivedViaCall(msg.sender, msg.value);
+            _emitAccountingSnapshot();
             return;
         }
 
@@ -276,6 +300,7 @@ contract ValidatorFundingPool {
         state = State.Funding;
 
         emit ValidatorCommitted(pubkeyHash, pubkey, depositDataRoot, deadline);
+        _emitAccountingSnapshot();
     }
 
     function fund() external payable {
@@ -297,6 +322,7 @@ contract ValidatorFundingPool {
         }
 
         emit PoolCanceled(msg.sender);
+        _emitAccountingSnapshot();
     }
 
     // -------------------------------------------------------------------------
@@ -317,10 +343,10 @@ contract ValidatorFundingPool {
             _committedPubkey, expectedWithdrawalCredentials, _committedSignature, committedDepositDataRoot
         );
 
-        emit ValidatorDepositSubmitted(committedPubkeyHash, _committedPubkey, committedDepositDataRoot);
-
         state = State.Staked;
+        emit ValidatorDepositSubmitted(committedPubkeyHash, _committedPubkey, committedDepositDataRoot);
         emit PoolStaked();
+        _emitAccountingSnapshot();
     }
 
     // -------------------------------------------------------------------------
@@ -370,9 +396,10 @@ contract ValidatorFundingPool {
 
         fundedWeiOf[msg.sender] = 0;
         totalRefundedWei += amount;
-        emit Refunded(msg.sender, recipient, amount);
-
         _sendEth(recipient, amount);
+
+        emit Refunded(msg.sender, recipient, amount);
+        _emitAccountingSnapshot();
     }
 
     function claim() external {
@@ -388,9 +415,10 @@ contract ValidatorFundingPool {
 
         claimedWeiOf[msg.sender] += amount;
         totalClaimedWei += amount;
-        emit Claimed(msg.sender, recipient, amount);
-
         _sendEth(recipient, amount);
+
+        emit Claimed(msg.sender, recipient, amount);
+        _emitAccountingSnapshot();
     }
 
     function sweepCanceledSurplus() external {
@@ -406,9 +434,10 @@ contract ValidatorFundingPool {
 
         canceledSurplusClaimedWeiOf[msg.sender] += amount;
         totalCanceledSurplusClaimedWei += amount;
-        emit CanceledSurplusClaimed(msg.sender, recipient, amount);
-
         _sendEth(recipient, amount);
+
+        emit CanceledSurplusClaimed(msg.sender, recipient, amount);
+        _emitAccountingSnapshot();
     }
 
     // -------------------------------------------------------------------------
@@ -509,6 +538,20 @@ contract ValidatorFundingPool {
         totalFundedWei += amount;
 
         emit ParticipantFunded(participant, amount, newFunded, totalFundedWei);
+        _emitAccountingSnapshot();
+    }
+
+    function _emitAccountingSnapshot() private {
+        emit AccountingSnapshot(
+            state,
+            address(this).balance,
+            totalFundedWei,
+            totalClaimedWei,
+            totalRefundedWei,
+            totalCanceledSurplusClaimedWei,
+            grossPoolProceeds(),
+            grossCanceledSurplus()
+        );
     }
 
     function _validateValidatorData(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot)
