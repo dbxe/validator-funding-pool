@@ -124,7 +124,7 @@ contract ValidatorFundingPool {
     ///      priority-fee / coinbase balance increases, and forced ETH can increase
     ///      this contract's balance without executing receive() and without emitting
     ///      this event. Authoritative pool accounting is balance-based:
-    ///      address(this).balance + totalClaimedWei().
+    ///      grossPoolProceeds() = address(this).balance + totalClaimedWei.
     event EthReceivedViaCall(address indexed sender, uint256 amount);
     /// @notice Emitted after selected accounting actions to record observed pool state.
     /// @dev This is a reconciliation aid only. It is not a complete proceeds ledger,
