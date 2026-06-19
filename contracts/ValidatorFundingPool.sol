@@ -216,6 +216,10 @@ contract ValidatorFundingPool {
     // Deployment
     // -------------------------------------------------------------------------
 
+    /// @notice Deploy an uninitialized pool for one 32 ETH validator.
+    /// @dev Participant funding targets must be nonzero, unique, and sum exactly
+    ///      to `VALIDATOR_DEPOSIT_WEI`. The funding deadline is not set here; it
+    ///      starts when the operator commits validator deposit data.
     constructor(
         address depositContract_,
         address withdrawalRequestPredeploy_,
@@ -282,6 +286,9 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     /// @notice Commit validator deposit data before participant funding begins.
+    /// @dev Starts the funding deadline. The contract checks lengths and a
+    ///      nonzero root, but does not verify BLS proof-of-possession, beacon
+    ///      state, or whether the pubkey was already used.
     function commitValidator(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot)
         external
         onlyOperator
@@ -303,10 +310,16 @@ contract ValidatorFundingPool {
         _emitAccountingSnapshot();
     }
 
+    /// @notice Fund the caller's participant allocation during Funding.
+    /// @dev The caller must be a participant and cannot fund beyond their fixed
+    ///      target. Direct ETH transfers in Funding follow the same path.
     function fund() external payable {
         _fund(msg.sender, msg.value);
     }
 
+    /// @notice Cancel an unstaked pool after the funding deadline.
+    /// @dev Fixes canceled-surplus weights before refunds. If anyone funded,
+    ///      surplus weights are funded amounts; otherwise they are target weights.
     function cancel() external onlyParticipant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp <= fundingDeadline) revert FundingStillOpen();
@@ -329,6 +342,10 @@ contract ValidatorFundingPool {
     // Staking lifecycle
     // -------------------------------------------------------------------------
 
+    /// @notice Submit the committed validator deposit to the deposit contract.
+    /// @dev Requires exact 32 ETH participant funding before the deadline. Any
+    ///      ETH balance left after the deposit, including pre-stake forced ETH,
+    ///      becomes pool proceeds in Staked state.
     function stake() external onlyOperator nonReentrant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp > fundingDeadline) revert FundingClosed();
@@ -354,7 +371,8 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     /// @notice Request a full validator exit through EIP-7002.
-    /// @dev An EL-accepted request can still be ignored by CL processing, so retries are allowed.
+    /// @dev The caller pays the request fee. An EL-accepted request can still be
+    ///      ignored by CL processing, so retries are allowed.
     function requestExit(uint256 maxFee) external payable onlyParticipant nonReentrant {
         if (state != State.Staked) revert InvalidState();
 
@@ -387,6 +405,9 @@ contract ValidatorFundingPool {
         refundTo(payable(msg.sender));
     }
 
+    /// @notice Refund the caller's exact funded principal after cancellation.
+    /// @dev The recipient may be any nonzero address except this pool. Refunding
+    ///      does not affect canceled-surplus entitlement.
     function refundTo(address payable recipient) public onlyParticipant nonReentrant {
         if (state != State.Canceled) revert InvalidState();
         _validateRecipient(recipient);
@@ -406,6 +427,10 @@ contract ValidatorFundingPool {
         claimTo(payable(msg.sender));
     }
 
+    /// @notice Claim the caller's currently vested pro-rata pool proceeds.
+    /// @dev Uses cumulative entitlement, so claim timing cannot improve or reduce
+    ///      a participant's total entitlement. The recipient may be any nonzero
+    ///      address except this pool.
     function claimTo(address payable recipient) public onlyParticipant nonReentrant {
         if (state != State.Staked) revert InvalidState();
         _validateRecipient(recipient);
@@ -425,6 +450,9 @@ contract ValidatorFundingPool {
         sweepCanceledSurplusTo(payable(msg.sender));
     }
 
+    /// @notice Claim the caller's share of surplus ETH after cancellation.
+    /// @dev Surplus excludes outstanding refunds, so funded principal is not
+    ///      swept. The recipient may be any nonzero address except this pool.
     function sweepCanceledSurplusTo(address payable recipient) public onlyParticipant nonReentrant {
         if (state != State.Canceled) revert InvalidState();
         _validateRecipient(recipient);
@@ -457,6 +485,9 @@ contract ValidatorFundingPool {
         return entitled - alreadyClaimed;
     }
 
+    /// @notice Return cumulative pool proceeds used for claim entitlement.
+    /// @dev Equal to current balance plus already claimed proceeds. This makes
+    ///      claim order irrelevant to cumulative entitlement.
     function grossPoolProceeds() public view returns (uint256) {
         return address(this).balance + totalClaimedWei;
     }
@@ -474,6 +505,9 @@ contract ValidatorFundingPool {
         return entitled - alreadyClaimed;
     }
 
+    /// @notice Return canceled-state surplus outside outstanding refunds.
+    /// @dev Equal to current balance plus already swept surplus minus funded
+    ///      principal that has not yet been refunded. Returns zero outside Canceled.
     function grossCanceledSurplus() public view returns (uint256) {
         if (state != State.Canceled) return 0;
 
@@ -509,6 +543,9 @@ contract ValidatorFundingPool {
         return abi.encodePacked(withdrawalCredentials);
     }
 
+    /// @notice Return the current EIP-7002 full-exit request fee.
+    /// @dev Reads the withdrawal request predeploy with empty calldata and expects
+    ///      exactly one ABI-encoded uint256 in response.
     function currentExitRequestFee() public view returns (uint256) {
         (bool ok, bytes memory data) = withdrawalRequestPredeploy.staticcall("");
         if (!ok || data.length != 32) revert ExitFeeReadFailed();
