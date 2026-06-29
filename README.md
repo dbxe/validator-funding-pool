@@ -90,7 +90,8 @@ There is no sender rescue path for forced ETH.
 ## Consensus Caveats
 
 - Consensus withdrawals to `0x01` credentials increase the pool balance without calling `receive()` or emitting `EthReceivedViaCall`.
-- The deposit contract checks the deposit data root but does not verify BLS proof-of-possession. The script recomputes the deposit root and includes a Lodestar-cross-checked fixture test, but BLS validity remains an off-chain responsibility.
+- The deposit contract checks the deposit data root but does not verify BLS proof-of-possession. Repository scripts reject deposit data unless the root recomputes and the BLS deposit signature verifies for the deposit message and fork version.
+- Solidity does not verify BLS signatures. Bypassing the scripts and staking invalid-but-well-formed deposit data can trap the 32 ETH in the deposit contract without creating a beacon validator.
 - Committed deposit data is public before `stake()`. A third party could copy it and submit their own 32 ETH deposit first, but the withdrawal credentials still point to the pool. This is operational griefing, not theft.
 - Beacon preflight checks only observe current beacon state. They cannot detect a deposit submitted to the EL deposit contract but not yet processed by CL.
 - EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds.
@@ -100,7 +101,8 @@ There is no sender rescue path for forced ETH.
 | Scenario | Contract outcome |
 | --- | --- |
 | Bad validator data committed before funding | Participants should not fund. |
-| Bad validator data funded anyway and `stake()` reverts | Participants recover after the funding deadline through cancel/refund. |
+| Malformed root/length data funded anyway and `stake()` reverts | Participants recover after the funding deadline through cancel/refund. |
+| Invalid BLS data bypasses scripts and `stake()` succeeds | Beacon validator may never be created; funds can be irrecoverable. |
 | Operator disappears before staking | Participants recover after the funding deadline through cancel/refund. |
 | Operator disappears after staking | Any participant can request an EIP-7002 full exit; retries are allowed. |
 | Validator exits from CL side without EIP-7002 | Returned ETH is pool proceeds and is split pro rata. |
@@ -156,7 +158,8 @@ Useful environment variables:
 - `PARTICIPANTS`: comma-separated participant addresses; defaults to the deployer.
 - `FUNDING_TARGETS_GWEI`: comma-separated funding caps matching `PARTICIPANTS`; must sum to `32000000000`.
 - `EXPECTED_PUBKEY`: optional pubkey check for `commit-validator`.
-- `DEPOSIT_NETWORK_NAME` / `DEPOSIT_FORK_VERSION`: optional deposit-file metadata checks.
+- `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
+- `DEPOSIT_FORK_VERSION`: optional expected fork-version check. The deposit data itself must include `fork_version` unless this env var supplies it.
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim`, `refund`, and `sweep-canceled-surplus`.
 - `BEACON_NODE_URL`: optional beacon REST URL for validator pubkey absence checks before commit/stake and validator status checks before request-exit.
 

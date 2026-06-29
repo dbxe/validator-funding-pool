@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { PublicKey, Signature, verify } from "@chainsafe/blst";
 import { formatEther, isAddress, type Address, type Hex } from "viem";
 
 export const DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY: Address =
@@ -10,6 +11,8 @@ export const DEFAULT_DEPOSIT_CONTRACT: Address = "0x00000000219ab540356cBB839Cbe
 export const DEFAULT_DEPOSIT_DATA_FILE = "deposit-data.json";
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
+const DOMAIN_DEPOSIT = "0x03000000" as Hex;
+const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 
 export interface DepositData {
   pubkey: string;
@@ -173,6 +176,11 @@ export function validateDepositData(
   const withdrawalCredentials = normalizeHexLength(deposit.withdrawal_credentials, 32, "withdrawal_credentials");
   const signature = normalizeHexLength(deposit.signature, 96, "signature");
   const depositDataRoot = normalizeHexLength(deposit.deposit_data_root, 32, "deposit_data_root");
+  const forkVersion = normalizeHexLength(
+    deposit.fork_version ?? process.env.DEPOSIT_FORK_VERSION ?? "",
+    4,
+    "fork_version",
+  );
   const amountGwei = BigInt(deposit.amount);
 
   if (amountGwei !== VALIDATOR_DEPOSIT_GWEI) {
@@ -189,6 +197,9 @@ export function validateDepositData(
   if (recomputedRoot.toLowerCase() !== depositDataRoot.toLowerCase()) {
     throw new Error(`Deposit data root ${depositDataRoot} != recomputed ${recomputedRoot}`);
   }
+  if (!verifyDepositSignature(pubkey, withdrawalCredentials, amountGwei, signature, forkVersion)) {
+    throw new Error("Invalid BLS deposit signature");
+  }
 
   const expectedNetworkName = process.env.DEPOSIT_NETWORK_NAME;
   if (expectedNetworkName && deposit.network_name !== expectedNetworkName) {
@@ -196,11 +207,11 @@ export function validateDepositData(
   }
 
   const expectedForkVersion = process.env.DEPOSIT_FORK_VERSION;
-  if (expectedForkVersion && asHex(deposit.fork_version ?? "").toLowerCase() !== asHex(expectedForkVersion).toLowerCase()) {
+  if (expectedForkVersion && forkVersion.toLowerCase() !== asHex(expectedForkVersion).toLowerCase()) {
     throw new Error(`Deposit fork_version ${deposit.fork_version ?? "<missing>"} != expected ${expectedForkVersion}`);
   }
 
-  return { pubkey, withdrawalCredentials, signature, depositDataRoot, amountGwei };
+  return { pubkey, withdrawalCredentials, signature, depositDataRoot, amountGwei, forkVersion };
 }
 
 function normalizeHexLength(value: string, bytes: number, field: string): Hex {
@@ -226,6 +237,55 @@ export function computeDepositDataRoot(pubkey: Hex, withdrawalCredentials: Hex, 
   const left = sha256(Buffer.concat([pubkeyRoot, fromHex(withdrawalCredentials)]));
   const right = sha256(Buffer.concat([uint64LittleEndian(amountGwei), Buffer.alloc(24), signatureRoot]));
   return toHex(sha256(Buffer.concat([left, right])));
+}
+
+export function computeDepositSigningRoot(
+  pubkey: Hex,
+  withdrawalCredentials: Hex,
+  amountGwei: bigint,
+  forkVersion: Hex,
+): Hex {
+  const depositMessageRoot = computeDepositMessageRoot(pubkey, withdrawalCredentials, amountGwei);
+  const domain = computeDepositDomain(forkVersion);
+  return computeSigningRoot(depositMessageRoot, domain);
+}
+
+function verifyDepositSignature(
+  pubkey: Hex,
+  withdrawalCredentials: Hex,
+  amountGwei: bigint,
+  signature: Hex,
+  forkVersion: Hex,
+): boolean {
+  const signingRoot = computeDepositSigningRoot(pubkey, withdrawalCredentials, amountGwei, forkVersion);
+  try {
+    const publicKey = PublicKey.fromBytes(fromHex(pubkey), true);
+    const depositSignature = Signature.fromBytes(fromHex(signature), true);
+    return verify(fromHex(signingRoot), publicKey, depositSignature);
+  } catch {
+    return false;
+  }
+}
+
+function computeDepositMessageRoot(pubkey: Hex, withdrawalCredentials: Hex, amountGwei: bigint): Hex {
+  const pubkeyRoot = sha256(Buffer.concat([fromHex(pubkey), Buffer.alloc(16)]));
+  const left = sha256(Buffer.concat([pubkeyRoot, fromHex(withdrawalCredentials)]));
+  const right = sha256(Buffer.concat([uint64LittleEndian(amountGwei), Buffer.alloc(24), Buffer.alloc(32)]));
+  return toHex(sha256(Buffer.concat([left, right])));
+}
+
+function computeDepositDomain(forkVersion: Hex): Hex {
+  const forkDataRoot = computeForkDataRoot(forkVersion, ZERO_ROOT);
+  return toHex(Buffer.concat([fromHex(DOMAIN_DEPOSIT), fromHex(forkDataRoot).subarray(0, 28)]));
+}
+
+function computeForkDataRoot(forkVersion: Hex, genesisValidatorsRoot: Hex): Hex {
+  const versionRoot = Buffer.concat([fromHex(forkVersion), Buffer.alloc(28)]);
+  return toHex(sha256(Buffer.concat([versionRoot, fromHex(genesisValidatorsRoot)])));
+}
+
+function computeSigningRoot(objectRoot: Hex, domain: Hex): Hex {
+  return toHex(sha256(Buffer.concat([fromHex(objectRoot), fromHex(domain)])));
 }
 
 function sha256(value: Buffer): Buffer {
