@@ -31,7 +31,8 @@ async function main() {
 
   console.log(`Requesting full exit for ${pubkey}`);
   console.log(`EIP-7002 fee: ${formatWei(fee)}`);
-  const hash = await pool.write.requestExit([maxFee], { value: fee });
+  console.log(`Max fee sent: ${formatWei(maxFee)}`);
+  const hash = await pool.write.requestExit([maxFee], { value: maxFee });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   console.log(`Exit requested in block ${receipt.blockNumber}`);
 }
