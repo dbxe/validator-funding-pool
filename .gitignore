@@ -2,5 +2,7 @@ node_modules/
 artifacts/
 cache/
 coverage/
+docs/
 .env
 deployments/*.json
+.DS_STORE
