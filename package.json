@@ -21,6 +21,8 @@
   },
   "devDependencies": {
     "@chainsafe/blst": "^2.2.0",
+    "@lodestar/params": "^1.43.0",
+    "@lodestar/types": "^1.43.0",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",
     "@types/node": "^22.18.0",
     "hardhat": "^3.0.4",

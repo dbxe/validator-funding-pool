@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { PublicKey, Signature, verify } from "@chainsafe/blst";
+import { DOMAIN_DEPOSIT } from "@lodestar/params";
+import { ssz } from "@lodestar/types";
 import { formatEther, isAddress, type Address, type Hex } from "viem";
 
 export const DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY: Address =
@@ -11,7 +12,6 @@ export const DEFAULT_DEPOSIT_CONTRACT: Address = "0x00000000219ab540356cBB839Cbe
 export const DEFAULT_DEPOSIT_DATA_FILE = "deposit-data.json";
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
-const DOMAIN_DEPOSIT = "0x03000000" as Hex;
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 
 export interface DepositData {
@@ -226,17 +226,14 @@ function normalizeHexLength(value: string, bytes: number, field: string): Hex {
 }
 
 export function computeDepositDataRoot(pubkey: Hex, withdrawalCredentials: Hex, amountGwei: bigint, signature: Hex): Hex {
-  const pubkeyRoot = sha256(Buffer.concat([fromHex(pubkey), Buffer.alloc(16)]));
-  const signatureBytes = fromHex(signature);
-  const signatureRoot = sha256(
-    Buffer.concat([
-      sha256(signatureBytes.subarray(0, 64)),
-      sha256(Buffer.concat([signatureBytes.subarray(64), Buffer.alloc(32)])),
-    ]),
+  return toHex(
+    ssz.phase0.DepositData.hashTreeRoot({
+      pubkey: fromHex(pubkey),
+      withdrawalCredentials: fromHex(withdrawalCredentials),
+      amount: gweiToNumber(amountGwei),
+      signature: fromHex(signature),
+    }),
   );
-  const left = sha256(Buffer.concat([pubkeyRoot, fromHex(withdrawalCredentials)]));
-  const right = sha256(Buffer.concat([uint64LittleEndian(amountGwei), Buffer.alloc(24), signatureRoot]));
-  return toHex(sha256(Buffer.concat([left, right])));
 }
 
 export function computeDepositSigningRoot(
@@ -245,9 +242,13 @@ export function computeDepositSigningRoot(
   amountGwei: bigint,
   forkVersion: Hex,
 ): Hex {
-  const depositMessageRoot = computeDepositMessageRoot(pubkey, withdrawalCredentials, amountGwei);
+  const depositMessageRoot = ssz.phase0.DepositMessage.hashTreeRoot({
+    pubkey: fromHex(pubkey),
+    withdrawalCredentials: fromHex(withdrawalCredentials),
+    amount: gweiToNumber(amountGwei),
+  });
   const domain = computeDepositDomain(forkVersion);
-  return computeSigningRoot(depositMessageRoot, domain);
+  return toHex(ssz.phase0.SigningData.hashTreeRoot({ objectRoot: depositMessageRoot, domain }));
 }
 
 function verifyDepositSignature(
@@ -267,43 +268,31 @@ function verifyDepositSignature(
   }
 }
 
-function computeDepositMessageRoot(pubkey: Hex, withdrawalCredentials: Hex, amountGwei: bigint): Hex {
-  const pubkeyRoot = sha256(Buffer.concat([fromHex(pubkey), Buffer.alloc(16)]));
-  const left = sha256(Buffer.concat([pubkeyRoot, fromHex(withdrawalCredentials)]));
-  const right = sha256(Buffer.concat([uint64LittleEndian(amountGwei), Buffer.alloc(24), Buffer.alloc(32)]));
-  return toHex(sha256(Buffer.concat([left, right])));
-}
-
-function computeDepositDomain(forkVersion: Hex): Hex {
-  const forkDataRoot = computeForkDataRoot(forkVersion, ZERO_ROOT);
-  return toHex(Buffer.concat([fromHex(DOMAIN_DEPOSIT), fromHex(forkDataRoot).subarray(0, 28)]));
-}
-
-function computeForkDataRoot(forkVersion: Hex, genesisValidatorsRoot: Hex): Hex {
-  const versionRoot = Buffer.concat([fromHex(forkVersion), Buffer.alloc(28)]);
-  return toHex(sha256(Buffer.concat([versionRoot, fromHex(genesisValidatorsRoot)])));
-}
-
-function computeSigningRoot(objectRoot: Hex, domain: Hex): Hex {
-  return toHex(sha256(Buffer.concat([fromHex(objectRoot), fromHex(domain)])));
-}
-
-function sha256(value: Buffer): Buffer {
-  return createHash("sha256").update(value).digest();
+function computeDepositDomain(forkVersion: Hex): Uint8Array {
+  const forkDataRoot = ssz.phase0.ForkData.hashTreeRoot({
+    currentVersion: fromHex(forkVersion),
+    genesisValidatorsRoot: fromHex(ZERO_ROOT),
+  });
+  const domain = new Uint8Array(32);
+  domain.set(DOMAIN_DEPOSIT, 0);
+  domain.set(forkDataRoot.subarray(0, 28), 4);
+  return domain;
 }
 
 function fromHex(value: Hex): Buffer {
   return Buffer.from(value.slice(2), "hex");
 }
 
-function toHex(value: Buffer): Hex {
-  return `0x${value.toString("hex")}` as Hex;
+function toHex(value: Uint8Array): Hex {
+  return `0x${Buffer.from(value).toString("hex")}` as Hex;
 }
 
-function uint64LittleEndian(value: bigint): Buffer {
-  const encoded = Buffer.alloc(8);
-  encoded.writeBigUInt64LE(value);
-  return encoded;
+function gweiToNumber(value: bigint): number {
+  const amount = Number(value);
+  if (!Number.isSafeInteger(amount)) {
+    throw new Error(`Gwei amount ${value} is too large for SSZ number encoding`);
+  }
+  return amount;
 }
 
 export function formatWei(value: bigint): string {
