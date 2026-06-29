@@ -400,6 +400,46 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.grossPoolProceeds(), 6n);
   });
 
+  it("allows committed-validator exit attempts before local staking", async function () {
+    const { pool, alicePool, bobPool, outsiderPool, withdrawal, pubkey, deadline } =
+      await networkHelpers.loadFixture(committedFixture);
+
+    await viem.assertions.revertWithCustomError(
+      outsiderPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }),
+      pool,
+      "NotParticipant",
+    );
+
+    const fundingExitReceipt = await waitForReceipt(
+      await alicePool.write.requestExit([EXIT_FEE], { value: EXIT_FEE + 100n }),
+    );
+    assert.deepEqual(
+      parsePoolEvents(pool, fundingExitReceipt).map((event) => event.eventName),
+      ["ExitRequestSubmitted"],
+    );
+    assert.equal(await withdrawal.read.requestCount(), 1n);
+    assert.equal((await withdrawal.read.lastSourceAddress()).toLowerCase(), pool.address.toLowerCase());
+    assert.equal(await withdrawal.read.lastPubkey(), pubkey);
+    assert.equal(await withdrawal.read.lastAmountData(), "0x0000000000000000");
+    assert.equal(await withdrawal.read.lastValue(), EXIT_FEE);
+    assert.equal(await pool.read.exitRequestAttemptCount(), 1n);
+    assert.equal(await pool.read.lastExitRequestFeePaid(), EXIT_FEE);
+    assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
+
+    await networkHelpers.time.increaseTo(deadline + 1n);
+    await wait(await alicePool.write.cancel());
+
+    const canceledExitReceipt = await waitForReceipt(await bobPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
+    assert.deepEqual(
+      parsePoolEvents(pool, canceledExitReceipt).map((event) => event.eventName),
+      ["ExitRequestSubmitted"],
+    );
+    assert.equal(await withdrawal.read.requestCount(), 2n);
+    assert.equal(await withdrawal.read.lastPubkey(), pubkey);
+    assert.equal(await pool.read.exitRequestAttemptCount(), 2n);
+    assert.equal(await publicClient.getBalance({ address: withdrawal.address }), EXIT_FEE * 2n);
+  });
+
   it("uses claim snapshots to reconcile silent staked balance increases", async function () {
     const { pool, alicePool, alice, bob, outsider } = await networkHelpers.loadFixture(stakedFixture);
     const forceSend = await viem.deployContract("ForceSend");

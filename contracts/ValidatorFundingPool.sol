@@ -371,10 +371,13 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     /// @notice Request a full validator exit through EIP-7002.
-    /// @dev The caller pays the request fee. An EL-accepted request can still be
-    ///      ignored by CL processing, so retries are allowed.
+    /// @dev Allowed after validator commitment, even before local Staked state,
+    ///      because the committed pubkey may have become a pool-owned validator
+    ///      through an external deposit. The caller pays the request fee. An
+    ///      EL-accepted request can still be ignored by CL processing, so retries
+    ///      are allowed.
     function requestExit(uint256 maxFee) external payable onlyParticipant nonReentrant {
-        if (state != State.Staked) revert InvalidState();
+        if (_committedPubkey.length != PUBKEY_LENGTH) revert InvalidState();
 
         uint256 fee = currentExitRequestFee();
         if (fee > maxFee) revert ExitFeeTooHigh(fee, maxFee);

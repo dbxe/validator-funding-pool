@@ -36,9 +36,10 @@ The pool intentionally exposes no arbitrary external-call, delegatecall, upgrade
 5. Participants inspect the committed validator data and then fund up to their caps.
 6. The operator stakes the committed validator after exact `32 ETH` funding and before the funding deadline.
 7. After staking, any ETH balance in the pool is claimable pro rata by funding weight.
-8. Any participant can request a full validator exit through EIP-7002. Requests are retryable attempts, not a one-shot latch.
+8. After validator commitment, any participant can request a full validator exit through EIP-7002. Requests are retryable attempts, not a one-shot latch.
 
 The funding deadline starts at validator commitment time, not deployment time. If the pool is not staked before the deadline, participants can cancel and refund exact funded amounts.
+Exit attempts are allowed after commitment, not only after local `Staked` state, so participants can still act if the committed pubkey becomes a pool-owned validator through an external deposit path.
 
 ## Trust Boundaries
 
@@ -94,7 +95,7 @@ There is no sender rescue path for forced ETH.
 - Solidity does not verify BLS signatures. Bypassing the scripts and staking invalid-but-well-formed deposit data can trap the 32 ETH in the deposit contract without creating a beacon validator.
 - Committed deposit data is public before `stake()`. A third party could copy it and submit their own 32 ETH deposit first, but the withdrawal credentials still point to the pool. This is operational griefing, not theft.
 - Beacon preflight checks only observe current beacon state. They cannot detect a deposit submitted to the EL deposit contract but not yet processed by CL.
-- EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds.
+- EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds. Attempts are allowed after validator commitment, including before local staking or after cancellation.
 
 ## Failure Modes
 
@@ -104,6 +105,7 @@ There is no sender rescue path for forced ETH.
 | Malformed root/length data funded anyway and `stake()` reverts | Participants recover after the funding deadline through cancel/refund. |
 | Invalid BLS data bypasses scripts and `stake()` succeeds | Beacon validator may never be created; funds can be irrecoverable. |
 | Operator disappears before staking | Participants recover after the funding deadline through cancel/refund. |
+| Committed pubkey is externally deposited with pool credentials | Participants can request EIP-7002 exit attempts even if local state is `Funding` or `Canceled`. |
 | Operator disappears after staking | Any participant can request an EIP-7002 full exit; retries are allowed. |
 | Validator exits from CL side without EIP-7002 | Returned ETH is pool proceeds and is split pro rata. |
 | Participant cannot receive ETH directly | Participant can use `claimTo`, `refundTo`, or `sweepCanceledSurplusTo`. |
