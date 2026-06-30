@@ -694,7 +694,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.grossPoolProceeds(), 6n);
   });
 
-  it("allows retryable exit requests after predeposit from active, refundable, and final stakeholders", async function () {
+  it("allows retryable exit requests from current and final stakeholders only", async function () {
     const fixture = await networkHelpers.loadFixture(fundingFixture);
     const { pool, operatorPool, alicePool, bobPool, outsiderPool, withdrawal, deadline } = fixture;
 
@@ -722,8 +722,12 @@ describe("ValidatorFundingPool", async function () {
     await networkHelpers.time.increaseTo(deadline + 1n);
     await wait(await pool.write.closeExpiredFundingAttempt());
 
-    await wait(await bobPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
-    assert.equal(await withdrawal.read.requestCount(), 2n);
+    await viem.assertions.revertWithCustomError(
+      bobPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }),
+      pool,
+      "NotParticipant",
+    );
+    assert.equal(await withdrawal.read.requestCount(), 1n);
 
     await wait(
       await pool.write.openFundingAttempt([
@@ -731,6 +735,9 @@ describe("ValidatorFundingPool", async function () {
         [OPERATOR_TARGET, ALICE_TARGET, BOB_TARGET],
       ]),
     );
+    await wait(await bobPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
+    assert.equal(await withdrawal.read.requestCount(), 2n);
+
     await wait(await operatorPool.write.fund({ value: OPERATOR_TARGET - PREDEPOSIT }));
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));

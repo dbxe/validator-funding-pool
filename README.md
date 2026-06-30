@@ -85,7 +85,7 @@ Participants have no capital at risk until they fund after that verification. On
 
 Poor validator operation is still an operator trust boundary. The intended incentive alignment is that the operator has meaningful economic weight in the pool, including the `1 ETH` predeposit, so downtime, slashing, or deliberate misoperation harms the operator's own claim as well as everyone else's. This reduces but does not remove operator trust.
 
-The unilateral escape hatch is EIP-7002. Any active funder, refund holder, or final credited participant can request a full exit without operator permission. Consensus processing still enforces validator-state preconditions, so execution-layer accepted requests can be ignored until those conditions are met; the contract therefore records attempts and allows retries. See the consensus [`process_withdrawal_request`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-process_withdrawal_request) flow.
+The unilateral escape hatch is EIP-7002. The operator, any current funding-attempt participant, or any final credited participant can request a full exit without operator permission. Refund-only holders recover through `refundTo()` and cannot request exits for a later validator they did not fund. Consensus processing still enforces validator-state preconditions, so execution-layer accepted requests can be ignored until those conditions are met; the contract therefore records attempts and allows retries. See the consensus [`process_withdrawal_request`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-process_withdrawal_request) flow.
 
 ## Accounting Model
 
@@ -164,7 +164,7 @@ Future Ethereum staking features may require contract changes or may simply be u
 | Funding attempt expires before top-up | Anyone can close it; active funding becomes refundable. |
 | Participant does not withdraw refund | Operator can still open a new attempt; old refund is excluded from proceeds. |
 | Operator disappears before top-up | Participants recover active funding after deadline close/refund; operator predeposit remains at risk. |
-| Operator disappears after top-up | Stakeholders can request EIP-7002 full-exit attempts; retries are allowed. |
+| Operator disappears after top-up | Final credited participants can request EIP-7002 full-exit attempts; retries are allowed. |
 | Validator exits from CL side without EIP-7002 | Returned ETH is pool proceeds, excluding outstanding refunds. |
 | Participant cannot receive ETH directly | Participant can use `claimTo` or `refundTo`. |
 | ETH is forced into the pool | It follows the forced-ETH rules above; no sender rescue exists. |
