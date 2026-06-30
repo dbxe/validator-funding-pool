@@ -6,7 +6,6 @@ interface IValidatorFundingPool {
     function claim() external;
     function claimTo(address payable recipient) external;
     function refundTo(address payable recipient) external;
-    function sweepCanceledSurplusTo(address payable recipient) external;
 }
 
 contract RejectEthParticipant {
@@ -24,9 +23,5 @@ contract RejectEthParticipant {
 
     function refundPoolTo(address pool, address payable recipient) external {
         IValidatorFundingPool(pool).refundTo(recipient);
-    }
-
-    function sweepCanceledSurplusPoolTo(address pool, address payable recipient) external {
-        IValidatorFundingPool(pool).sweepCanceledSurplusTo(recipient);
     }
 }

@@ -2,7 +2,7 @@ import { network } from "hardhat";
 
 import { assertDeploymentChain, formatWei, readDeployment } from "./lib/common.js";
 
-const STATE_NAMES = ["Uninitialized", "Funding", "Staked", "Canceled"];
+const STATE_NAMES = ["Uninitialized", "Predeposited", "Funding", "ToppedUp"];
 
 async function main() {
   const deployment = readDeployment();
@@ -18,16 +18,21 @@ async function main() {
   console.log(`Pool: ${deployment.pool}`);
   console.log(`State: ${STATE_NAMES[state] ?? state}`);
   console.log(`Operator: ${await pool.read.operator()}`);
+  console.log(`Funding attempt: ${await pool.read.fundingAttempt()}`);
   console.log(`Funding deadline: ${await pool.read.fundingDeadline()}`);
   console.log(`Balance: ${formatWei(balance)}`);
   console.log(`Gross proceeds: ${formatWei(await pool.read.grossPoolProceeds())}`);
-  console.log(`Gross canceled surplus: ${formatWei(await pool.read.grossCanceledSurplus())}`);
-  console.log(`Total funded: ${formatWei(await pool.read.totalFundedWei())}`);
+  console.log(`Total active funded: ${formatWei(await pool.read.totalActiveFundedWei())}`);
+  console.log(`Total refundable: ${formatWei(await pool.read.totalRefundableWei())}`);
+  console.log(`Total refunded: ${formatWei(await pool.read.totalRefundedWei())}`);
+  console.log(`Total credited: ${formatWei(await pool.read.totalCreditedWei())}`);
   console.log(`Total claimed: ${formatWei(await pool.read.totalClaimedWei())}`);
-  console.log(`Validator deposit submitted: ${await pool.read.validatorDepositSubmitted()}`);
+  console.log(`Predeposit submitted: ${await pool.read.predepositSubmitted()}`);
+  console.log(`Top-up submitted: ${await pool.read.topUpSubmitted()}`);
   console.log(`Validator pubkey: ${await pool.read.committedPubkey()}`);
   console.log(`Validator pubkey hash: ${await pool.read.committedPubkeyHash()}`);
-  console.log(`Deposit data root: ${await pool.read.committedDepositDataRoot()}`);
+  console.log(`Predeposit root: ${await pool.read.predepositDataRoot()}`);
+  console.log(`Top-up root: ${await pool.read.topUpDepositDataRoot()}`);
   console.log(`Exit request count: ${await pool.read.exitRequestAttemptCount()}`);
   console.log(`Last exit request fee: ${formatWei(await pool.read.lastExitRequestFeePaid())}`);
 
@@ -36,10 +41,12 @@ async function main() {
     console.log(
       `Participant ${i}: ${participant} target=${formatWei(
         await pool.read.fundingTargetWeiOf([participant]),
-      )} funded=${formatWei(await pool.read.fundedWeiOf([participant]))} claimed=${formatWei(
-        await pool.read.claimedWeiOf([participant]),
-      )} claimable=${formatWei(await pool.read.claimable([participant]))} canceledSurplusClaimable=${formatWei(
-        await pool.read.canceledSurplusClaimable([participant]),
+      )} activeFunded=${formatWei(await pool.read.activeFundedWeiOf([participant]))} remaining=${formatWei(
+        await pool.read.fundingRemainingWeiOf([participant]),
+      )} refundable=${formatWei(await pool.read.refundableWeiOf([participant]))} credited=${formatWei(
+        await pool.read.creditedWeiOf([participant]),
+      )} claimed=${formatWei(await pool.read.claimedWeiOf([participant]))} claimable=${formatWei(
+        await pool.read.claimable([participant]),
       )}`,
     );
   }

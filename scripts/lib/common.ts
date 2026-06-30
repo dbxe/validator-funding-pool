@@ -4,12 +4,14 @@ import path from "node:path";
 import { PublicKey, Signature, verify } from "@chainsafe/blst";
 import { DOMAIN_DEPOSIT } from "@lodestar/params";
 import { ssz } from "@lodestar/types";
-import { formatEther, isAddress, type Address, type Hex } from "viem";
+import { formatEther, isAddress, keccak256, type Address, type Hex } from "viem";
 
 export const DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY: Address =
   "0x00000961Ef480Eb55e80D19ad83579A64c007002";
 export const DEFAULT_DEPOSIT_CONTRACT: Address = "0x00000000219ab540356cBB839Cbe05303d7705Fa";
 export const DEFAULT_DEPOSIT_DATA_FILE = "deposit-data.json";
+export const PREDEPOSIT_GWEI = 1_000_000_000n;
+export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
@@ -28,12 +30,12 @@ export interface DeploymentRecord {
   chainId: number;
   pool: Address;
   depositContract: Address;
+  depositContractCodeHash: Hex;
   withdrawalRequestPredeploy: Address;
+  withdrawalRequestPredeployCodeHash: Hex;
   operator: Address;
   fundingWindowDuration: string;
   withdrawalCredentials: Hex;
-  participants: Address[];
-  fundingTargetsWei: string[];
 }
 
 interface BeaconValidatorResponse {
@@ -127,11 +129,20 @@ export async function assertHasCode(
   publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
   address: Address,
   label: string,
-) {
+): Promise<Hex> {
   const code = await publicClient.getCode({ address });
   if (code === undefined || code === "0x") {
     throw new Error(`${label} has no code at ${address}`);
   }
+  return code;
+}
+
+export async function codeHash(
+  publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
+  address: Address,
+  label: string,
+): Promise<Hex> {
+  return keccak256(await assertHasCode(publicClient, address, label));
 }
 
 export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
@@ -159,18 +170,64 @@ export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
   );
 }
 
+export async function assertBeaconValidatorHasWithdrawalCredentials(
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+) {
+  const beaconNodeUrl = process.env.BEACON_NODE_URL;
+  if (!beaconNodeUrl) {
+    console.log(`Skipping ${label} beacon confirmation: BEACON_NODE_URL not set`);
+    return;
+  }
+
+  const url = new URL(`/eth/v1/beacon/states/head/validators/${pubkey}`, beaconNodeUrl);
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${label} beacon validator lookup failed: ${response.status} ${response.statusText}`);
+  }
+
+  const body = (await response.json()) as BeaconValidatorResponse;
+  const actualCredentials = body.data.validator.withdrawal_credentials.toLowerCase();
+  if (actualCredentials !== expectedWithdrawalCredentials.toLowerCase()) {
+    throw new Error(
+      `${label} beacon withdrawal_credentials ${actualCredentials} != pool ${expectedWithdrawalCredentials}`,
+    );
+  }
+  console.log(`${label} beacon confirmation passed: validator has pool withdrawal credentials`);
+}
+
+export function readDepositDataFile(file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE): DepositData[] {
+  return JSON.parse(readFileSync(file, "utf8")) as DepositData[];
+}
+
 export function readSingleDepositData(file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE): DepositData {
-  const deposits = JSON.parse(readFileSync(file, "utf8")) as DepositData[];
+  const deposits = readDepositDataFile(file);
   if (deposits.length !== 1) {
     throw new Error(`Expected exactly one validator deposit entry, got ${deposits.length}`);
   }
   return deposits[0];
 }
 
+export function readPredepositAndTopUpDepositData(
+  file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE,
+): { predeposit: DepositData; topUp: DepositData } {
+  const deposits = readDepositDataFile(file);
+  const predeposit = deposits.find((deposit) => BigInt(deposit.amount) === PREDEPOSIT_GWEI);
+  const topUp = deposits.find((deposit) => BigInt(deposit.amount) === TOP_UP_GWEI);
+  if (predeposit === undefined || topUp === undefined) {
+    throw new Error(
+      `Expected deposit data entries for ${PREDEPOSIT_GWEI} Gwei and ${TOP_UP_GWEI} Gwei in ${file}`,
+    );
+  }
+  return { predeposit, topUp };
+}
+
 export function validateDepositData(
   deposit: DepositData,
   expectedWithdrawalCredentials: Hex,
   expectedPubkey?: Hex,
+  expectedAmountGwei = VALIDATOR_DEPOSIT_GWEI,
 ) {
   const pubkey = normalizeHexLength(deposit.pubkey, 48, "pubkey");
   const withdrawalCredentials = normalizeHexLength(deposit.withdrawal_credentials, 32, "withdrawal_credentials");
@@ -183,8 +240,8 @@ export function validateDepositData(
   );
   const amountGwei = BigInt(deposit.amount);
 
-  if (amountGwei !== VALIDATOR_DEPOSIT_GWEI) {
-    throw new Error(`Deposit amount ${amountGwei} != expected ${VALIDATOR_DEPOSIT_GWEI}`);
+  if (amountGwei !== expectedAmountGwei) {
+    throw new Error(`Deposit amount ${amountGwei} != expected ${expectedAmountGwei}`);
   }
   if (withdrawalCredentials.toLowerCase() !== expectedWithdrawalCredentials.toLowerCase()) {
     throw new Error(`Deposit withdrawal_credentials ${withdrawalCredentials} != pool ${expectedWithdrawalCredentials}`);

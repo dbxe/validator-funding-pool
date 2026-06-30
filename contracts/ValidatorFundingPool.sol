@@ -11,23 +11,20 @@ interface IBeaconDepositContract {
 }
 
 /// @title ValidatorFundingPool
-/// @notice Non-tokenized 32 ETH validator funding pool for a fixed group of known participants.
-/// @dev This contract is intentionally narrow:
-///      - one validator;
-///      - fixed participant set;
-///      - no transferable claims;
-///      - no admin rescue or arbitrary external-call path;
-///      - no on-chain BLS proof-of-possession or beacon-state validation.
-///
-///      The operator is trusted for validator data validity, validator operation, slashing avoidance,
-///      and EL priority fee / MEV recipient configuration. The contract only enforces custody and
-///      pro-rata distribution of ETH that reaches this contract.
+/// @notice Non-tokenized validator funding pool for known participants funding one validator.
+/// @dev The operator first makes the protocol-minimum 1 ETH validator deposit with
+///      pool-owned 0x01 withdrawal credentials. Participants then fund the remaining
+///      31 ETH only after off-chain beacon verification that the pubkey is bound to
+///      this pool. Failed funding attempts become passive refund claims and are never
+///      rolled into later attempts automatically.
 contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
     // Constants
     // -------------------------------------------------------------------------
 
     uint256 public constant VALIDATOR_DEPOSIT_WEI = 32 ether;
+    uint256 public constant PREDEPOSIT_WEI = 1 ether;
+    uint256 public constant TOP_UP_WEI = 31 ether;
 
     uint256 private constant MAX_PARTICIPANTS = 32;
     uint256 private constant PUBKEY_LENGTH = 48;
@@ -40,9 +37,9 @@ contract ValidatorFundingPool {
 
     enum State {
         Uninitialized, // Validator data not committed; ordinary ETH is rejected.
-        Funding, // Participants may fund; timeout cancellation is available.
-        Staked, // Validator deposit submitted; ETH balance is pool proceeds.
-        Canceled // Refunds and canceled-surplus sweeps only.
+        Predeposited, // 1 ETH validator predeposit submitted; no active funding attempt.
+        Funding, // A fixed funding attempt is open for the remaining 31 ETH.
+        ToppedUp // 31 ETH top-up submitted; pool proceeds are claimable pro rata.
     }
 
     // -------------------------------------------------------------------------
@@ -53,7 +50,6 @@ contract ValidatorFundingPool {
     address public immutable withdrawalRequestPredeploy;
     address public immutable operator;
     bytes32 public immutable withdrawalCredentials;
-    uint256 public immutable fundingTargetWei;
     uint256 public immutable fundingWindowDuration;
 
     // -------------------------------------------------------------------------
@@ -61,18 +57,21 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     State public state;
+    uint256 public fundingAttempt;
     uint256 public fundingDeadline;
 
-    uint256 public totalFundedWei;
-    uint256 public totalClaimedWei;
+    uint256 public totalActiveFundedWei;
+    uint256 public totalRefundableWei;
     uint256 public totalRefundedWei;
 
-    uint256 public canceledSurplusTotalWeight;
-    uint256 public totalCanceledSurplusClaimedWei;
+    uint256 public totalCreditedWei;
+    uint256 public totalClaimedWei;
 
-    bool public validatorDepositSubmitted;
+    bool public predepositSubmitted;
+    bool public topUpSubmitted;
     bytes32 public committedPubkeyHash;
-    bytes32 public committedDepositDataRoot;
+    bytes32 public predepositDataRoot;
+    bytes32 public topUpDepositDataRoot;
 
     uint256 public exitRequestAttemptCount;
     uint256 public lastExitRequestFeePaid;
@@ -84,14 +83,15 @@ contract ValidatorFundingPool {
 
     address[] private _participants;
     bytes private _committedPubkey;
-    bytes private _committedSignature;
+    bytes private _predepositSignature;
+    bytes private _topUpSignature;
 
     mapping(address participant => uint256 indexPlusOne) private _participantIndexPlusOne;
     mapping(address participant => uint256 targetWei) public fundingTargetWeiOf;
-    mapping(address participant => uint256 fundedWei) public fundedWeiOf;
+    mapping(address participant => uint256 fundedWei) public activeFundedWeiOf;
+    mapping(address participant => uint256 refundableWei) public refundableWeiOf;
+    mapping(address participant => uint256 creditedWei) public creditedWeiOf;
     mapping(address participant => uint256 claimedWei) public claimedWeiOf;
-    mapping(address participant => uint256 surplusWeight) public canceledSurplusWeightOf;
-    mapping(address participant => uint256 claimedWei) public canceledSurplusClaimedWeiOf;
 
     uint256 private _reentrancyLock;
 
@@ -99,56 +99,50 @@ contract ValidatorFundingPool {
     // Events
     // -------------------------------------------------------------------------
 
-    event ValidatorCommitted(
+    event ValidatorPredeposited(
         bytes32 indexed pubkeyHash,
         bytes pubkey,
-        bytes32 depositDataRoot,
-        uint256 fundingDeadline
+        bytes32 predepositDataRoot,
+        bytes32 topUpDepositDataRoot
     );
+    event FundingAttemptOpened(uint256 indexed attempt, uint256 fundingDeadline);
     event ParticipantFunded(
+        uint256 indexed attempt,
         address indexed participant,
         uint256 amount,
         uint256 participantTotal,
-        uint256 poolTotal
+        uint256 attemptTotal
     );
-    event PoolCanceled(address indexed caller);
+    event FundingAttemptClosed(uint256 indexed attempt);
     event Refunded(address indexed participant, address indexed recipient, uint256 amount);
-    event ValidatorDepositSubmitted(
+    event ValidatorTopUpSubmitted(
         bytes32 indexed pubkeyHash,
         bytes pubkey,
-        bytes32 depositDataRoot
+        bytes32 topUpDepositDataRoot
     );
-    event PoolStaked();
-    /// @notice Emitted only when ETH is received through an EVM call while staked.
+    event PoolToppedUp();
+    /// @notice Emitted only when ETH is received through an EVM call after top-up.
     /// @dev This event is not a complete proceeds ledger. Consensus withdrawals,
     ///      priority-fee / coinbase balance increases, and forced ETH can increase
     ///      this contract's balance without executing receive() and without emitting
     ///      this event. Authoritative pool accounting is balance-based:
-    ///      grossPoolProceeds() = address(this).balance + totalClaimedWei.
+    ///      grossPoolProceeds() = address(this).balance + totalClaimedWei - totalRefundableWei.
     event EthReceivedViaCall(address indexed sender, uint256 amount);
     /// @notice Emitted after selected accounting actions to record observed pool state.
     /// @dev This is a reconciliation aid only. It is not a complete proceeds ledger,
     ///      not a source-of-funds classifier, and not evidence that no silent balance
-    ///      changes occurred between snapshots. Consensus withdrawals, priority-fee /
-    ///      coinbase balance increases, and forced ETH can increase this contract's
-    ///      balance without executing contract code and without emitting a pool event.
-    ///      Authoritative entitlement accounting remains balance-based.
+    ///      changes occurred between snapshots. Authoritative entitlement accounting
+    ///      remains balance-based and excludes outstanding refund liabilities.
     event AccountingSnapshot(
         State state,
         uint256 balance,
-        uint256 totalFundedWei,
+        uint256 totalActiveFundedWei,
+        uint256 totalRefundableWei,
+        uint256 totalCreditedWei,
         uint256 totalClaimedWei,
-        uint256 totalRefundedWei,
-        uint256 totalCanceledSurplusClaimedWei,
-        uint256 grossPoolProceeds,
-        uint256 grossCanceledSurplus
+        uint256 grossPoolProceeds
     );
     event Claimed(address indexed participant, address indexed recipient, uint256 amount);
-    event CanceledSurplusClaimed(
-        address indexed participant,
-        address indexed recipient,
-        uint256 amount
-    );
     event ExitRequestSubmitted(
         bytes32 indexed pubkeyHash,
         bytes pubkey,
@@ -166,6 +160,7 @@ contract ValidatorFundingPool {
     error DuplicateParticipant();
     error InvalidFundingTarget();
     error FundingTargetsDoNotMatchValidator();
+    error OperatorTargetTooSmall();
     error InvalidDepositContract();
     error InvalidWithdrawalRequestPredeploy();
     error InvalidOperator();
@@ -179,6 +174,7 @@ contract ValidatorFundingPool {
     error ZeroAmount();
     error FundingCapExceeded();
     error FundingIncomplete();
+    error InvalidPredepositValue();
     error InvalidPubkey();
     error InvalidSignature();
     error InvalidDepositDataRoot();
@@ -194,11 +190,6 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
     // Modifiers
     // -------------------------------------------------------------------------
-
-    modifier onlyParticipant() {
-        if (!_isParticipant(msg.sender)) revert NotParticipant();
-        _;
-    }
 
     modifier onlyOperator() {
         if (msg.sender != operator) revert NotOperator();
@@ -216,17 +207,13 @@ contract ValidatorFundingPool {
     // Deployment
     // -------------------------------------------------------------------------
 
-    /// @notice Deploy an uninitialized pool for one 32 ETH validator.
-    /// @dev Participant funding targets must be nonzero, unique, and sum exactly
-    ///      to `VALIDATOR_DEPOSIT_WEI`. The funding deadline is not set here; it
-    ///      starts when the operator commits validator deposit data.
+    /// @notice Deploy an uninitialized pool for one validator.
+    /// @dev Funding allocations are provided per-attempt, not at construction.
     constructor(
         address depositContract_,
         address withdrawalRequestPredeploy_,
         address operator_,
-        uint256 fundingWindowDuration_,
-        address[] memory participants_,
-        uint256[] memory fundingTargets_
+        uint256 fundingWindowDuration_
     ) {
         if (depositContract_ == address(0) || depositContract_.code.length == 0) {
             revert InvalidDepositContract();
@@ -236,35 +223,15 @@ contract ValidatorFundingPool {
         }
         if (operator_ == address(0)) revert InvalidOperator();
         if (fundingWindowDuration_ == 0) revert InvalidFundingWindow();
-        if (participants_.length == 0) revert EmptyParticipantSet();
-        if (participants_.length > MAX_PARTICIPANTS) revert TooManyParticipants();
-        if (participants_.length != fundingTargets_.length) revert InvalidFundingTarget();
 
         depositContract = depositContract_;
         withdrawalRequestPredeploy = withdrawalRequestPredeploy_;
         operator = operator_;
         fundingWindowDuration = fundingWindowDuration_;
         withdrawalCredentials = _makeEth1WithdrawalCredentials(address(this));
-
-        uint256 targetTotal;
-        for (uint256 i; i < participants_.length; ++i) {
-            address participant = participants_[i];
-            uint256 target = fundingTargets_[i];
-            if (participant == address(0)) revert InvalidParticipant();
-            if (_isParticipant(participant)) revert DuplicateParticipant();
-            if (target == 0) revert InvalidFundingTarget();
-
-            _participantIndexPlusOne[participant] = i + 1;
-            fundingTargetWeiOf[participant] = target;
-            _participants.push(participant);
-            targetTotal += target;
-        }
-
-        if (targetTotal != VALIDATOR_DEPOSIT_WEI) revert FundingTargetsDoNotMatchValidator();
-        fundingTargetWei = VALIDATOR_DEPOSIT_WEI;
     }
 
-    /// @notice Accept participant funding during Funding and pool proceeds during Staked.
+    /// @notice Accept current-attempt funding during Funding and proceeds after top-up.
     /// @dev Consensus withdrawals and forced ETH can change balance without invoking this function.
     receive() external payable {
         if (state == State.Funding) {
@@ -272,7 +239,7 @@ contract ValidatorFundingPool {
             return;
         }
 
-        if (state == State.Staked) {
+        if (state == State.ToppedUp) {
             emit EthReceivedViaCall(msg.sender, msg.value);
             _emitAccountingSnapshot();
             return;
@@ -282,87 +249,127 @@ contract ValidatorFundingPool {
     }
 
     // -------------------------------------------------------------------------
-    // Funding lifecycle
+    // Validator predeposit lifecycle
     // -------------------------------------------------------------------------
 
-    /// @notice Commit validator deposit data before participant funding begins.
-    /// @dev Starts the funding deadline. The contract checks lengths and a
-    ///      nonzero root, but does not verify BLS proof-of-possession, beacon
-    ///      state, or whether the pubkey was already used.
-    function commitValidator(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot)
-        external
-        onlyOperator
-    {
+    /// @notice Commit validator data and submit the operator-funded 1 ETH predeposit.
+    /// @dev The predeposit is the protocol minimum validator deposit. It is credited
+    ///      to the operator economically, but is not refundable from this contract.
+    function commitAndPredeposit(
+        bytes calldata pubkey,
+        bytes calldata predepositSignature_,
+        bytes32 predepositDataRoot_,
+        bytes calldata topUpSignature_,
+        bytes32 topUpDepositDataRoot_
+    ) external payable onlyOperator nonReentrant {
         if (state != State.Uninitialized) revert InvalidState();
-        _validateValidatorData(pubkey, signature, depositDataRoot);
+        if (msg.value != PREDEPOSIT_WEI) revert InvalidPredepositValue();
+        _validateValidatorData(pubkey, predepositSignature_, predepositDataRoot_);
+        _validateValidatorData(pubkey, topUpSignature_, topUpDepositDataRoot_);
 
         bytes32 pubkeyHash = keccak256(pubkey);
         committedPubkeyHash = pubkeyHash;
-        committedDepositDataRoot = depositDataRoot;
+        predepositDataRoot = predepositDataRoot_;
+        topUpDepositDataRoot = topUpDepositDataRoot_;
         _committedPubkey = pubkey;
-        _committedSignature = signature;
+        _predepositSignature = predepositSignature_;
+        _topUpSignature = topUpSignature_;
+        predepositSubmitted = true;
 
-        uint256 deadline = block.timestamp + fundingWindowDuration;
-        fundingDeadline = deadline;
-        state = State.Funding;
+        IBeaconDepositContract(depositContract).deposit{value: PREDEPOSIT_WEI}(
+            pubkey, abi.encodePacked(withdrawalCredentials), predepositSignature_, predepositDataRoot_
+        );
 
-        emit ValidatorCommitted(pubkeyHash, pubkey, depositDataRoot, deadline);
+        state = State.Predeposited;
+        emit ValidatorPredeposited(pubkeyHash, pubkey, predepositDataRoot_, topUpDepositDataRoot_);
         _emitAccountingSnapshot();
     }
 
-    /// @notice Fund the caller's participant allocation during Funding.
-    /// @dev The caller must be a participant and cannot fund beyond their fixed
-    ///      target. Direct ETH transfers in Funding follow the same path.
+    /// @notice Open a fixed funding attempt for the remaining validator balance.
+    /// @dev Targets are final economic weights and must sum to 32 ETH. The operator
+    ///      must be included with at least the 1 ETH predeposit credit. The amount
+    ///      the operator may fund in the attempt is `target - PREDEPOSIT_WEI`.
+    function openFundingAttempt(address[] calldata participants, uint256[] calldata fundingTargets)
+        external
+        onlyOperator
+    {
+        if (state != State.Predeposited) revert InvalidState();
+        _setFundingAttempt(participants, fundingTargets);
+
+        uint256 deadline = block.timestamp + fundingWindowDuration;
+        fundingDeadline = deadline;
+        fundingAttempt += 1;
+        state = State.Funding;
+
+        emit FundingAttemptOpened(fundingAttempt, deadline);
+        _emitAccountingSnapshot();
+    }
+
+    /// @notice Fund the caller's current-attempt allocation.
     function fund() external payable {
         _fund(msg.sender, msg.value);
     }
 
-    /// @notice Cancel an unstaked pool after the funding deadline.
-    /// @dev Fixes canceled-surplus weights before refunds. If anyone funded,
-    ///      surplus weights are funded amounts; otherwise they are target weights.
-    function cancel() external onlyParticipant {
+    /// @notice Close an expired funding attempt and make active contributions refundable.
+    /// @dev Anyone can close after the deadline, so participants are not dependent on
+    ///      the operator to unlock refunds. Refund claims are not reused by later
+    ///      attempts unless the participant withdraws and funds again.
+    function closeExpiredFundingAttempt() external {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp <= fundingDeadline) revert FundingStillOpen();
 
-        state = State.Canceled;
-
-        uint256 totalWeight = totalFundedWei == 0 ? fundingTargetWei : totalFundedWei;
-        canceledSurplusTotalWeight = totalWeight;
-        for (uint256 i; i < _participants.length; ++i) {
+        uint256 count = _participants.length;
+        for (uint256 i; i < count; ++i) {
             address participant = _participants[i];
-            uint256 weight = totalFundedWei == 0 ? fundingTargetWeiOf[participant] : fundedWeiOf[participant];
-            canceledSurplusWeightOf[participant] = weight;
+            uint256 funded = activeFundedWeiOf[participant];
+            if (funded != 0) {
+                activeFundedWeiOf[participant] = 0;
+                refundableWeiOf[participant] += funded;
+                totalRefundableWei += funded;
+            }
+            fundingTargetWeiOf[participant] = 0;
+            _participantIndexPlusOne[participant] = 0;
         }
+        delete _participants;
 
-        emit PoolCanceled(msg.sender);
+        totalActiveFundedWei = 0;
+        state = State.Predeposited;
+
+        emit FundingAttemptClosed(fundingAttempt);
         _emitAccountingSnapshot();
     }
 
     // -------------------------------------------------------------------------
-    // Staking lifecycle
+    // Validator top-up lifecycle
     // -------------------------------------------------------------------------
 
-    /// @notice Submit the committed validator deposit to the deposit contract.
-    /// @dev Requires exact 32 ETH participant funding before the deadline. Any
-    ///      ETH balance left after the deposit, including pre-stake forced ETH,
-    ///      becomes pool proceeds in Staked state.
-    function stake() external onlyOperator nonReentrant {
+    /// @notice Submit the 31 ETH top-up after exact current-attempt funding.
+    /// @dev Outstanding refund balances are excluded from proceeds and must remain
+    ///      in the contract after the top-up.
+    function topUpValidator() external onlyOperator nonReentrant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp > fundingDeadline) revert FundingClosed();
-        if (totalFundedWei != fundingTargetWei) revert FundingIncomplete();
-        if (address(this).balance < fundingTargetWei) revert FundingIncomplete();
-        if (validatorDepositSubmitted) revert InvalidState();
+        if (totalActiveFundedWei != TOP_UP_WEI) revert FundingIncomplete();
+        if (address(this).balance < TOP_UP_WEI + totalRefundableWei) revert FundingIncomplete();
+        if (topUpSubmitted) revert InvalidState();
 
-        bytes memory expectedWithdrawalCredentials = abi.encodePacked(withdrawalCredentials);
-        validatorDepositSubmitted = true;
+        uint256 count = _participants.length;
+        for (uint256 i; i < count; ++i) {
+            address participant = _participants[i];
+            uint256 credit = fundingTargetWeiOf[participant];
+            creditedWeiOf[participant] = credit;
+            totalCreditedWei += credit;
+        }
+        if (totalCreditedWei != VALIDATOR_DEPOSIT_WEI) revert FundingTargetsDoNotMatchValidator();
 
-        IBeaconDepositContract(depositContract).deposit{value: VALIDATOR_DEPOSIT_WEI}(
-            _committedPubkey, expectedWithdrawalCredentials, _committedSignature, committedDepositDataRoot
+        topUpSubmitted = true;
+        IBeaconDepositContract(depositContract).deposit{value: TOP_UP_WEI}(
+            _committedPubkey, abi.encodePacked(withdrawalCredentials), _topUpSignature, topUpDepositDataRoot
         );
 
-        state = State.Staked;
-        emit ValidatorDepositSubmitted(committedPubkeyHash, _committedPubkey, committedDepositDataRoot);
-        emit PoolStaked();
+        state = State.ToppedUp;
+        emit ValidatorTopUpSubmitted(committedPubkeyHash, _committedPubkey, topUpDepositDataRoot);
+        emit PoolToppedUp();
         _emitAccountingSnapshot();
     }
 
@@ -371,19 +378,16 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     /// @notice Request a full validator exit through EIP-7002.
-    /// @dev Allowed after validator commitment, even before local Staked state,
-    ///      because the committed pubkey may have become a pool-owned validator
-    ///      through an external deposit. The caller pays the request fee. An
-    ///      EL-accepted request can still be ignored by CL processing, so retries
-    ///      are allowed.
-    function requestExit(uint256 maxFee) external payable onlyParticipant nonReentrant {
+    /// @dev Allowed after predeposit. An EL-accepted request can still be ignored
+    ///      by CL processing, so retries are allowed. The caller pays the fee.
+    function requestExit(uint256 maxFee) external payable nonReentrant {
         if (_committedPubkey.length != PUBKEY_LENGTH) revert InvalidState();
+        if (!_canRequestExit(msg.sender)) revert NotParticipant();
 
         uint256 fee = currentExitRequestFee();
         if (fee > maxFee) revert ExitFeeTooHigh(fee, maxFee);
         if (msg.value < fee) revert InsufficientExitFee(msg.value, fee);
 
-        // EIP-7002 full exit requests use amount = 0, encoded as eight zero bytes.
         bytes memory requestData = bytes.concat(_committedPubkey, FULL_EXIT_REQUEST_AMOUNT_DATA);
         (bool ok,) = withdrawalRequestPredeploy.call{value: fee}(requestData);
         if (!ok) revert ExitRequestFailed();
@@ -408,17 +412,16 @@ contract ValidatorFundingPool {
         refundTo(payable(msg.sender));
     }
 
-    /// @notice Refund the caller's exact funded principal after cancellation.
-    /// @dev The recipient may be any nonzero address except this pool. Refunding
-    ///      does not affect canceled-surplus entitlement.
-    function refundTo(address payable recipient) public onlyParticipant nonReentrant {
-        if (state != State.Canceled) revert InvalidState();
+    /// @notice Withdraw the caller's failed-attempt refund balance.
+    /// @dev Refund balances are independent from later funding attempts.
+    function refundTo(address payable recipient) public nonReentrant {
         _validateRecipient(recipient);
 
-        uint256 amount = fundedWeiOf[msg.sender];
+        uint256 amount = refundableWeiOf[msg.sender];
         if (amount == 0) revert NothingToRefund();
 
-        fundedWeiOf[msg.sender] = 0;
+        refundableWeiOf[msg.sender] = 0;
+        totalRefundableWei -= amount;
         totalRefundedWei += amount;
         _sendEth(recipient, amount);
 
@@ -431,11 +434,10 @@ contract ValidatorFundingPool {
     }
 
     /// @notice Claim the caller's currently vested pro-rata pool proceeds.
-    /// @dev Uses cumulative entitlement, so claim timing cannot improve or reduce
-    ///      a participant's total entitlement. The recipient may be any nonzero
-    ///      address except this pool.
-    function claimTo(address payable recipient) public onlyParticipant nonReentrant {
-        if (state != State.Staked) revert InvalidState();
+    /// @dev Outstanding refund balances are excluded from proceeds, so old failed
+    ///      attempt refunds cannot be distributed to topped-up participants.
+    function claimTo(address payable recipient) public nonReentrant {
+        if (state != State.ToppedUp) revert InvalidState();
         _validateRecipient(recipient);
 
         uint256 amount = claimable(msg.sender);
@@ -449,73 +451,41 @@ contract ValidatorFundingPool {
         _emitAccountingSnapshot();
     }
 
-    function sweepCanceledSurplus() external {
-        sweepCanceledSurplusTo(payable(msg.sender));
-    }
-
-    /// @notice Claim the caller's share of surplus ETH after cancellation.
-    /// @dev Surplus excludes outstanding refunds, so funded principal is not
-    ///      swept. The recipient may be any nonzero address except this pool.
-    function sweepCanceledSurplusTo(address payable recipient) public onlyParticipant nonReentrant {
-        if (state != State.Canceled) revert InvalidState();
-        _validateRecipient(recipient);
-
-        uint256 amount = canceledSurplusClaimable(msg.sender);
-        if (amount == 0) revert NothingToClaim();
-
-        canceledSurplusClaimedWeiOf[msg.sender] += amount;
-        totalCanceledSurplusClaimedWei += amount;
-        _sendEth(recipient, amount);
-
-        emit CanceledSurplusClaimed(msg.sender, recipient, amount);
-        _emitAccountingSnapshot();
-    }
-
     // -------------------------------------------------------------------------
     // Accounting views
     // -------------------------------------------------------------------------
 
     function claimable(address participant) public view returns (uint256) {
-        if (state != State.Staked) return 0;
+        if (state != State.ToppedUp) return 0;
 
-        uint256 funded = fundedWeiOf[participant];
-        if (funded == 0) return 0;
+        uint256 credit = creditedWeiOf[participant];
+        if (credit == 0) return 0;
 
-        // Gross proceeds includes already-claimed ETH, so claim order cannot affect entitlement.
-        uint256 entitled = grossPoolProceeds() * funded / totalFundedWei;
+        uint256 entitled = grossPoolProceeds() * credit / totalCreditedWei;
         uint256 alreadyClaimed = claimedWeiOf[participant];
         if (entitled <= alreadyClaimed) return 0;
         return entitled - alreadyClaimed;
     }
 
     /// @notice Return cumulative pool proceeds used for claim entitlement.
-    /// @dev Equal to current balance plus already claimed proceeds. This makes
-    ///      claim order irrelevant to cumulative entitlement.
+    /// @dev Equal to current balance plus already claimed proceeds, minus outstanding
+    ///      failed-attempt refund liabilities.
     function grossPoolProceeds() public view returns (uint256) {
-        return address(this).balance + totalClaimedWei;
+        return address(this).balance + totalClaimedWei - totalRefundableWei;
     }
 
-    function canceledSurplusClaimable(address participant) public view returns (uint256) {
-        if (state != State.Canceled) return 0;
+    function fundingRemainingWeiOf(address participant) public view returns (uint256) {
+        uint256 target = fundingTargetWeiOf[participant];
+        if (target == 0) return 0;
 
-        uint256 weight = canceledSurplusWeightOf[participant];
-        if (weight == 0) return 0;
+        uint256 required = target;
+        if (participant == operator) {
+            required -= PREDEPOSIT_WEI;
+        }
 
-        // Canceled surplus excludes outstanding refunds, so refund principal is never swept as surplus.
-        uint256 entitled = grossCanceledSurplus() * weight / canceledSurplusTotalWeight;
-        uint256 alreadyClaimed = canceledSurplusClaimedWeiOf[participant];
-        if (entitled <= alreadyClaimed) return 0;
-        return entitled - alreadyClaimed;
-    }
-
-    /// @notice Return canceled-state surplus outside outstanding refunds.
-    /// @dev Equal to current balance plus already swept surplus minus funded
-    ///      principal that has not yet been refunded. Returns zero outside Canceled.
-    function grossCanceledSurplus() public view returns (uint256) {
-        if (state != State.Canceled) return 0;
-
-        uint256 outstandingRefunds = totalFundedWei - totalRefundedWei;
-        return address(this).balance + totalCanceledSurplusClaimedWei - outstandingRefunds;
+        uint256 funded = activeFundedWeiOf[participant];
+        if (required <= funded) return 0;
+        return required - funded;
     }
 
     // -------------------------------------------------------------------------
@@ -538,8 +508,12 @@ contract ValidatorFundingPool {
         return _committedPubkey;
     }
 
-    function committedSignature() external view returns (bytes memory) {
-        return _committedSignature;
+    function predepositSignature() external view returns (bytes memory) {
+        return _predepositSignature;
+    }
+
+    function topUpSignature() external view returns (bytes memory) {
+        return _topUpSignature;
     }
 
     function withdrawalCredentialsBytes() external view returns (bytes memory) {
@@ -569,38 +543,65 @@ contract ValidatorFundingPool {
         if (!_isParticipant(participant)) revert NotParticipant();
         if (amount == 0) revert ZeroAmount();
 
-        uint256 funded = fundedWeiOf[participant];
-        uint256 target = fundingTargetWeiOf[participant];
-        if (amount > target - funded) revert FundingCapExceeded();
+        uint256 remaining = fundingRemainingWeiOf(participant);
+        if (amount > remaining) revert FundingCapExceeded();
 
-        uint256 newFunded = funded + amount;
-        fundedWeiOf[participant] = newFunded;
-        totalFundedWei += amount;
+        uint256 newFunded = activeFundedWeiOf[participant] + amount;
+        activeFundedWeiOf[participant] = newFunded;
+        totalActiveFundedWei += amount;
 
-        emit ParticipantFunded(participant, amount, newFunded, totalFundedWei);
+        emit ParticipantFunded(fundingAttempt, participant, amount, newFunded, totalActiveFundedWei);
         _emitAccountingSnapshot();
+    }
+
+    function _setFundingAttempt(address[] calldata participants, uint256[] calldata fundingTargets) private {
+        if (participants.length == 0) revert EmptyParticipantSet();
+        if (participants.length > MAX_PARTICIPANTS) revert TooManyParticipants();
+        if (participants.length != fundingTargets.length) revert InvalidFundingTarget();
+
+        uint256 targetTotal;
+        bool operatorSeen;
+        for (uint256 i; i < participants.length; ++i) {
+            address participant = participants[i];
+            uint256 target = fundingTargets[i];
+            if (participant == address(0)) revert InvalidParticipant();
+            if (_isParticipant(participant)) revert DuplicateParticipant();
+            if (target == 0) revert InvalidFundingTarget();
+
+            if (participant == operator) {
+                if (target < PREDEPOSIT_WEI) revert OperatorTargetTooSmall();
+                operatorSeen = true;
+            }
+
+            _participantIndexPlusOne[participant] = i + 1;
+            fundingTargetWeiOf[participant] = target;
+            _participants.push(participant);
+            targetTotal += target;
+        }
+
+        if (!operatorSeen) revert OperatorTargetTooSmall();
+        if (targetTotal != VALIDATOR_DEPOSIT_WEI) revert FundingTargetsDoNotMatchValidator();
     }
 
     function _emitAccountingSnapshot() private {
         emit AccountingSnapshot(
             state,
             address(this).balance,
-            totalFundedWei,
+            totalActiveFundedWei,
+            totalRefundableWei,
+            totalCreditedWei,
             totalClaimedWei,
-            totalRefundedWei,
-            totalCanceledSurplusClaimedWei,
-            grossPoolProceeds(),
-            grossCanceledSurplus()
+            grossPoolProceeds()
         );
     }
 
-    function _validateValidatorData(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot)
+    function _validateValidatorData(bytes calldata pubkey, bytes calldata signature, bytes32 depositDataRoot_)
         private
         pure
     {
         if (pubkey.length != PUBKEY_LENGTH) revert InvalidPubkey();
         if (signature.length != SIGNATURE_LENGTH) revert InvalidSignature();
-        if (depositDataRoot == bytes32(0)) revert InvalidDepositDataRoot();
+        if (depositDataRoot_ == bytes32(0)) revert InvalidDepositDataRoot();
     }
 
     function _validateRecipient(address recipient) private view {
@@ -610,6 +611,13 @@ contract ValidatorFundingPool {
     function _sendEth(address payable recipient, uint256 amount) private {
         (bool ok,) = recipient.call{value: amount}("");
         if (!ok) revert EthPayoutFailed();
+    }
+
+    function _canRequestExit(address account) private view returns (bool) {
+        return account == operator
+            || _isParticipant(account)
+            || creditedWeiOf[account] != 0
+            || refundableWeiOf[account] != 0;
     }
 
     function _isParticipant(address account) private view returns (bool) {

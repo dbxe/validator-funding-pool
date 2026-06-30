@@ -1,18 +1,18 @@
 # Validator Funding Pool
 
-Minimal `0x01` withdrawal-credential funding pool for a fixed group of known participants pooling into one Ethereum validator.
+Minimal `0x01` withdrawal-credential funding pool for known participants funding one Ethereum validator.
 
 The contract is a non-tokenized agreement between known funders. It mints no ERC-20, ERC-721, ERC-1155, vault share, receipt token, or transferable claim. Economic rights are internal accounting only.
 
 ## What This Is
 
-- One fixed participant set.
-- One validator.
-- Exact `32 ETH` funding target.
-- Fixed participant funding caps, also used as post-stake economic weights.
+- One validator pubkey.
 - Pool-owned `0x01` withdrawal credentials: `0x01 || 11 zero bytes || address(pool)`.
-- Pro-rata distribution of ETH that reaches the pool after staking.
-- Participant-triggered EIP-7002 full-exit request attempts.
+- Operator-funded `1 ETH` protocol-minimum predeposit.
+- Participant-funded `31 ETH` top-up after off-chain beacon verification.
+- Fixed allocation per funding attempt.
+- Pro-rata distribution of ETH that reaches the pool after top-up.
+- Retryable EIP-7002 full-exit request attempts by pool stakeholders.
 
 ## What This Is Not
 
@@ -23,92 +23,137 @@ The contract is a non-tokenized agreement between known funders. It mints no ERC
 - Not an operator replacement mechanism.
 - Not an admin-rescue contract.
 - Not a way to make EL priority fees / MEV trustless.
-- Not an on-chain BLS proof-of-possession or beacon-state verifier.
+- Not an on-chain BLS proof-of-possession, deposit-log, or beacon-state verifier.
 
 The pool intentionally exposes no arbitrary external-call, delegatecall, upgrade, owner rescue, consolidation-request, or `0x01 -> 0x02` credential-switch path.
 
 ## Lifecycle
 
-1. Deploy the pool with participants, funding targets, operator, and system contract addresses.
+1. Deploy the pool with operator and system contract addresses.
 2. Read the pool address and withdrawal credentials.
-3. Generate one validator deposit-data entry with regular `0x01` withdrawal credentials pointing to the pool address.
-4. The operator commits the validator pubkey, signature, and deposit data root on-chain.
-5. Participants inspect the committed validator data and then fund up to their caps.
-6. The operator stakes the committed validator after exact `32 ETH` funding and before the funding deadline.
-7. After staking, any ETH balance in the pool is claimable pro rata by funding weight.
-8. After validator commitment, any participant can request a full validator exit through EIP-7002. Requests are retryable attempts, not a one-shot latch.
+3. Generate two deposit-data entries for the same validator pubkey and pool withdrawal credentials:
+   - `1000000000` Gwei predeposit;
+   - `31000000000` Gwei top-up.
+4. Operator calls `commitAndPredeposit()` with the deposit data and sends exactly `1 ETH`.
+5. Participants wait for beacon state to show the validator pubkey exists with the pool's withdrawal credentials.
+6. Operator opens a fixed funding attempt whose economic targets sum to `32 ETH` and include the operator with at least `1 ETH`.
+7. Participants fund their current-attempt caps. The operator's cap is its target minus the credited `1 ETH` predeposit.
+8. Operator calls `topUpValidator()` after exact `31 ETH` active funding and before the deadline.
+9. After top-up, any ETH balance in the pool, excluding outstanding failed-attempt refunds, is claimable pro rata by final economic weight.
 
-The funding deadline starts at validator commitment time, not deployment time. If the pool is not staked before the deadline, participants can cancel and refund exact funded amounts.
-Exit attempts are allowed after commitment, not only after local `Staked` state, so participants can still act if the committed pubkey becomes a pool-owned validator through an external deposit path.
+If a funding attempt expires before top-up, anyone can close it. Active contributions become passive refund claims. The operator may open a new funding attempt without waiting for those refunds to be withdrawn. Refund claims are never rolled into later attempts automatically.
+
+## Participant Verification
+
+Participants should not fund until beacon state confirms the predeposit locked the validator pubkey to the pool withdrawal credentials. Before funding, participants should verify:
+
+- the on-chain committed pubkey, signatures, and roots match the deposit-data file;
+- both deposit-data entries use the pool's `0x01` withdrawal credentials;
+- one entry is exactly `1000000000` Gwei and the other is exactly `31000000000` Gwei;
+- both deposit data roots recompute correctly;
+- both BLS deposit signatures verify for the deposit message and fork version;
+- network metadata matches the intended chain;
+- beacon state shows the committed pubkey with the pool withdrawal credentials.
+
+These values are not private. Deposit data is designed to be publishable and becomes public when submitted to the deposit contract. The operator must not share validator private keys, mnemonics, keystore passwords, remote signer credentials, or validator-client secrets.
+
+Repository scripts verify deposit roots and BLS signatures. `fund.ts` compares the local deposit-data file to the on-chain commitment before sending ETH. Beacon-state checks run when `BEACON_NODE_URL` is set.
 
 ## Trust Boundaries
 
 The operator is trusted to:
 
-- provide deposit data with a valid BLS proof-of-possession;
-- avoid reusing a validator pubkey;
-- call `stake()` after full funding;
+- generate fresh validator key material;
+- provide valid predeposit and top-up deposit data;
+- pay the `1 ETH` predeposit before participants fund;
+- open funding attempts with the agreed participants and weights;
+- call `topUpValidator()` after exact funding;
 - run the validator correctly and avoid slashable behavior;
 - configure EL priority fee / MEV recipients as agreed off-chain.
+
+The predeposit flow removes the main first-deposit credential-capture risk for participants: they fund only after beacon state shows the validator pubkey is already bound to the pool. A malicious operator can still slash, abandon, or misoperate the validator after top-up. This contract is trust-minimized, not trustless.
 
 The contract only enforces custody and pro-rata distribution of ETH that reaches the pool. Consensus withdrawals and exited principal reach the pool because withdrawal credentials point to the pool. EL priority fees and MEV are operator-controlled. The default expectation is that the operator keeps those as hardware incentive; if the group wants to split them, the operator can configure the fee recipient / builder payout address to the pool.
 
 ## Accounting Model
 
-- Funding targets must sum exactly to `32 ETH`.
-- A participant's funding cap is also their proceeds weight.
-- Claims use cumulative entitlement: `grossPoolProceeds() = address(pool).balance + totalClaimedWei()`.
+- The operator's `1 ETH` predeposit is credited to the operator's final economic weight.
+- Funding-attempt targets are final economic weights and must sum exactly to `32 ETH`.
+- The operator target must be at least `1 ETH`; the operator may fund additional ETH above the predeposit.
+- Active funding is only for the current attempt.
+- Expired-attempt funding becomes `refundableWeiOf[participant]`.
+- Refund claims are independent liabilities and are excluded from proceeds.
+- Claims use cumulative entitlement: `grossPoolProceeds() = address(pool).balance + totalClaimedWei() - totalRefundableWei()`.
 - Claim timing does not change anyone's cumulative entitlement.
-- Integer division can leave tiny rounding dust. At a fixed final gross amount, dust is bounded below the participant count in wei. Later proceeds can make prior dust claimable.
-- User-selected payout recipients for `claimTo`, `refundTo`, and `sweepCanceledSurplusTo` cannot be `address(0)` or the pool itself.
+- Integer division can leave tiny rounding dust. Later proceeds can make prior dust claimable.
+- User-selected payout recipients for `claimTo` and `refundTo` cannot be `address(0)` or the pool itself.
 
-Every post-stake wei held by the pool is treated as pool proceeds. The contract intentionally does not distinguish principal from rewards because consensus exit timing and CL-side exits make that harder to reason about.
+After top-up, every non-refund wei held by the pool is treated as pool proceeds. The contract intentionally does not distinguish principal from rewards because consensus exit timing and CL-side exits make that harder to reason about.
+
+## Balance Increases Without Calls
+
+The pool uses balance-based accounting, so ETH that reaches the pool is accounted for even if no Solidity function executes. Silent balance increases can come from:
+
+- consensus withdrawals to the pool's `0x01` withdrawal credentials;
+- priority-fee / coinbase payments if the validator or builder configuration points to the pool;
+- forced ETH transfers, including `selfdestruct`-based transfers.
+
+Ordinary ETH transfers are accepted only during `Funding` and `ToppedUp`. Forced ETH can still arrive in any state.
+
+Forced ETH before top-up becomes pool proceeds after top-up, except that outstanding refund claims remain excluded. There is no sender rescue path for forced ETH.
 
 ## Event Reconciliation
 
 Events are reconciliation aids, not the source of entitlement accounting.
 
-- `EthReceivedViaCall(sender, amount)` is emitted only when ETH reaches `receive()` while the pool is staked.
+- `EthReceivedViaCall(sender, amount)` is emitted only when ETH reaches `receive()` after top-up.
 - `AccountingSnapshot(...)` is emitted after selected accounting actions and records the post-action observed state.
-- Snapshots are emitted after validator commitment, successful funding, staking, callable staked ETH receipt, cancellation, claims, refunds, and canceled-surplus sweeps.
-- Snapshot events include balance, funded totals, claimed totals, canceled-surplus claimed totals, `grossPoolProceeds()`, and `grossCanceledSurplus()`.
-- Silent balance increases can occur between snapshots. Consensus withdrawals, priority-fee / coinbase balance increases, and forced ETH can increase the pool balance without executing contract code and without emitting a pool event.
-- A later snapshot-bearing transaction reveals those silent balance changes through the observed balance and gross accounting values.
+- Snapshots are emitted after predeposit, funding-attempt open/close, successful funding, top-up, callable topped-up ETH receipt, claims, and refunds.
+- Snapshot events include balance, active funding, refund liabilities, final credited weights, claimed totals, and `grossPoolProceeds()`.
+- Silent balance increases can occur between snapshots and may not emit any pool event.
 
 Authoritative entitlement accounting remains balance-based. Events are useful for operations, audit trails, and reconciliation, but they are not a complete proceeds ledger or source-of-funds classifier.
 
-## Forced ETH
+## Cross-Layer Caveats
 
-Ordinary ETH transfers are accepted only during `Funding` and `Staked`. Forced ETH can still arrive through `selfdestruct`.
+### Deposit Data And BLS
 
-- Forced ETH before staking becomes pool proceeds after staking.
-- Forced ETH after cancellation is outside refund accounting but can be swept as canceled surplus.
-- If anyone funded before cancellation, canceled-surplus weights are funded amounts at cancellation.
-- If nobody funded before cancellation, canceled-surplus weights are deployment funding targets.
+The deposit contract checks the deposit data root but does not verify BLS proof-of-possession. Repository scripts reject deposit data unless the root recomputes and the BLS deposit signature verifies for the deposit message and fork version.
 
-There is no sender rescue path for forced ETH.
+Solidity does not verify BLS signatures. Bypassing the scripts and submitting invalid-but-well-formed deposit data can trap ETH in the deposit contract or fail to create the intended beacon validator.
 
-## Consensus Caveats
+### Pubkey Freshness
 
-- Consensus withdrawals to `0x01` credentials increase the pool balance without calling `receive()` or emitting `EthReceivedViaCall`.
-- The deposit contract checks the deposit data root but does not verify BLS proof-of-possession. Repository scripts reject deposit data unless the root recomputes and the BLS deposit signature verifies for the deposit message and fork version.
-- Solidity does not verify BLS signatures. Bypassing the scripts and staking invalid-but-well-formed deposit data can trap the 32 ETH in the deposit contract without creating a beacon validator.
-- Committed deposit data is public before `stake()`. A third party could copy it and submit their own 32 ETH deposit first, but the withdrawal credentials still point to the pool. This is operational griefing, not theft.
-- Beacon preflight checks only observe current beacon state. They cannot detect a deposit submitted to the EL deposit contract but not yet processed by CL.
-- EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds. Attempts are allowed after validator commitment, including before local staking or after cancellation.
+The contract cannot prove that a validator pubkey was globally unused before predeposit. Participants should rely on beacon confirmation before funding: if beacon state shows the committed pubkey with pool withdrawal credentials, later deposits for the same pubkey cannot switch credentials away from the pool.
+
+This design intentionally avoids deposit-log scanning. A log scan can catch some pending EL deposits, but it is not a complete mempool-race solution. The practical safety boundary is that participants fund only after the predeposit is processed and visible in beacon state with pool credentials.
+
+### EIP-7002 Exit Attempts
+
+EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds.
+
+### System Contract Addresses
+
+The contract and scripts check that configured system addresses have code. Deployment records include observed code hashes. Code presence and recorded hashes help auditability, but operators must still verify the target chain and canonical system addresses.
+
+### Future Protocol Operations
+
+The contract is intentionally narrow. It supports pool-owned `0x01` withdrawal credentials and EIP-7002 full-exit request attempts. It does not expose arbitrary external calls for future staking operations, consolidation requests, credential changes, or `0x01 -> 0x02` migration paths.
+
+Future Ethereum staking features may require contract changes or may simply be unsupported by this pool.
 
 ## Failure Modes
 
 | Scenario | Contract outcome |
 | --- | --- |
-| Bad validator data committed before funding | Participants should not fund. |
-| Malformed root/length data funded anyway and `stake()` reverts | Participants recover after the funding deadline through cancel/refund. |
-| Invalid BLS data bypasses scripts and `stake()` succeeds | Beacon validator may never be created; funds can be irrecoverable. |
-| Operator disappears before staking | Participants recover after the funding deadline through cancel/refund. |
-| Committed pubkey is externally deposited with pool credentials | Participants can request EIP-7002 exit attempts even if local state is `Funding` or `Canceled`. |
-| Operator disappears after staking | Any participant can request an EIP-7002 full exit; retries are allowed. |
-| Validator exits from CL side without EIP-7002 | Returned ETH is pool proceeds and is split pro rata. |
-| Participant cannot receive ETH directly | Participant can use `claimTo`, `refundTo`, or `sweepCanceledSurplusTo`. |
+| Operator never predeposits | Participants cannot fund. |
+| Predeposit never appears in beacon state with pool credentials | Participants should not fund. |
+| Funding attempt expires before top-up | Anyone can close it; active funding becomes refundable. |
+| Participant does not withdraw refund | Operator can still open a new attempt; old refund is excluded from proceeds. |
+| Operator disappears before top-up | Participants recover active funding after deadline close/refund; operator predeposit remains at risk. |
+| Operator disappears after top-up | Stakeholders can request EIP-7002 full-exit attempts; retries are allowed. |
+| Validator exits from CL side without EIP-7002 | Returned ETH is pool proceeds, excluding outstanding refunds. |
+| Participant cannot receive ETH directly | Participant can use `claimTo` or `refundTo`. |
 | ETH is forced into the pool | It follows the forced-ETH rules above; no sender rescue exists. |
 
 ## Defaults
@@ -122,48 +167,69 @@ Override any address or path with environment variables when using a test chain.
 
 ## Commands
 
+Install dependencies and run the local checks:
+
 ```bash
 npm install
 npm run build
 npm test
 ```
 
-RPC scripts use `RPC_URL` and `PRIVATE_KEY`:
+Deploy:
 
 ```bash
 RPC_URL=http://localhost:8545 \
 PRIVATE_KEY=0x... \
-PARTICIPANTS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222 \
-FUNDING_TARGETS_GWEI=16000000000,16000000000 \
 npm run deploy
 ```
 
-The deploy script prints the pool-owned withdrawal credentials. Generate one validator deposit data entry with those credentials, place it at `deposit-data.json` or set `DEPOSIT_DATA_FILE`, then commit the validator data before anyone funds:
+Generate predeposit and top-up deposit data with the printed pool withdrawal credentials, then commit the validator and submit the operator-funded predeposit:
 
 ```bash
-RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run commit-validator
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run commit-predeposit
+```
+
+After beacon confirmation, open a fixed funding attempt:
+
+```bash
+RPC_URL=http://localhost:8545 \
+PRIVATE_KEY=0x... \
+PARTICIPANTS=0xOperator,0xAlice,0xBob \
+FUNDING_TARGETS_GWEI=2000000000,12000000000,18000000000 \
+npm run open-funding-attempt
+```
+
+Participants fund, then the operator submits the top-up:
+
+```bash
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run fund
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run top-up
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
+```
+
+Operational scripts:
+
+```bash
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run close-expired-funding-attempt
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run refund
-RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run stake
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run claim
-RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run sweep-canceled-surplus
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run request-exit
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
 ```
 
-Useful environment variables:
+Environment variables:
 
 - `DEPOSIT_CONTRACT`: deposit contract address.
 - `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address.
 - `OPERATOR`: operator address; defaults to the deployer.
-- `FUNDING_WINDOW_SECONDS`: funding window from validator commitment; defaults to `86400`.
-- `PARTICIPANTS`: comma-separated participant addresses; defaults to the deployer.
-- `FUNDING_TARGETS_GWEI`: comma-separated funding caps matching `PARTICIPANTS`; must sum to `32000000000`.
-- `EXPECTED_PUBKEY`: optional pubkey check for `commit-validator`.
+- `FUNDING_WINDOW_SECONDS`: funding window per attempt; defaults to `86400`.
+- `PARTICIPANTS`: comma-separated addresses for `open-funding-attempt`; must include the operator.
+- `FUNDING_TARGETS_GWEI`: comma-separated final economic weights matching `PARTICIPANTS`; must sum to `32000000000`.
+- `EXPECTED_PUBKEY`: optional pubkey check for `commit-predeposit`.
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
 - `DEPOSIT_FORK_VERSION`: optional expected fork-version check. The deposit data itself must include `fork_version` unless this env var supplies it.
-- `RECIPIENT`: optional nonzero, non-pool recipient for `claim`, `refund`, and `sweep-canceled-surplus`.
-- `BEACON_NODE_URL`: optional beacon REST URL for validator pubkey absence checks before commit/stake and validator status checks before request-exit.
+- `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
+- `BEACON_NODE_URL`: optional beacon REST URL for validator predeposit confirmation and exit preflight.
 
 ## License
 

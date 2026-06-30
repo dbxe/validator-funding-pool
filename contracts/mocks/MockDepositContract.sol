@@ -30,7 +30,8 @@ contract MockDepositContract {
         require(withdrawal_credentials.length == 32, "bad withdrawal credentials");
         require(signature.length == 96, "bad signature");
         require(deposit_data_root != bytes32(0), "bad root");
-        require(msg.value == 32 ether, "bad value");
+        require(msg.value >= 1 ether, "deposit value too low");
+        require(msg.value % 1 gwei == 0, "deposit value not gwei");
 
         _deposits.push(
             DepositRecord({

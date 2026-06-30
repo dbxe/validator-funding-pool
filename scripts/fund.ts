@@ -1,9 +1,20 @@
 import { network } from "hardhat";
 
-import { assertDeploymentChain, envBigInt, formatWei, readDeployment } from "./lib/common.js";
+import {
+  assertBeaconValidatorHasWithdrawalCredentials,
+  assertDeploymentChain,
+  envBigInt,
+  formatWei,
+  PREDEPOSIT_GWEI,
+  readDeployment,
+  readPredepositAndTopUpDepositData,
+  TOP_UP_GWEI,
+  validateDepositData,
+} from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
+  const deposits = readPredepositAndTopUpDepositData();
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
@@ -13,9 +24,33 @@ async function main() {
     client: { wallet },
   });
 
-  const target = await pool.read.fundingTargetWeiOf([wallet.account.address]);
-  const funded = await pool.read.fundedWeiOf([wallet.account.address]);
-  const remaining = target - funded;
+  const expectedCredentials = await pool.read.withdrawalCredentials();
+  const predeposit = validateDepositData(deposits.predeposit, expectedCredentials, undefined, PREDEPOSIT_GWEI);
+  const topUp = validateDepositData(deposits.topUp, expectedCredentials, predeposit.pubkey, TOP_UP_GWEI);
+
+  const committedPubkey = await pool.read.committedPubkey();
+  const predepositRoot = await pool.read.predepositDataRoot();
+  const topUpRoot = await pool.read.topUpDepositDataRoot();
+  const committedPredepositSignature = await pool.read.predepositSignature();
+  const committedTopUpSignature = await pool.read.topUpSignature();
+  if (committedPubkey.toLowerCase() !== predeposit.pubkey.toLowerCase()) {
+    throw new Error(`Committed pubkey ${committedPubkey} != deposit-data pubkey ${predeposit.pubkey}`);
+  }
+  if (predepositRoot.toLowerCase() !== predeposit.depositDataRoot.toLowerCase()) {
+    throw new Error(`Committed predeposit root ${predepositRoot} != deposit-data root ${predeposit.depositDataRoot}`);
+  }
+  if (topUpRoot.toLowerCase() !== topUp.depositDataRoot.toLowerCase()) {
+    throw new Error(`Committed top-up root ${topUpRoot} != deposit-data root ${topUp.depositDataRoot}`);
+  }
+  if (committedPredepositSignature.toLowerCase() !== predeposit.signature.toLowerCase()) {
+    throw new Error("Committed predeposit signature does not match deposit-data file");
+  }
+  if (committedTopUpSignature.toLowerCase() !== topUp.signature.toLowerCase()) {
+    throw new Error("Committed top-up signature does not match deposit-data file");
+  }
+  await assertBeaconValidatorHasWithdrawalCredentials(predeposit.pubkey, expectedCredentials, "fund");
+
+  const remaining = await pool.read.fundingRemainingWeiOf([wallet.account.address]);
   if (remaining <= 0n) {
     throw new Error(`No remaining funding cap for ${wallet.account.address}`);
   }

@@ -1,6 +1,10 @@
 import { network } from "hardhat";
 
-import { assertBeaconValidatorAbsent, assertDeploymentChain, readDeployment } from "./lib/common.js";
+import {
+  assertBeaconValidatorHasWithdrawalCredentials,
+  assertDeploymentChain,
+  readDeployment,
+} from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
@@ -17,15 +21,14 @@ async function main() {
     client: { wallet },
   });
   const pubkey = await pool.read.committedPubkey();
-  const depositDataRoot = await pool.read.committedDepositDataRoot();
-  await assertBeaconValidatorAbsent(pubkey, "stake");
+  await assertBeaconValidatorHasWithdrawalCredentials(pubkey, deployment.withdrawalCredentials, "top-up");
 
-  console.log(`Submitting committed validator deposit through ${deployment.pool}`);
+  console.log(`Submitting 31 ETH top-up through ${deployment.pool}`);
   console.log(`Validator pubkey: ${pubkey}`);
-  console.log(`Deposit data root: ${depositDataRoot}`);
-  const hash = await pool.write.stake();
+  console.log(`Top-up deposit data root: ${await pool.read.topUpDepositDataRoot()}`);
+  const hash = await pool.write.topUpValidator();
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`Staked in block ${receipt.blockNumber}`);
+  console.log(`Topped up in block ${receipt.blockNumber}`);
 }
 
 main().catch((error) => {
