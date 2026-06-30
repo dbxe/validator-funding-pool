@@ -12,7 +12,7 @@ The contract is a non-tokenized agreement between known funders. It mints no ERC
 - Participant-funded `31 ETH` top-up after off-chain beacon verification.
 - Fixed allocation per funding attempt.
 - Pro-rata distribution of ETH that reaches the pool after top-up.
-- Retryable EIP-7002 full-exit request attempts by pool stakeholders.
+- Retryable EIP-7002 full-exit request attempts by the operator or final credited participants.
 
 ## What This Is Not
 
@@ -85,7 +85,7 @@ Participants have no capital at risk until they fund after that verification. On
 
 Poor validator operation is still an operator trust boundary. The intended incentive alignment is that the operator has meaningful economic weight in the pool, including the `1 ETH` predeposit, so downtime, slashing, or deliberate misoperation harms the operator's own claim as well as everyone else's. This reduces but does not remove operator trust.
 
-The unilateral escape hatch is EIP-7002. The operator, any current funding-attempt participant, or any final credited participant can request a full exit without operator permission. Refund-only holders recover through `refundTo()` and cannot request exits for a later validator they did not fund. Consensus processing still enforces validator-state preconditions, so execution-layer accepted requests can be ignored until those conditions are met; the contract therefore records attempts and allows retries. See the consensus [`process_withdrawal_request`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-process_withdrawal_request) flow.
+The unilateral escape hatch is EIP-7002. The operator can request exits before or after top-up because the operator bears the predeposit exposure. After top-up, final credited participants can request a full exit without operator permission. Current funding-attempt participants recover through the funding deadline and `refundTo()` if top-up does not happen; refund-only holders cannot request exits for a later validator they did not fund. Consensus processing still enforces validator-state preconditions, so execution-layer accepted requests can be ignored until those conditions are met; the contract therefore records attempts and allows retries. See the consensus [`process_withdrawal_request`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-process_withdrawal_request) flow.
 
 ## Accounting Model
 

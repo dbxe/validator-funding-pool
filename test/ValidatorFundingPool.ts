@@ -674,7 +674,7 @@ describe("ValidatorFundingPool", async function () {
   });
 
   it("snapshots callable topped-up ETH and excludes EIP-7002 request attempts", async function () {
-    const { pool, alicePool, outsider, withdrawal } = await networkHelpers.loadFixture(toppedUpFixture);
+    const { pool, operatorPool, outsider, withdrawal } = await networkHelpers.loadFixture(toppedUpFixture);
 
     const receiveReceipt = await waitForReceipt(await outsider.sendTransaction({ to: pool.address, value: 6n }));
     const receiveSnapshot = await assertAccountingSnapshot(pool, receiveReceipt, [
@@ -685,7 +685,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(receiveSnapshot.balance, 6n);
     assert.equal(receiveSnapshot.grossPoolProceeds, 6n);
 
-    const exitReceipt = await waitForReceipt(await alicePool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
+    const exitReceipt = await waitForReceipt(await operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
     assert.deepEqual(
       parsePoolEvents(pool, exitReceipt).map((event) => event.eventName),
       ["ExitRequestSubmitted"],
@@ -694,7 +694,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.grossPoolProceeds(), 6n);
   });
 
-  it("allows retryable exit requests from current and final stakeholders only", async function () {
+  it("allows retryable exit requests from the operator and final credited participants only", async function () {
     const fixture = await networkHelpers.loadFixture(fundingFixture);
     const { pool, operatorPool, alicePool, bobPool, outsiderPool, withdrawal, deadline } = fixture;
 
@@ -706,10 +706,10 @@ describe("ValidatorFundingPool", async function () {
     await viem.assertions.revertWithCustomError(
       alicePool.write.requestExit([EXIT_FEE - 1n], { value: EXIT_FEE }),
       pool,
-      "ExitFeeTooHigh",
+      "NotParticipant",
     );
 
-    await wait(await alicePool.write.requestExit([EXIT_FEE], { value: EXIT_FEE + 100n }));
+    await wait(await operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE + 100n }));
     assert.equal(await withdrawal.read.requestCount(), 1n);
     assert.equal((await withdrawal.read.lastSourceAddress()).toLowerCase(), pool.address.toLowerCase());
     assert.equal(await withdrawal.read.lastPubkey(), DEFAULT_PUBKEY);
@@ -735,15 +735,19 @@ describe("ValidatorFundingPool", async function () {
         [OPERATOR_TARGET, ALICE_TARGET, BOB_TARGET],
       ]),
     );
-    await wait(await bobPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
-    assert.equal(await withdrawal.read.requestCount(), 2n);
+    await viem.assertions.revertWithCustomError(
+      bobPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }),
+      pool,
+      "NotParticipant",
+    );
+    assert.equal(await withdrawal.read.requestCount(), 1n);
 
     await wait(await operatorPool.write.fund({ value: OPERATOR_TARGET - PREDEPOSIT }));
     await wait(await alicePool.write.fund({ value: ALICE_TARGET }));
     await wait(await bobPool.write.fund({ value: BOB_TARGET }));
     await wait(await pool.write.topUpValidator());
-    await wait(await operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
-    assert.equal(await withdrawal.read.requestCount(), 3n);
+    await wait(await alicePool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
+    assert.equal(await withdrawal.read.requestCount(), 2n);
   });
 
   it("rolls claim accounting back if a credited participant cannot receive ETH", async function () {

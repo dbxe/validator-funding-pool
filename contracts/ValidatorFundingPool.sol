@@ -632,7 +632,7 @@ contract ValidatorFundingPool {
     }
 
     function _canRequestExit(address account) private view returns (bool) {
-        return account == operator || _isParticipant(account) || creditedWeiOf[account] != 0;
+        return account == operator || creditedWeiOf[account] != 0;
     }
 
     function _isParticipant(address account) private view returns (bool) {
