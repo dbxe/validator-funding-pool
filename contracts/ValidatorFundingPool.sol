@@ -10,6 +10,12 @@ interface IBeaconDepositContract {
     ) external payable;
 }
 
+/// @title ValidatorFundingPool
+/// @notice Non-tokenized funding pool for one Ethereum validator with pool-owned 0x01 withdrawal credentials.
+/// @dev The operator pays the 1 ETH predeposit first. Participants should fund the 31 ETH top-up only after
+///      off-chain beacon-state verification confirms the committed pubkey is bound to this pool's withdrawal
+///      credentials. The contract accounts for ETH that reaches the pool, but it does not verify BLS signatures,
+///      beacon state, validator operation, priority-fee routing, or MEV routing.
 contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
     // Constants
@@ -42,6 +48,7 @@ contract ValidatorFundingPool {
     address public immutable depositContract;
     address public immutable withdrawalRequestPredeploy;
     address public immutable operator;
+    /// @notice Pool-owned 0x01 withdrawal credentials for the validator.
     bytes32 public immutable withdrawalCredentials;
     uint256 public immutable fundingWindowDuration;
 
@@ -54,10 +61,13 @@ contract ValidatorFundingPool {
     uint256 public fundingDeadline;
 
     uint256 public totalActiveFundedWei;
+    /// @notice Outstanding refund liabilities from expired funding attempts.
     uint256 public totalRefundableWei;
     uint256 public totalRefundedWei;
 
+    /// @notice Final economic weight credited after the validator top-up.
     uint256 public totalCreditedWei;
+    /// @notice Cumulative pool proceeds already claimed.
     uint256 public totalClaimedWei;
 
     bool public predepositSubmitted;
@@ -80,10 +90,13 @@ contract ValidatorFundingPool {
     bytes private _topUpSignature;
 
     mapping(address participant => uint256 indexPlusOne) private _participantIndexPlusOne;
+    /// @notice Final economic target for each participant in the active funding attempt.
     mapping(address participant => uint256 targetWei) public fundingTargetWeiOf;
     mapping(address participant => uint256 fundedWei) public activeFundedWeiOf;
     mapping(address participant => uint256 refundableWei) public refundableWeiOf;
+    /// @notice Final credited economic weight for each participant after top-up.
     mapping(address participant => uint256 creditedWei) public creditedWeiOf;
+    /// @notice Cumulative pool proceeds already claimed by each participant.
     mapping(address participant => uint256 claimedWei) public claimedWeiOf;
 
     uint256 private _reentrancyLock;
@@ -115,6 +128,8 @@ contract ValidatorFundingPool {
     );
     event PoolToppedUp();
     event EthReceivedViaCall(address indexed sender, uint256 amount);
+    /// @notice Post-action accounting snapshot for off-chain reconciliation.
+    /// @dev Silent balance increases, including consensus withdrawals and forced ETH, may occur between snapshots.
     event AccountingSnapshot(
         State state,
         uint256 fundingAttempt,
@@ -213,6 +228,8 @@ contract ValidatorFundingPool {
         withdrawalCredentials = _makeEth1WithdrawalCredentials(address(this));
     }
 
+    /// @notice Fund the current attempt when funding is open, or accept pool proceeds after top-up.
+    /// @dev Ordinary ETH transfers are rejected before funding opens and after expired funding must be closed.
     receive() external payable {
         if (state == State.Funding) {
             _fund(msg.sender, msg.value);
@@ -232,6 +249,9 @@ contract ValidatorFundingPool {
     // Validator predeposit lifecycle
     // -------------------------------------------------------------------------
 
+    /// @notice Commit validator deposit data and submit the operator-funded 1 ETH predeposit.
+    /// @dev This contract only checks byte lengths and nonzero deposit roots. BLS signature, deposit root,
+    ///      chain metadata, and beacon-state checks must be performed off-chain before participants fund.
     function commitAndPredeposit(
         bytes calldata pubkey,
         bytes calldata predepositSignature_,
@@ -262,6 +282,9 @@ contract ValidatorFundingPool {
         _emitAccountingSnapshot();
     }
 
+    /// @notice Open a fixed funding attempt for the remaining 31 ETH.
+    /// @dev Targets are final economic weights, must sum to 32 ETH, and must include the operator with
+    ///      at least the 1 ETH predeposit weight. Existing refund claims are kept separate.
     function openFundingAttempt(address[] calldata participants, uint256[] calldata fundingTargets)
         external
         onlyOperator
@@ -282,6 +305,9 @@ contract ValidatorFundingPool {
         _fund(msg.sender, msg.value);
     }
 
+    /// @notice Close an expired funding attempt and convert active funding into refund claims.
+    /// @dev Anyone may close after the deadline. Refund claims are independent liabilities and are not
+    ///      automatically rolled into later funding attempts.
     function closeExpiredFundingAttempt() external {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp <= fundingDeadline) revert FundingStillOpen();
@@ -312,6 +338,9 @@ contract ValidatorFundingPool {
     // Validator top-up lifecycle
     // -------------------------------------------------------------------------
 
+    /// @notice Submit the 31 ETH top-up after exact active funding.
+    /// @dev Final participant credits are fixed before the deposit call. After this succeeds, non-refund
+    ///      ETH held by or later received by the pool is claimable pro rata by final credited weight.
     function topUpValidator() external onlyOperator nonReentrant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp > fundingDeadline) revert FundingClosed();
@@ -343,6 +372,10 @@ contract ValidatorFundingPool {
     // Exit requests
     // -------------------------------------------------------------------------
 
+    /// @notice Submit an EIP-7002 full-exit request attempt for the committed validator.
+    /// @dev The caller pays the request fee directly. The operator may request exit after commitment;
+    ///      final credited participants may request exit after top-up. Consensus processing can still ignore
+    ///      an accepted request until validator-state preconditions are met, so retries are allowed.
     function requestExit(uint256 maxFee) external payable nonReentrant {
         if (_committedPubkey.length != PUBKEY_LENGTH) revert InvalidState();
         if (!_canRequestExit(msg.sender)) revert NotParticipant();
@@ -425,10 +458,14 @@ contract ValidatorFundingPool {
         return entitled - alreadyClaimed;
     }
 
+    /// @notice Total pool proceeds used for cumulative pro-rata entitlement accounting.
+    /// @dev Excludes outstanding refund liabilities and includes proceeds already claimed.
     function grossPoolProceeds() public view returns (uint256) {
         return address(this).balance + totalClaimedWei - totalRefundableWei;
     }
 
+    /// @notice Remaining amount a participant may fund in the current attempt.
+    /// @dev The operator's remaining amount subtracts the credited 1 ETH predeposit from its target.
     function fundingRemainingWeiOf(address participant) public view returns (uint256) {
         uint256 target = fundingTargetWeiOf[participant];
         if (target == 0) return 0;
@@ -475,6 +512,7 @@ contract ValidatorFundingPool {
         return abi.encodePacked(withdrawalCredentials);
     }
 
+    /// @notice Current EIP-7002 request fee reported by the withdrawal request predeploy.
     function currentExitRequestFee() public view returns (uint256) {
         (bool ok, bytes memory data) = withdrawalRequestPredeploy.staticcall("");
         if (!ok || data.length != 32) revert ExitFeeReadFailed();
