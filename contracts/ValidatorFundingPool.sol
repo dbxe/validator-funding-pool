@@ -230,6 +230,7 @@ contract ValidatorFundingPool {
 
     /// @notice Fund the current attempt when funding is open, or accept pool proceeds after top-up.
     /// @dev Ordinary ETH transfers are rejected before funding opens and after expired funding must be closed.
+    ///      Consensus withdrawals and forced ETH can increase balance without invoking this function.
     receive() external payable {
         if (state == State.Funding) {
             _fund(msg.sender, msg.value);
@@ -250,8 +251,10 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     /// @notice Commit validator deposit data and submit the operator-funded 1 ETH predeposit.
-    /// @dev This contract only checks byte lengths and nonzero deposit roots. BLS signature, deposit root,
-    ///      chain metadata, and beacon-state checks must be performed off-chain before participants fund.
+    /// @dev The predeposit is credited to the operator economically, but is not refundable from this contract.
+    ///      This contract checks byte lengths and nonzero roots, then relies on the deposit contract to check
+    ///      each supplied root against calldata. It does not verify BLS proof-of-possession, fork/domain
+    ///      correctness, beacon state, deposit-log ordering, or global pubkey freshness.
     function commitAndPredeposit(
         bytes calldata pubkey,
         bytes calldata predepositSignature_,
@@ -513,6 +516,7 @@ contract ValidatorFundingPool {
     }
 
     /// @notice Current EIP-7002 request fee reported by the withdrawal request predeploy.
+    /// @dev Reads with empty calldata and expects exactly one ABI-encoded uint256 response.
     function currentExitRequestFee() public view returns (uint256) {
         (bool ok, bytes memory data) = withdrawalRequestPredeploy.staticcall("");
         if (!ok || data.length != 32) revert ExitFeeReadFailed();
