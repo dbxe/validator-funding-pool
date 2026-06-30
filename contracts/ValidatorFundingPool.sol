@@ -251,7 +251,8 @@ contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
 
     /// @notice Commit validator deposit data and submit the operator-funded 1 ETH predeposit.
-    /// @dev The predeposit is credited to the operator economically, but is not refundable from this contract.
+    /// @dev The predeposit counts toward the operator's final economic weight after top-up,
+    ///      but is not refundable from this contract.
     ///      This contract checks byte lengths and nonzero roots, then relies on the deposit contract to check
     ///      each supplied root against calldata. It does not verify BLS proof-of-possession, fork/domain
     ///      correctness, beacon state, deposit-log ordering, or global pubkey freshness.
