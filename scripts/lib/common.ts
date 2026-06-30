@@ -15,7 +15,10 @@ export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
 export const UNSAFE_SKIP_BEACON_CONFIRMATION = "UNSAFE_SKIP_BEACON_CONFIRMATION";
+export const UNSAFE_BEACON_BYPASS_ACK = "I_UNDERSTAND_FUNDS_CAN_BE_LOST";
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
+const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
+const DEFAULT_EXIT_STATE_ID = "head";
 
 export interface DepositData {
   pubkey: string;
@@ -41,12 +44,54 @@ export interface DeploymentRecord {
 
 interface BeaconValidatorResponse {
   data: {
+    index: string;
+    balance: string;
     status: string;
     validator: {
       pubkey: string;
       withdrawal_credentials: string;
+      effective_balance: string;
+      slashed: boolean;
+      activation_eligibility_epoch: string;
+      activation_epoch: string;
+      exit_epoch: string;
+      withdrawable_epoch: string;
     };
   };
+}
+
+interface BeaconSyncingResponse {
+  data: {
+    head_slot: string;
+    sync_distance: string;
+    is_syncing: boolean;
+    is_optimistic?: boolean;
+    el_offline?: boolean;
+  };
+}
+
+interface BeaconGenesisResponse {
+  data: {
+    genesis_time: string;
+    genesis_validators_root: string;
+    genesis_fork_version: string;
+  };
+}
+
+interface BeaconFinalityCheckpointsResponse {
+  data: {
+    previous_justified: { epoch: string; root: string };
+    current_justified: { epoch: string; root: string };
+    finalized: { epoch: string; root: string };
+  };
+}
+
+interface BeaconValidatorPreflight {
+  stateId: string;
+  genesis: BeaconGenesisResponse["data"];
+  syncing: BeaconSyncingResponse["data"];
+  finality: BeaconFinalityCheckpointsResponse["data"];
+  validator: BeaconValidatorResponse["data"];
 }
 
 export function asHex(value: string): Hex {
@@ -126,6 +171,31 @@ export async function assertDeploymentChain(
   }
 }
 
+export async function assertDeploymentSystemCodeHashes(
+  publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
+  deployment: DeploymentRecord,
+) {
+  const currentDepositCodeHash = await codeHash(publicClient, deployment.depositContract, "DEPOSIT_CONTRACT");
+  if (currentDepositCodeHash.toLowerCase() !== deployment.depositContractCodeHash.toLowerCase()) {
+    throw new Error(
+      `DEPOSIT_CONTRACT code hash ${currentDepositCodeHash} does not match deployment record ` +
+        deployment.depositContractCodeHash,
+    );
+  }
+
+  const currentWithdrawalCodeHash = await codeHash(
+    publicClient,
+    deployment.withdrawalRequestPredeploy,
+    "WITHDRAWAL_REQUEST_PREDEPLOY",
+  );
+  if (currentWithdrawalCodeHash.toLowerCase() !== deployment.withdrawalRequestPredeployCodeHash.toLowerCase()) {
+    throw new Error(
+      `WITHDRAWAL_REQUEST_PREDEPLOY code hash ${currentWithdrawalCodeHash} does not match deployment record ` +
+        deployment.withdrawalRequestPredeployCodeHash,
+    );
+  }
+}
+
 export async function assertHasCode(
   publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
   address: Address,
@@ -153,6 +223,7 @@ export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
     return;
   }
 
+  await assertBeaconNodeHealthy(beaconNodeUrl, label);
   const url = new URL(`/eth/v1/beacon/states/head/validators/${pubkey}`, beaconNodeUrl);
   const response = await fetch(url);
   if (response.status === 404) {
@@ -176,33 +247,175 @@ export async function assertBeaconValidatorHasWithdrawalCredentials(
   expectedWithdrawalCredentials: Hex,
   label: string,
   required = false,
-) {
+): Promise<BeaconValidatorPreflight | undefined> {
   const beaconNodeUrl = process.env.BEACON_NODE_URL;
   if (!beaconNodeUrl) {
-    if (required && process.env[UNSAFE_SKIP_BEACON_CONFIRMATION] !== "1") {
+    if (required && !unsafeBeaconBypassEnabled(label)) {
       throw new Error(
         `${label} requires BEACON_NODE_URL to confirm pool withdrawal credentials. ` +
-          `Set ${UNSAFE_SKIP_BEACON_CONFIRMATION}=1 only for unsafe local/devnet bypasses.`,
+          `Set ${UNSAFE_SKIP_BEACON_CONFIRMATION}=1 and ${UNSAFE_BEACON_BYPASS_ACK}=1 ` +
+          `only for unsafe local/devnet bypasses.`,
       );
     }
     console.log(`Skipping ${label} beacon confirmation: BEACON_NODE_URL not set`);
-    return;
+    return undefined;
   }
 
-  const url = new URL(`/eth/v1/beacon/states/head/validators/${pubkey}`, beaconNodeUrl);
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`${label} beacon validator lookup failed: ${response.status} ${response.statusText}`);
-  }
-
-  const body = (await response.json()) as BeaconValidatorResponse;
-  const actualCredentials = body.data.validator.withdrawal_credentials.toLowerCase();
+  const preflight = await readBeaconValidatorPreflight(
+    beaconNodeUrl,
+    pubkey,
+    process.env.BEACON_CONFIRMATION_STATE_ID ?? DEFAULT_CONFIRMATION_STATE_ID,
+    label,
+  );
+  const actualCredentials = preflight.validator.validator.withdrawal_credentials.toLowerCase();
   if (actualCredentials !== expectedWithdrawalCredentials.toLowerCase()) {
     throw new Error(
       `${label} beacon withdrawal_credentials ${actualCredentials} != pool ${expectedWithdrawalCredentials}`,
     );
   }
+  printBeaconPreflight(label, preflight);
   console.log(`${label} beacon confirmation passed: validator has pool withdrawal credentials`);
+  return preflight;
+}
+
+export async function assertBeaconValidatorReadyForTopUp(
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+) {
+  const preflight = await assertBeaconValidatorHasWithdrawalCredentials(
+    pubkey,
+    expectedWithdrawalCredentials,
+    label,
+    true,
+  );
+  if (preflight === undefined) return;
+
+  const { status, validator } = preflight.validator;
+  if (validator.slashed) {
+    throw new Error(`${label} beacon validator is slashed`);
+  }
+  if (!["pending_initialized", "pending_queued"].includes(status)) {
+    throw new Error(`${label} beacon validator status ${status} is not safe for 31 ETH top-up`);
+  }
+}
+
+export async function assertBeaconValidatorReadyForExit(
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+) {
+  const beaconNodeUrl = process.env.BEACON_NODE_URL;
+  if (!beaconNodeUrl) {
+    console.log(`Skipping ${label} beacon exit preflight: BEACON_NODE_URL not set`);
+    return;
+  }
+
+  const preflight = await readBeaconValidatorPreflight(
+    beaconNodeUrl,
+    pubkey,
+    process.env.BEACON_EXIT_STATE_ID ?? DEFAULT_EXIT_STATE_ID,
+    label,
+  );
+  const actualCredentials = preflight.validator.validator.withdrawal_credentials.toLowerCase();
+  if (actualCredentials !== expectedWithdrawalCredentials.toLowerCase()) {
+    throw new Error(
+      `${label} beacon withdrawal_credentials ${actualCredentials} != pool ${expectedWithdrawalCredentials}`,
+    );
+  }
+  if (preflight.validator.validator.slashed) {
+    throw new Error(`${label} beacon validator is slashed`);
+  }
+  if (preflight.validator.status !== "active_ongoing") {
+    throw new Error(`${label} beacon validator status is ${preflight.validator.status}, expected active_ongoing`);
+  }
+
+  printBeaconPreflight(label, preflight);
+  console.log(`${label} beacon exit preflight passed`);
+}
+
+async function assertBeaconNodeHealthy(beaconNodeUrl: string, label: string): Promise<BeaconSyncingResponse["data"]> {
+  const syncing = await fetchBeaconJson<BeaconSyncingResponse>(beaconNodeUrl, "/eth/v1/node/syncing", label);
+  if (syncing.data.is_syncing) {
+    throw new Error(`${label} beacon node is syncing: distance ${syncing.data.sync_distance}`);
+  }
+  if (syncing.data.is_optimistic) {
+    throw new Error(`${label} beacon node is optimistic; refusing to rely on beacon confirmation`);
+  }
+  if (syncing.data.el_offline) {
+    throw new Error(`${label} beacon node reports execution layer offline`);
+  }
+  return syncing.data;
+}
+
+async function readBeaconValidatorPreflight(
+  beaconNodeUrl: string,
+  pubkey: Hex,
+  stateId: string,
+  label: string,
+): Promise<BeaconValidatorPreflight> {
+  const [syncing, genesis, finality, validator] = await Promise.all([
+    assertBeaconNodeHealthy(beaconNodeUrl, label),
+    fetchBeaconJson<BeaconGenesisResponse>(beaconNodeUrl, "/eth/v1/beacon/genesis", label),
+    fetchBeaconJson<BeaconFinalityCheckpointsResponse>(
+      beaconNodeUrl,
+      `/eth/v1/beacon/states/${stateId}/finality_checkpoints`,
+      label,
+    ),
+    fetchBeaconJson<BeaconValidatorResponse>(
+      beaconNodeUrl,
+      `/eth/v1/beacon/states/${stateId}/validators/${pubkey}`,
+      label,
+    ),
+  ]);
+
+  return {
+    stateId,
+    genesis: genesis.data,
+    syncing,
+    finality: finality.data,
+    validator: validator.data,
+  };
+}
+
+async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label: string): Promise<T> {
+  const url = new URL(pathname, beaconNodeUrl);
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${label} beacon request ${pathname} failed: ${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as T;
+}
+
+function unsafeBeaconBypassEnabled(label: string): boolean {
+  if (process.env[UNSAFE_SKIP_BEACON_CONFIRMATION] !== "1") return false;
+  if (process.env[UNSAFE_BEACON_BYPASS_ACK] !== "1") return false;
+
+  console.warn(
+    `${label}: UNSAFE beacon confirmation bypass enabled. This is only appropriate for local/devnet ` +
+      `flows; on real networks it can lead to participant funds being sent before pool withdrawal ` +
+      `credentials are confirmed.`,
+  );
+  return true;
+}
+
+function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight) {
+  const { genesis, syncing, finality, validator, stateId } = preflight;
+  console.log(`${label} beacon state id: ${stateId}`);
+  console.log(`${label} beacon genesis fork version: ${genesis.genesis_fork_version}`);
+  console.log(`${label} beacon genesis validators root: ${genesis.genesis_validators_root}`);
+  console.log(`${label} beacon head slot: ${syncing.head_slot}`);
+  console.log(
+    `${label} beacon finalized checkpoint: epoch ${finality.finalized.epoch} root ${finality.finalized.root}`,
+  );
+  console.log(`${label} validator index: ${validator.index}`);
+  console.log(`${label} validator status: ${validator.status}`);
+  console.log(`${label} validator balance: ${validator.balance} Gwei`);
+  console.log(`${label} validator effective balance: ${validator.validator.effective_balance} Gwei`);
+  console.log(`${label} validator slashed: ${validator.validator.slashed}`);
+  console.log(`${label} validator activation epoch: ${validator.validator.activation_epoch}`);
+  console.log(`${label} validator exit epoch: ${validator.validator.exit_epoch}`);
+  console.log(`${label} validator withdrawable epoch: ${validator.validator.withdrawable_epoch}`);
 }
 
 export function readDepositDataFile(file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE): DepositData[] {

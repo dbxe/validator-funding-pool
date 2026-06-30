@@ -1,6 +1,12 @@
 import { network } from "hardhat";
 
-import { assertDeploymentChain, formatWei, readDeployment } from "./lib/common.js";
+import {
+  assertDeploymentChain,
+  assertDeploymentSystemCodeHashes,
+  formatWei,
+  parseAddressList,
+  readDeployment,
+} from "./lib/common.js";
 
 const STATE_NAMES = ["Uninitialized", "Predeposited", "Funding", "ToppedUp"];
 
@@ -9,6 +15,7 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   await assertDeploymentChain(publicClient, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment);
 
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
   const state = Number(await pool.read.state());
@@ -49,6 +56,13 @@ async function main() {
         await pool.read.claimable([participant]),
       )}`,
     );
+  }
+
+  const refundParticipants = process.env.REFUND_PARTICIPANTS
+    ? parseAddressList(process.env.REFUND_PARTICIPANTS)
+    : [];
+  for (const participant of refundParticipants) {
+    console.log(`Refund holder ${participant}: refundable=${formatWei(await pool.read.refundableWeiOf([participant]))}`);
   }
 }
 

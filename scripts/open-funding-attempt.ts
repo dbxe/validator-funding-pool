@@ -2,6 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertDeploymentChain,
+  assertDeploymentSystemCodeHashes,
   parseAddressList,
   parseBigIntList,
   readDeployment,
@@ -16,6 +17,7 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
   await assertDeploymentChain(publicClient, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment);
 
   if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
     throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);
@@ -37,6 +39,9 @@ async function main() {
   });
 
   console.log(`Opening funding attempt for ${deployment.pool}`);
+  for (let i = 0; i < participants.length; ++i) {
+    console.log(`Participant ${i}: ${participants[i]} target=${fundingTargetsGwei[i]} Gwei`);
+  }
   const hash = await pool.write.openFundingAttempt([participants, fundingTargetsWei]);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   console.log(`Opened in block ${receipt.blockNumber}`);

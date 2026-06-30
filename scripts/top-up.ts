@@ -1,8 +1,9 @@
 import { network } from "hardhat";
 
 import {
-  assertBeaconValidatorHasWithdrawalCredentials,
+  assertBeaconValidatorReadyForTopUp,
   assertDeploymentChain,
+  assertDeploymentSystemCodeHashes,
   readDeployment,
 } from "./lib/common.js";
 
@@ -12,6 +13,7 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
   await assertDeploymentChain(publicClient, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment);
 
   if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
     throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);
@@ -21,7 +23,7 @@ async function main() {
     client: { wallet },
   });
   const pubkey = await pool.read.committedPubkey();
-  await assertBeaconValidatorHasWithdrawalCredentials(pubkey, deployment.withdrawalCredentials, "top-up", true);
+  await assertBeaconValidatorReadyForTopUp(pubkey, deployment.withdrawalCredentials, "top-up");
 
   console.log(`Submitting 31 ETH top-up through ${deployment.pool}`);
   console.log(`Validator pubkey: ${pubkey}`);

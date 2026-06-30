@@ -3,6 +3,7 @@ import { network } from "hardhat";
 import {
   assertBeaconValidatorAbsent,
   assertDeploymentChain,
+  assertDeploymentSystemCodeHashes,
   asHex,
   PREDEPOSIT_GWEI,
   readDeployment,
@@ -18,6 +19,7 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
   await assertDeploymentChain(publicClient, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment);
 
   if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
     throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);

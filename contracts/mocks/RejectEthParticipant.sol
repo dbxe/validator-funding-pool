@@ -6,6 +6,7 @@ interface IValidatorFundingPool {
     function claim() external;
     function claimTo(address payable recipient) external;
     function refundTo(address payable recipient) external;
+    function requestExit(uint256 maxFee) external payable;
 }
 
 contract RejectEthParticipant {
@@ -23,5 +24,9 @@ contract RejectEthParticipant {
 
     function refundPoolTo(address pool, address payable recipient) external {
         IValidatorFundingPool(pool).refundTo(recipient);
+    }
+
+    function requestExitPool(address pool, uint256 maxFee) external payable {
+        IValidatorFundingPool(pool).requestExit{value: msg.value}(maxFee);
     }
 }

@@ -121,6 +121,13 @@ contract ValidatorFundingPool {
         uint256 participantTotal,
         uint256 attemptTotal
     );
+    event RefundCredited(
+        uint256 indexed attempt,
+        address indexed participant,
+        uint256 amount,
+        uint256 participantTotal,
+        uint256 totalRefundableWei
+    );
     event FundingAttemptClosed(uint256 indexed attempt);
     event Refunded(address indexed participant, address indexed recipient, uint256 amount);
     event ValidatorTopUpSubmitted(
@@ -335,8 +342,16 @@ contract ValidatorFundingPool {
             uint256 funded = activeFundedWeiOf[participant];
             if (funded != 0) {
                 activeFundedWeiOf[participant] = 0;
-                refundableWeiOf[participant] += funded;
+                uint256 participantRefundable = refundableWeiOf[participant] + funded;
+                refundableWeiOf[participant] = participantRefundable;
                 totalRefundableWei += funded;
+                emit RefundCredited(
+                    fundingAttempt,
+                    participant,
+                    funded,
+                    participantRefundable,
+                    totalRefundableWei
+                );
             }
             fundingTargetWeiOf[participant] = 0;
             _participantIndexPlusOne[participant] = 0;

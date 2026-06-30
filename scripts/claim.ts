@@ -1,6 +1,12 @@
 import { network } from "hardhat";
 
-import { asAddress, assertDeploymentChain, formatWei, readDeployment } from "./lib/common.js";
+import {
+  asAddress,
+  assertDeploymentChain,
+  assertDeploymentSystemCodeHashes,
+  formatWei,
+  readDeployment,
+} from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
@@ -8,6 +14,7 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
   await assertDeploymentChain(publicClient, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment);
 
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },

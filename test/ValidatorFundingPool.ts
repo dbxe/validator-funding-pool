@@ -4,6 +4,8 @@ import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { keccak256, parseEther, parseEventLogs, zeroAddress, type Address, type Hex } from "viem";
 
+import { computeDepositDataRoot } from "../scripts/lib/common.js";
+
 const STATE_UNINITIALIZED = 0;
 const STATE_PREDEPOSITED = 1;
 const STATE_FUNDING = 2;
@@ -15,13 +17,14 @@ const TOP_UP = parseEther("31");
 const OPERATOR_TARGET = parseEther("2");
 const ALICE_TARGET = parseEther("12");
 const BOB_TARGET = parseEther("18");
+const PREDEPOSIT_GWEI = 1_000_000_000n;
+const TOP_UP_GWEI = 31_000_000_000n;
 const FUNDING_WINDOW = 3_600n;
 const EXIT_FEE = 1_234n;
 const DEFAULT_PUBKEY = fixedHex("11", 48);
 const PREDEPOSIT_SIGNATURE = fixedHex("aa", 96);
 const TOP_UP_SIGNATURE = fixedHex("bb", 96);
-const PREDEPOSIT_ROOT = fixedHex("01", 32);
-const TOP_UP_ROOT = fixedHex("02", 32);
+const WRONG_DEPOSIT_ROOT = fixedHex("01", 32);
 
 function fixedHex(byte: string, length: number): Hex {
   return `0x${byte.repeat(length)}` as Hex;
@@ -29,6 +32,22 @@ function fixedHex(byte: string, length: number): Hex {
 
 function expectedWithdrawalCredentials(pool: Address): Hex {
   return `0x01${"00".repeat(11)}${pool.slice(2).toLowerCase()}` as Hex;
+}
+
+function validatorData(
+  pool: Address,
+  pubkey = DEFAULT_PUBKEY,
+  predepositSignature = PREDEPOSIT_SIGNATURE,
+  topUpSignature = TOP_UP_SIGNATURE,
+) {
+  const withdrawalCredentials = expectedWithdrawalCredentials(pool);
+  return {
+    pubkey,
+    predepositSignature,
+    topUpSignature,
+    predepositRoot: computeDepositDataRoot(pubkey, withdrawalCredentials, PREDEPOSIT_GWEI, predepositSignature),
+    topUpRoot: computeDepositDataRoot(pubkey, withdrawalCredentials, TOP_UP_GWEI, topUpSignature),
+  };
 }
 
 describe("ValidatorFundingPool", async function () {
@@ -175,9 +194,10 @@ describe("ValidatorFundingPool", async function () {
 
   async function predepositedFixture() {
     const fixture = await deployFixture();
+    const data = validatorData(fixture.pool.address);
     await wait(
       await fixture.pool.write.commitAndPredeposit(
-        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, PREDEPOSIT_ROOT, TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [data.pubkey, data.predepositSignature, data.predepositRoot, data.topUpSignature, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
     );
@@ -255,10 +275,11 @@ describe("ValidatorFundingPool", async function () {
 
   it("operator commits validator data and submits exactly 1 ETH predeposit", async function () {
     const { pool, deposit, outsiderPool } = await networkHelpers.loadFixture(deployFixture);
+    const data = validatorData(pool.address);
 
     await viem.assertions.revertWithCustomError(
       outsiderPool.write.commitAndPredeposit(
-        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, PREDEPOSIT_ROOT, TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [data.pubkey, data.predepositSignature, data.predepositRoot, data.topUpSignature, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
       pool,
@@ -266,7 +287,7 @@ describe("ValidatorFundingPool", async function () {
     );
     await viem.assertions.revertWithCustomError(
       pool.write.commitAndPredeposit(
-        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, PREDEPOSIT_ROOT, TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [data.pubkey, data.predepositSignature, data.predepositRoot, data.topUpSignature, data.topUpRoot],
         { value: PREDEPOSIT - 1n },
       ),
       pool,
@@ -275,7 +296,7 @@ describe("ValidatorFundingPool", async function () {
 
     const receipt = await waitForReceipt(
       await pool.write.commitAndPredeposit(
-        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, PREDEPOSIT_ROOT, TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [data.pubkey, data.predepositSignature, data.predepositRoot, data.topUpSignature, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
     );
@@ -288,8 +309,8 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.predepositSignature(), PREDEPOSIT_SIGNATURE);
     assert.equal(await pool.read.topUpSignature(), TOP_UP_SIGNATURE);
     assert.equal(await pool.read.committedPubkeyHash(), keccak256(DEFAULT_PUBKEY));
-    assert.equal(await pool.read.predepositDataRoot(), PREDEPOSIT_ROOT);
-    assert.equal(await pool.read.topUpDepositDataRoot(), TOP_UP_ROOT);
+    assert.equal(await pool.read.predepositDataRoot(), data.predepositRoot);
+    assert.equal(await pool.read.topUpDepositDataRoot(), data.topUpRoot);
     assert.equal(await deposit.read.depositCount(), 1n);
     assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
 
@@ -297,16 +318,17 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(record[0], DEFAULT_PUBKEY);
     assert.equal(record[1].toLowerCase(), expectedWithdrawalCredentials(pool.address));
     assert.equal(record[2], PREDEPOSIT_SIGNATURE);
-    assert.equal(record[3], PREDEPOSIT_ROOT);
+    assert.equal(record[3], data.predepositRoot);
     assert.equal(record[4], PREDEPOSIT);
   });
 
   it("rejects malformed validator data", async function () {
     const { pool } = await networkHelpers.loadFixture(deployFixture);
+    const data = validatorData(pool.address);
 
     await viem.assertions.revertWithCustomError(
       pool.write.commitAndPredeposit(
-        [fixedHex("22", 47), PREDEPOSIT_SIGNATURE, PREDEPOSIT_ROOT, TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [fixedHex("22", 47), PREDEPOSIT_SIGNATURE, data.predepositRoot, TOP_UP_SIGNATURE, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
       pool,
@@ -314,7 +336,7 @@ describe("ValidatorFundingPool", async function () {
     );
     await viem.assertions.revertWithCustomError(
       pool.write.commitAndPredeposit(
-        [DEFAULT_PUBKEY, fixedHex("aa", 95), PREDEPOSIT_ROOT, TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [DEFAULT_PUBKEY, fixedHex("aa", 95), data.predepositRoot, TOP_UP_SIGNATURE, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
       pool,
@@ -322,11 +344,18 @@ describe("ValidatorFundingPool", async function () {
     );
     await viem.assertions.revertWithCustomError(
       pool.write.commitAndPredeposit(
-        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, fixedHex("00", 32), TOP_UP_SIGNATURE, TOP_UP_ROOT],
+        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, fixedHex("00", 32), TOP_UP_SIGNATURE, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
       pool,
       "InvalidDepositDataRoot",
+    );
+    await assert.rejects(
+      pool.write.commitAndPredeposit(
+        [DEFAULT_PUBKEY, PREDEPOSIT_SIGNATURE, WRONG_DEPOSIT_ROOT, TOP_UP_SIGNATURE, data.topUpRoot],
+        { value: PREDEPOSIT },
+      ),
+      /bad deposit root/,
     );
   });
 
@@ -380,6 +409,7 @@ describe("ValidatorFundingPool", async function () {
   it("funds only current fixed allocations and tops up exactly 31 ETH", async function () {
     const { pool, deposit, operatorPool, alicePool, bobPool, outsiderPool, operator, alice, bob } =
       await networkHelpers.loadFixture(fundingFixture);
+    const data = validatorData(pool.address);
 
     await viem.assertions.revertWithCustomError(outsiderPool.write.fund({ value: 1n }), pool, "NotParticipant");
     await viem.assertions.revertWithCustomError(
@@ -416,7 +446,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(record[0], DEFAULT_PUBKEY);
     assert.equal(record[1].toLowerCase(), expectedWithdrawalCredentials(pool.address));
     assert.equal(record[2], TOP_UP_SIGNATURE);
-    assert.equal(record[3], TOP_UP_ROOT);
+    assert.equal(record[3], data.topUpRoot);
     assert.equal(record[4], TOP_UP);
   });
 
@@ -430,9 +460,17 @@ describe("ValidatorFundingPool", async function () {
     await viem.assertions.revertWithCustomError(alicePool.write.fund({ value: 1n }), pool, "FundingClosed");
     const closeReceipt = await waitForReceipt(await charliePool.write.closeExpiredFundingAttempt());
     const closeSnapshot = await assertAccountingSnapshot(pool, closeReceipt, [
+      "RefundCredited",
       "FundingAttemptClosed",
       "AccountingSnapshot",
     ]);
+    const refundEvent = parsePoolEvents(pool, closeReceipt).find((event) => event.eventName === "RefundCredited");
+    assert.ok(refundEvent, "RefundCredited event missing");
+    assert.equal(bigintArg(refundEvent.args, "attempt"), 1n);
+    assert.equal((refundEvent.args.participant as string).toLowerCase(), alice.account.address.toLowerCase());
+    assert.equal(bigintArg(refundEvent.args, "amount"), parseEther("5"));
+    assert.equal(bigintArg(refundEvent.args, "participantTotal"), parseEther("5"));
+    assert.equal(bigintArg(refundEvent.args, "totalRefundableWei"), parseEther("5"));
     assert.equal(closeSnapshot.state, STATE_PREDEPOSITED);
     assert.equal(closeSnapshot.balance, parseEther("5"));
     assert.equal(closeSnapshot.totalActiveFundedWei, 0n);
@@ -750,6 +788,92 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await withdrawal.read.requestCount(), 2n);
   });
 
+  it("handles EIP-7002 fee and request failures without recording attempts", async function () {
+    const { pool, operatorPool, withdrawal } = await networkHelpers.loadFixture(fundingFixture);
+
+    await wait(await withdrawal.write.setFeeReadMode([1]));
+    await assert.rejects(pool.read.currentExitRequestFee(), /ExitFeeReadFailed/);
+    await viem.assertions.revertWithCustomError(
+      operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }),
+      pool,
+      "ExitFeeReadFailed",
+    );
+
+    await wait(await withdrawal.write.setFeeReadMode([2]));
+    await assert.rejects(pool.read.currentExitRequestFee(), /ExitFeeReadFailed/);
+
+    await wait(await withdrawal.write.setFeeReadMode([3]));
+    await assert.rejects(pool.read.currentExitRequestFee(), /ExitFeeReadFailed/);
+
+    await wait(await withdrawal.write.setFeeReadMode([0]));
+    await viem.assertions.revertWithCustomError(
+      operatorPool.write.requestExit([EXIT_FEE - 1n], { value: EXIT_FEE }),
+      pool,
+      "ExitFeeTooHigh",
+    );
+    await viem.assertions.revertWithCustomError(
+      operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE - 1n }),
+      pool,
+      "InsufficientExitFee",
+    );
+
+    await wait(await withdrawal.write.setRequestShouldRevert([true]));
+    await viem.assertions.revertWithCustomError(
+      operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }),
+      pool,
+      "ExitRequestFailed",
+    );
+
+    assert.equal(await withdrawal.read.requestCount(), 0n);
+    assert.equal(await pool.read.exitRequestAttemptCount(), 0n);
+  });
+
+  it("rolls back an exit request if overpayment refund fails", async function () {
+    const wallets = await viem.getWalletClients();
+    const [operator, , bob, , outsider] = wallets;
+    const rejectingParticipant = await viem.deployContract("RejectEthParticipant");
+    const deposit = await viem.deployContract("MockDepositContract");
+    const withdrawal = await viem.deployContract("MockWithdrawalRequestPredeploy", [EXIT_FEE]);
+
+    const pool = await viem.deployContract("ValidatorFundingPool", [
+      deposit.address,
+      withdrawal.address,
+      operator.account.address,
+      FUNDING_WINDOW,
+    ]);
+    const operatorPool = await poolAs(pool.address, operator);
+    const bobPool = await poolAs(pool.address, bob);
+    const data = validatorData(pool.address, fixedHex("77", 48));
+
+    await wait(
+      await pool.write.commitAndPredeposit(
+        [data.pubkey, data.predepositSignature, data.predepositRoot, data.topUpSignature, data.topUpRoot],
+        { value: PREDEPOSIT },
+      ),
+    );
+    await wait(
+      await pool.write.openFundingAttempt([
+        [operator.account.address, rejectingParticipant.address, bob.account.address],
+        [OPERATOR_TARGET, ALICE_TARGET, BOB_TARGET],
+      ]),
+    );
+    await wait(await operatorPool.write.fund({ value: OPERATOR_TARGET - PREDEPOSIT }));
+    await wait(await rejectingParticipant.write.fundPool([pool.address], { value: ALICE_TARGET }));
+    await wait(await bobPool.write.fund({ value: BOB_TARGET }));
+    await wait(await pool.write.topUpValidator());
+
+    await viem.assertions.revertWithCustomError(
+      rejectingParticipant.write.requestExitPool([pool.address, EXIT_FEE], { value: EXIT_FEE + 1n }),
+      pool,
+      "EthPayoutFailed",
+    );
+    assert.equal(await withdrawal.read.requestCount(), 0n);
+    assert.equal(await pool.read.exitRequestAttemptCount(), 0n);
+
+    await wait(await outsider.sendTransaction({ to: pool.address, value: 1n }));
+    assert.equal(await pool.read.grossPoolProceeds(), 1n);
+  });
+
   it("rolls claim accounting back if a credited participant cannot receive ETH", async function () {
     const wallets = await viem.getWalletClients();
     const [operator, , bob, , outsider] = wallets;
@@ -766,9 +890,10 @@ describe("ValidatorFundingPool", async function () {
     const operatorPool = await poolAs(pool.address, operator);
     const bobPool = await poolAs(pool.address, bob);
 
+    const data = validatorData(pool.address, fixedHex("66", 48));
     await wait(
       await pool.write.commitAndPredeposit(
-        [fixedHex("66", 48), PREDEPOSIT_SIGNATURE, fixedHex("07", 32), TOP_UP_SIGNATURE, fixedHex("08", 32)],
+        [data.pubkey, data.predepositSignature, data.predepositRoot, data.topUpSignature, data.topUpRoot],
         { value: PREDEPOSIT },
       ),
     );

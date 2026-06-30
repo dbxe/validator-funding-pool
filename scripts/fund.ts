@@ -3,6 +3,7 @@ import { network } from "hardhat";
 import {
   assertBeaconValidatorHasWithdrawalCredentials,
   assertDeploymentChain,
+  assertDeploymentSystemCodeHashes,
   envBigInt,
   formatWei,
   PREDEPOSIT_GWEI,
@@ -12,6 +13,8 @@ import {
   validateDepositData,
 } from "./lib/common.js";
 
+const GWEI = 1_000_000_000n;
+
 async function main() {
   const deployment = readDeployment();
   const deposits = readPredepositAndTopUpDepositData();
@@ -19,6 +22,7 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
   await assertDeploymentChain(publicClient, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment);
 
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
@@ -50,6 +54,8 @@ async function main() {
   }
   await assertBeaconValidatorHasWithdrawalCredentials(predeposit.pubkey, expectedCredentials, "fund", true);
 
+  await printAndCheckFundingReview(pool, wallet.account.address);
+
   const remaining = await pool.read.fundingRemainingWeiOf([wallet.account.address]);
   if (remaining <= 0n) {
     throw new Error(`No remaining funding cap for ${wallet.account.address}`);
@@ -64,6 +70,63 @@ async function main() {
   const hash = await pool.write.fund({ value: amount });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   console.log(`Funded in block ${receipt.blockNumber}`);
+}
+
+async function printAndCheckFundingReview(pool: any, caller: string) {
+  const fundingAttempt = await pool.read.fundingAttempt();
+  const fundingDeadline = await pool.read.fundingDeadline();
+  const state = await pool.read.state();
+  const totalActiveFundedWei = await pool.read.totalActiveFundedWei();
+  const totalRefundableWei = await pool.read.totalRefundableWei();
+  const participantCount = Number(await pool.read.participantCount());
+  const operator = (await pool.read.operator()) as string;
+
+  const expectedAttempt = process.env.EXPECTED_FUNDING_ATTEMPT;
+  if (expectedAttempt !== undefined && BigInt(expectedAttempt) !== fundingAttempt) {
+    throw new Error(`Funding attempt ${fundingAttempt} != EXPECTED_FUNDING_ATTEMPT ${expectedAttempt}`);
+  }
+
+  const expectedDeadlineBefore = process.env.EXPECTED_DEADLINE_BEFORE;
+  if (expectedDeadlineBefore !== undefined && fundingDeadline > BigInt(expectedDeadlineBefore)) {
+    throw new Error(`Funding deadline ${fundingDeadline} is after EXPECTED_DEADLINE_BEFORE ${expectedDeadlineBefore}`);
+  }
+
+  console.log(`Funding review for pool ${pool.address}`);
+  console.log(`State: ${state}`);
+  console.log(`Funding attempt: ${fundingAttempt}`);
+  console.log(`Funding deadline: ${fundingDeadline}`);
+  console.log(`Total active funded: ${formatWei(totalActiveFundedWei)}`);
+  console.log(`Total refundable from previous attempts: ${formatWei(totalRefundableWei)}`);
+
+  let callerTarget = 0n;
+  let operatorTarget = 0n;
+  for (let i = 0; i < participantCount; ++i) {
+    const participant = (await pool.read.participantAt([BigInt(i)])) as string;
+    const target = await pool.read.fundingTargetWeiOf([participant]);
+    const funded = await pool.read.activeFundedWeiOf([participant]);
+    const remaining = await pool.read.fundingRemainingWeiOf([participant]);
+    const refundable = await pool.read.refundableWeiOf([participant]);
+    if (participant.toLowerCase() === caller.toLowerCase()) callerTarget = target;
+    if (participant.toLowerCase() === operator.toLowerCase()) operatorTarget = target;
+
+    console.log(
+      `Participant ${i}: ${participant} target=${formatWei(target)} activeFunded=${formatWei(
+        funded,
+      )} remaining=${formatWei(remaining)} refundable=${formatWei(refundable)}`,
+    );
+  }
+
+  const expectedMyTargetGwei = process.env.EXPECTED_MY_TARGET_GWEI;
+  if (expectedMyTargetGwei !== undefined && callerTarget !== BigInt(expectedMyTargetGwei) * GWEI) {
+    throw new Error(`Caller target ${formatWei(callerTarget)} != EXPECTED_MY_TARGET_GWEI ${expectedMyTargetGwei}`);
+  }
+
+  const expectedOperatorTargetGwei = process.env.EXPECTED_OPERATOR_TARGET_GWEI;
+  if (expectedOperatorTargetGwei !== undefined && operatorTarget !== BigInt(expectedOperatorTargetGwei) * GWEI) {
+    throw new Error(
+      `Operator target ${formatWei(operatorTarget)} != EXPECTED_OPERATOR_TARGET_GWEI ${expectedOperatorTargetGwei}`,
+    );
+  }
 }
 
 main().catch((error) => {
