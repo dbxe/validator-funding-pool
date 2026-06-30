@@ -57,9 +57,9 @@ Participants should not fund until beacon state confirms the predeposit locked t
 
 These values are not private. Deposit data is designed to be publishable and becomes public when submitted to the deposit contract. The operator must not share validator private keys, mnemonics, keystore passwords, remote signer credentials, or validator-client secrets.
 
-Repository scripts verify deposit roots and BLS signatures. `fund.ts` compares the local deposit-data file to the on-chain commitment before sending ETH, prints the current funding attempt and allocation, and supports optional expected-value checks for participants who want an extra local guardrail. `fund.ts` and `top-up.ts` require `BEACON_NODE_URL` to confirm pool withdrawal credentials unless both `UNSAFE_SKIP_BEACON_CONFIRMATION=1` and `I_UNDERSTAND_FUNDS_CAN_BE_LOST=1` are explicitly set for a local/devnet bypass.
+Repository scripts verify deposit roots and BLS signatures. `fund.ts` compares the local deposit-data file to the on-chain commitment before sending ETH, prints the current funding attempt, allocation, and operator target percentage, and supports optional expected-value checks for participants who want an extra local guardrail. Scripts that use withdrawal credentials read them from the live pool and compare them to the deployment record before relying on either value.
 
-Beacon confirmation uses finalized state by default for funding and top-up checks. The scripts also print beacon chain identity, finalized checkpoint, validator status, balances, slashing flag, and lifecycle epochs. `top-up.ts` refuses to submit the `31 ETH` top-up unless the validator has pool withdrawal credentials, is not slashed, and is still in a pending validator status.
+`fund.ts` and `top-up.ts` require `BEACON_NODE_URL` to confirm pool withdrawal credentials unless both `UNSAFE_SKIP_BEACON_CONFIRMATION=1` and `I_UNDERSTAND_FUNDS_CAN_BE_LOST=1` are explicitly set for a local/devnet bypass. Credential confirmation uses finalized state by default. `top-up.ts` then checks head state immediately before submitting the `31 ETH` top-up and refuses unless the validator is not slashed, has not initiated exit, and is still in a pending validator status. `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
 
 ## Trust Boundaries
 
@@ -83,9 +83,9 @@ The operator bears the first loss of coordination failure. Before participants c
 
 That upfront cost is what locks in the cross-layer safety property participants care about. Participants wait for beacon state to show the committed pubkey with the pool's `0x01` withdrawal credentials before funding. Ethereum consensus stores the withdrawal credentials when a validator is created, and later deposits for the same pubkey increase the validator balance rather than replacing those credentials. The relevant spec points are the [`0x01` withdrawal credential shape](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/phase0/validator.md#eth1_address_withdrawal_prefix), validator creation [storing `withdrawal_credentials`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#modified-get_validator_from_deposit), and existing-pubkey deposit handling that only [increases balance](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-apply_pending_deposit).
 
-Participants have no capital at risk until they fund after that verification. Once they fund, they are incentivized to complete the attempt promptly so dormant ETH starts earning consensus rewards. If an attempt expires before top-up, active funding becomes refundable and the operator can reopen funding with a different participant set.
+Participants have no capital at risk until they fund after that verification. Once they fund, they are incentivized to complete the attempt promptly so dormant ETH starts earning consensus rewards. Only the operator can submit the top-up, so funding windows should be intentionally short. If an attempt expires before top-up, active funding becomes refundable and the operator can reopen funding with a different participant set.
 
-Poor validator operation is still an operator trust boundary. The intended incentive alignment is that the operator has meaningful economic weight in the pool, including the `1 ETH` predeposit, so downtime, slashing, or deliberate misoperation harms the operator's own claim as well as everyone else's. This reduces but does not remove operator trust.
+Poor validator operation is still an operator trust boundary. The intended incentive alignment depends on the configured operator target: the contract enforces only that the operator has at least the `1 ETH` predeposit credited as economic weight. Groups that rely on operator self-exposure should configure a larger operator target. Downtime, slashing, or deliberate misoperation then harms the operator's own claim as well as everyone else's. This reduces but does not remove operator trust.
 
 The unilateral escape hatch is EIP-7002. The operator can request exits before or after top-up because the operator bears the predeposit exposure. After top-up, final credited participants can request a full exit without operator permission. Current funding-attempt participants recover through the funding deadline and `refundTo()` if top-up does not happen; refund-only holders cannot request exits for a later validator they did not fund. Consensus processing still enforces validator-state preconditions, so execution-layer accepted requests can be ignored until those conditions are met; the contract therefore records attempts and allows retries. See the consensus [`process_withdrawal_request`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-process_withdrawal_request) flow.
 
@@ -151,7 +151,7 @@ Only ETH sent through the pool is credited as participant funding. A third party
 
 ### EIP-7002 Exit Attempts
 
-EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds.
+EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds. `request-exit.ts` checks head beacon state before submitting, including the active status, `exit_epoch`, slashing flag, and `SHARD_COMMITTEE_PERIOD` age requirement, but the Solidity contract cannot enforce those consensus-state predicates.
 
 ### System Contract Addresses
 
@@ -255,9 +255,8 @@ Environment variables:
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
 - `DEPOSIT_FORK_VERSION`: optional expected fork-version check. The deposit data itself must include `fork_version` unless this env var supplies it.
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
-- `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation and exit preflight; required by `fund` and `top-up` unless explicitly bypassed.
-- `BEACON_CONFIRMATION_STATE_ID`: optional beacon state id for `fund` and `top-up`; defaults to `finalized`.
-- `BEACON_EXIT_STATE_ID`: optional beacon state id for `request-exit`; defaults to `head`.
+- `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, top-up preflight, and exit preflight; required by `fund` and `top-up` unless explicitly bypassed.
+- `BEACON_CONFIRMATION_STATE_ID`: optional beacon state id for withdrawal-credential confirmation; defaults to `finalized`. Mutable top-up and exit checks use head state.
 - `UNSAFE_SKIP_BEACON_CONFIRMATION`: set to `1` only to bypass required `fund`/`top-up` beacon confirmation in local/devnet flows.
 - `I_UNDERSTAND_FUNDS_CAN_BE_LOST`: must also be `1` when using the unsafe beacon confirmation bypass.
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.

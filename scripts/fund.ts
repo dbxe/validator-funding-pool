@@ -12,6 +12,7 @@ import {
   readPredepositAndTopUpDepositData,
   TOP_UP_GWEI,
   validateDepositData,
+  VALIDATOR_DEPOSIT_WEI,
 } from "./lib/common.js";
 
 const GWEI = 1_000_000_000n;
@@ -116,6 +117,7 @@ async function printAndCheckFundingReview(pool: any, caller: string) {
       )} remaining=${formatWei(remaining)} refundable=${formatWei(refundable)}`,
     );
   }
+  console.log(`Operator target: ${formatWei(operatorTarget)} (${formatPercent(operatorTarget)})`);
 
   const expectedMyTargetGwei = process.env.EXPECTED_MY_TARGET_GWEI;
   if (expectedMyTargetGwei !== undefined && callerTarget !== BigInt(expectedMyTargetGwei) * GWEI) {
@@ -128,6 +130,11 @@ async function printAndCheckFundingReview(pool: any, caller: string) {
       `Operator target ${formatWei(operatorTarget)} != EXPECTED_OPERATOR_TARGET_GWEI ${expectedOperatorTargetGwei}`,
     );
   }
+}
+
+function formatPercent(value: bigint): string {
+  const basisPoints = (value * 10_000n) / VALIDATOR_DEPOSIT_WEI;
+  return `${basisPoints / 100n}.${(basisPoints % 100n).toString().padStart(2, "0")}%`;
 }
 
 main().catch((error) => {
