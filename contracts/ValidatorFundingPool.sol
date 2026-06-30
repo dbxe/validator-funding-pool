@@ -10,19 +10,6 @@ interface IBeaconDepositContract {
     ) external payable;
 }
 
-/// @title ValidatorFundingPool
-/// @notice Non-tokenized validator funding pool for known participants funding one validator.
-/// @dev This contract is intentionally narrow:
-///      - one validator pubkey;
-///      - pool-owned 0x01 withdrawal credentials;
-///      - no transferable claims;
-///      - no admin rescue or arbitrary external-call path;
-///      - no on-chain BLS proof-of-possession, beacon-state, or deposit-log validation.
-///
-///      The operator is trusted for validator key generation, validator operation,
-///      slashing avoidance, and EL priority fee / MEV recipient configuration.
-///      The contract only enforces custody and pro-rata distribution of ETH that
-///      reaches this contract, excluding outstanding failed-attempt refunds.
 contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
     // Constants
@@ -127,21 +114,7 @@ contract ValidatorFundingPool {
         bytes32 topUpDepositDataRoot
     );
     event PoolToppedUp();
-    /// @notice Emitted only when ETH is received through an EVM call after top-up.
-    /// @dev This event is not a complete proceeds ledger. Consensus withdrawals,
-    ///      priority-fee / coinbase balance increases, and forced ETH can increase
-    ///      this contract's balance without executing receive() and without emitting
-    ///      this event. Authoritative pool accounting is balance-based:
-    ///      grossPoolProceeds() = address(this).balance + totalClaimedWei - totalRefundableWei.
     event EthReceivedViaCall(address indexed sender, uint256 amount);
-    /// @notice Emitted after selected accounting actions to record observed pool state.
-    /// @dev This is a reconciliation aid only. It is not a complete proceeds ledger,
-    ///      not a source-of-funds classifier, and not evidence that no silent balance
-    ///      changes occurred between snapshots. Consensus withdrawals, priority-fee /
-    ///      coinbase balance increases, and forced ETH can increase this contract's
-    ///      balance without executing contract code and without emitting a pool event.
-    ///      Authoritative entitlement accounting remains balance-based and excludes
-    ///      outstanding refund liabilities.
     event AccountingSnapshot(
         State state,
         uint256 fundingAttempt,
@@ -218,8 +191,6 @@ contract ValidatorFundingPool {
     // Deployment
     // -------------------------------------------------------------------------
 
-    /// @notice Deploy an uninitialized pool for one validator.
-    /// @dev Funding allocations are provided per-attempt, not at construction.
     constructor(
         address depositContract_,
         address withdrawalRequestPredeploy_,
@@ -242,8 +213,6 @@ contract ValidatorFundingPool {
         withdrawalCredentials = _makeEth1WithdrawalCredentials(address(this));
     }
 
-    /// @notice Accept current-attempt funding during Funding and proceeds after top-up.
-    /// @dev Consensus withdrawals and forced ETH can change balance without invoking this function.
     receive() external payable {
         if (state == State.Funding) {
             _fund(msg.sender, msg.value);
@@ -263,13 +232,6 @@ contract ValidatorFundingPool {
     // Validator predeposit lifecycle
     // -------------------------------------------------------------------------
 
-    /// @notice Commit validator data and submit the operator-funded 1 ETH predeposit.
-    /// @dev The predeposit is the protocol minimum validator deposit. It is credited
-    ///      to the operator economically, but is not refundable from this contract.
-    ///      The contract checks data lengths and nonzero roots, then relies on the
-    ///      deposit contract to check each supplied root against calldata. It does
-    ///      not verify BLS proof-of-possession, fork/domain correctness, beacon
-    ///      state, deposit-log ordering, or global pubkey freshness.
     function commitAndPredeposit(
         bytes calldata pubkey,
         bytes calldata predepositSignature_,
@@ -300,10 +262,6 @@ contract ValidatorFundingPool {
         _emitAccountingSnapshot();
     }
 
-    /// @notice Open a fixed funding attempt for the remaining validator balance.
-    /// @dev Targets are final economic weights and must sum to 32 ETH. The operator
-    ///      must be included with at least the 1 ETH predeposit credit. The amount
-    ///      the operator may fund in the attempt is `target - PREDEPOSIT_WEI`.
     function openFundingAttempt(address[] calldata participants, uint256[] calldata fundingTargets)
         external
         onlyOperator
@@ -320,15 +278,10 @@ contract ValidatorFundingPool {
         _emitAccountingSnapshot();
     }
 
-    /// @notice Fund the caller's current-attempt allocation.
     function fund() external payable {
         _fund(msg.sender, msg.value);
     }
 
-    /// @notice Close an expired funding attempt and make active contributions refundable.
-    /// @dev Anyone can close after the deadline, so participants are not dependent on
-    ///      the operator to unlock refunds. Refund claims are not reused by later
-    ///      attempts unless the participant withdraws and funds again.
     function closeExpiredFundingAttempt() external {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp <= fundingDeadline) revert FundingStillOpen();
@@ -359,9 +312,6 @@ contract ValidatorFundingPool {
     // Validator top-up lifecycle
     // -------------------------------------------------------------------------
 
-    /// @notice Submit the 31 ETH top-up after exact current-attempt funding.
-    /// @dev Outstanding refund balances are excluded from proceeds and must remain
-    ///      in the contract after the top-up.
     function topUpValidator() external onlyOperator nonReentrant {
         if (state != State.Funding) revert InvalidState();
         if (block.timestamp > fundingDeadline) revert FundingClosed();
@@ -393,9 +343,6 @@ contract ValidatorFundingPool {
     // Exit requests
     // -------------------------------------------------------------------------
 
-    /// @notice Request a full validator exit through EIP-7002.
-    /// @dev Allowed after predeposit. An EL-accepted request can still be ignored
-    ///      by CL processing, so retries are allowed. The caller pays the fee.
     function requestExit(uint256 maxFee) external payable nonReentrant {
         if (_committedPubkey.length != PUBKEY_LENGTH) revert InvalidState();
         if (!_canRequestExit(msg.sender)) revert NotParticipant();
@@ -428,8 +375,6 @@ contract ValidatorFundingPool {
         refundTo(payable(msg.sender));
     }
 
-    /// @notice Withdraw the caller's failed-attempt refund balance.
-    /// @dev Refund balances are independent from later funding attempts.
     function refundTo(address payable recipient) public nonReentrant {
         _validateRecipient(recipient);
 
@@ -449,9 +394,6 @@ contract ValidatorFundingPool {
         claimTo(payable(msg.sender));
     }
 
-    /// @notice Claim the caller's currently vested pro-rata pool proceeds.
-    /// @dev Outstanding refund balances are excluded from proceeds, so old failed
-    ///      attempt refunds cannot be distributed to topped-up participants.
     function claimTo(address payable recipient) public nonReentrant {
         if (state != State.ToppedUp) revert InvalidState();
         _validateRecipient(recipient);
@@ -483,9 +425,6 @@ contract ValidatorFundingPool {
         return entitled - alreadyClaimed;
     }
 
-    /// @notice Return cumulative pool proceeds used for claim entitlement.
-    /// @dev Equal to current balance plus already claimed proceeds, minus outstanding
-    ///      failed-attempt refund liabilities.
     function grossPoolProceeds() public view returns (uint256) {
         return address(this).balance + totalClaimedWei - totalRefundableWei;
     }
@@ -536,9 +475,6 @@ contract ValidatorFundingPool {
         return abi.encodePacked(withdrawalCredentials);
     }
 
-    /// @notice Return the current EIP-7002 full-exit request fee.
-    /// @dev Reads the withdrawal request predeploy with empty calldata and expects
-    ///      exactly one ABI-encoded uint256 in response.
     function currentExitRequestFee() public view returns (uint256) {
         (bool ok, bytes memory data) = withdrawalRequestPredeploy.staticcall("");
         if (!ok || data.length != 32) revert ExitFeeReadFailed();
