@@ -4,6 +4,7 @@ import {
   assertBeaconValidatorAbsent,
   assertDeploymentChain,
   assertDeploymentSystemCodeHashes,
+  assertPoolWithdrawalCredentials,
   asHex,
   PREDEPOSIT_GWEI,
   readDeployment,
@@ -28,7 +29,7 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const expectedCredentials = await pool.read.withdrawalCredentials();
+  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
   const expectedPubkey = process.env.EXPECTED_PUBKEY ? asHex(process.env.EXPECTED_PUBKEY) : undefined;
 
   const predeposit = validateDepositData(

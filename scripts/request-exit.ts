@@ -4,6 +4,7 @@ import {
   assertBeaconValidatorReadyForExit,
   assertDeploymentChain,
   assertDeploymentSystemCodeHashes,
+  assertPoolWithdrawalCredentials,
   envBigInt,
   formatWei,
   readDeployment,
@@ -21,8 +22,9 @@ async function main() {
     client: { wallet },
   });
 
+  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
   const pubkey = await pool.read.committedPubkey();
-  await assertBeaconValidatorReadyForExit(pubkey, deployment.withdrawalCredentials, "request-exit");
+  await assertBeaconValidatorReadyForExit(pubkey, expectedCredentials, "request-exit");
 
   const fee = await pool.read.currentExitRequestFee();
   const maxFee = envBigInt("MAX_FEE_WEI", fee);

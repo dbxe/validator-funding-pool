@@ -4,6 +4,7 @@ import {
   assertBeaconValidatorHasWithdrawalCredentials,
   assertDeploymentChain,
   assertDeploymentSystemCodeHashes,
+  assertPoolWithdrawalCredentials,
   envBigInt,
   formatWei,
   PREDEPOSIT_GWEI,
@@ -28,7 +29,7 @@ async function main() {
     client: { wallet },
   });
 
-  const expectedCredentials = await pool.read.withdrawalCredentials();
+  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
   const predeposit = validateDepositData(deposits.predeposit, expectedCredentials, undefined, PREDEPOSIT_GWEI);
   const topUp = validateDepositData(deposits.topUp, expectedCredentials, predeposit.pubkey, TOP_UP_GWEI);
 

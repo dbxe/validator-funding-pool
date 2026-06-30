@@ -4,6 +4,7 @@ import {
   assertBeaconValidatorReadyForTopUp,
   assertDeploymentChain,
   assertDeploymentSystemCodeHashes,
+  assertPoolWithdrawalCredentials,
   readDeployment,
 } from "./lib/common.js";
 
@@ -22,8 +23,9 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
+  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
   const pubkey = await pool.read.committedPubkey();
-  await assertBeaconValidatorReadyForTopUp(pubkey, deployment.withdrawalCredentials, "top-up");
+  await assertBeaconValidatorReadyForTopUp(pubkey, expectedCredentials, "top-up");
 
   console.log(`Submitting 31 ETH top-up through ${deployment.pool}`);
   console.log(`Validator pubkey: ${pubkey}`);

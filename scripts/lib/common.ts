@@ -18,7 +18,8 @@ export const UNSAFE_SKIP_BEACON_CONFIRMATION = "UNSAFE_SKIP_BEACON_CONFIRMATION"
 export const UNSAFE_BEACON_BYPASS_ACK = "I_UNDERSTAND_FUNDS_CAN_BE_LOST";
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
-const DEFAULT_EXIT_STATE_ID = "head";
+const HEAD_STATE_ID = "head";
+const FAR_FUTURE_EPOCH = (2n ** 64n - 1n).toString();
 
 export interface DepositData {
   pubkey: string;
@@ -86,12 +87,22 @@ interface BeaconFinalityCheckpointsResponse {
   };
 }
 
+interface BeaconSpecResponse {
+  data: Record<string, string>;
+}
+
 interface BeaconValidatorPreflight {
   stateId: string;
   genesis: BeaconGenesisResponse["data"];
   syncing: BeaconSyncingResponse["data"];
   finality: BeaconFinalityCheckpointsResponse["data"];
   validator: BeaconValidatorResponse["data"];
+}
+
+interface PoolWithdrawalCredentialsReader {
+  read: {
+    withdrawalCredentials: () => Promise<Hex>;
+  };
 }
 
 export function asHex(value: string): Hex {
@@ -196,6 +207,20 @@ export async function assertDeploymentSystemCodeHashes(
   }
 }
 
+export async function assertPoolWithdrawalCredentials(
+  pool: PoolWithdrawalCredentialsReader,
+  deployment: DeploymentRecord,
+): Promise<Hex> {
+  const liveWithdrawalCredentials = await pool.read.withdrawalCredentials();
+  if (liveWithdrawalCredentials.toLowerCase() !== deployment.withdrawalCredentials.toLowerCase()) {
+    throw new Error(
+      `Pool withdrawalCredentials ${liveWithdrawalCredentials} does not match deployment record ` +
+        deployment.withdrawalCredentials,
+    );
+  }
+  return liveWithdrawalCredentials;
+}
+
 export async function assertHasCode(
   publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
   address: Address,
@@ -267,12 +292,7 @@ export async function assertBeaconValidatorHasWithdrawalCredentials(
     process.env.BEACON_CONFIRMATION_STATE_ID ?? DEFAULT_CONFIRMATION_STATE_ID,
     label,
   );
-  const actualCredentials = preflight.validator.validator.withdrawal_credentials.toLowerCase();
-  if (actualCredentials !== expectedWithdrawalCredentials.toLowerCase()) {
-    throw new Error(
-      `${label} beacon withdrawal_credentials ${actualCredentials} != pool ${expectedWithdrawalCredentials}`,
-    );
-  }
+  assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
   printBeaconPreflight(label, preflight);
   console.log(`${label} beacon confirmation passed: validator has pool withdrawal credentials`);
   return preflight;
@@ -283,21 +303,36 @@ export async function assertBeaconValidatorReadyForTopUp(
   expectedWithdrawalCredentials: Hex,
   label: string,
 ) {
-  const preflight = await assertBeaconValidatorHasWithdrawalCredentials(
+  const finalizedPreflight = await assertBeaconValidatorHasWithdrawalCredentials(
     pubkey,
     expectedWithdrawalCredentials,
     label,
     true,
   );
-  if (preflight === undefined) return;
+  if (finalizedPreflight === undefined) return;
 
-  const { status, validator } = preflight.validator;
+  const headPreflight = await readBeaconValidatorPreflight(
+    process.env.BEACON_NODE_URL as string,
+    pubkey,
+    HEAD_STATE_ID,
+    `${label} head`,
+  );
+  assertBeaconValidatorWithdrawalCredentials(headPreflight, expectedWithdrawalCredentials, `${label} head`);
+
+  const { status, validator } = headPreflight.validator;
   if (validator.slashed) {
-    throw new Error(`${label} beacon validator is slashed`);
+    throw new Error(`${label} head beacon validator is slashed`);
+  }
+  if (validator.exit_epoch !== FAR_FUTURE_EPOCH) {
+    throw new Error(
+      `${label} head beacon validator exit_epoch ${validator.exit_epoch} is not FAR_FUTURE_EPOCH`,
+    );
   }
   if (!["pending_initialized", "pending_queued"].includes(status)) {
-    throw new Error(`${label} beacon validator status ${status} is not safe for 31 ETH top-up`);
+    throw new Error(`${label} head beacon validator status ${status} is not safe for 31 ETH top-up`);
   }
+  printBeaconPreflight(`${label} head`, headPreflight);
+  console.log(`${label} head beacon top-up preflight passed`);
 }
 
 export async function assertBeaconValidatorReadyForExit(
@@ -311,41 +346,59 @@ export async function assertBeaconValidatorReadyForExit(
     return;
   }
 
-  const preflight = await readBeaconValidatorPreflight(
-    beaconNodeUrl,
-    pubkey,
-    process.env.BEACON_EXIT_STATE_ID ?? DEFAULT_EXIT_STATE_ID,
-    label,
-  );
+  const [preflight, spec] = await Promise.all([
+    readBeaconValidatorPreflight(beaconNodeUrl, pubkey, HEAD_STATE_ID, label),
+    fetchBeaconJson<BeaconSpecResponse>(beaconNodeUrl, "/eth/v1/config/spec", label),
+  ]);
+  assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
+
+  const { validator } = preflight.validator;
+  if (validator.slashed) {
+    throw new Error(`${label} beacon validator is slashed`);
+  }
+  if (validator.exit_epoch !== FAR_FUTURE_EPOCH) {
+    throw new Error(`${label} beacon validator exit_epoch ${validator.exit_epoch} is not FAR_FUTURE_EPOCH`);
+  }
+  if (preflight.validator.status !== "active_ongoing") {
+    throw new Error(`${label} beacon validator status is ${preflight.validator.status}, expected active_ongoing`);
+  }
+
+  const slotsPerEpoch = beaconSpecUint(spec, "SLOTS_PER_EPOCH");
+  const shardCommitteePeriod = beaconSpecUint(spec, "SHARD_COMMITTEE_PERIOD");
+  const currentEpoch = BigInt(preflight.syncing.head_slot) / slotsPerEpoch;
+  const exitEligibleEpoch = BigInt(validator.activation_epoch) + shardCommitteePeriod;
+  if (currentEpoch < exitEligibleEpoch) {
+    throw new Error(
+      `${label} beacon validator is not exit-eligible until epoch ${exitEligibleEpoch} ` +
+        `(current epoch ${currentEpoch})`,
+    );
+  }
+
+  printBeaconPreflight(label, preflight);
+  console.log(`${label} beacon current epoch: ${currentEpoch}`);
+  console.log(`${label} beacon SHARD_COMMITTEE_PERIOD: ${shardCommitteePeriod}`);
+  console.log(`${label} beacon exit preflight passed`);
+}
+
+function assertBeaconValidatorWithdrawalCredentials(
+  preflight: BeaconValidatorPreflight,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+) {
   const actualCredentials = preflight.validator.validator.withdrawal_credentials.toLowerCase();
   if (actualCredentials !== expectedWithdrawalCredentials.toLowerCase()) {
     throw new Error(
       `${label} beacon withdrawal_credentials ${actualCredentials} != pool ${expectedWithdrawalCredentials}`,
     );
   }
-  if (preflight.validator.validator.slashed) {
-    throw new Error(`${label} beacon validator is slashed`);
-  }
-  if (preflight.validator.status !== "active_ongoing") {
-    throw new Error(`${label} beacon validator status is ${preflight.validator.status}, expected active_ongoing`);
-  }
-
-  printBeaconPreflight(label, preflight);
-  console.log(`${label} beacon exit preflight passed`);
 }
 
-async function assertBeaconNodeHealthy(beaconNodeUrl: string, label: string): Promise<BeaconSyncingResponse["data"]> {
-  const syncing = await fetchBeaconJson<BeaconSyncingResponse>(beaconNodeUrl, "/eth/v1/node/syncing", label);
-  if (syncing.data.is_syncing) {
-    throw new Error(`${label} beacon node is syncing: distance ${syncing.data.sync_distance}`);
+function beaconSpecUint(spec: BeaconSpecResponse, key: string): bigint {
+  const value = spec.data[key];
+  if (value === undefined) {
+    throw new Error(`Beacon spec is missing ${key}`);
   }
-  if (syncing.data.is_optimistic) {
-    throw new Error(`${label} beacon node is optimistic; refusing to rely on beacon confirmation`);
-  }
-  if (syncing.data.el_offline) {
-    throw new Error(`${label} beacon node reports execution layer offline`);
-  }
-  return syncing.data;
+  return BigInt(value);
 }
 
 async function readBeaconValidatorPreflight(
@@ -376,6 +429,20 @@ async function readBeaconValidatorPreflight(
     finality: finality.data,
     validator: validator.data,
   };
+}
+
+async function assertBeaconNodeHealthy(beaconNodeUrl: string, label: string): Promise<BeaconSyncingResponse["data"]> {
+  const syncing = await fetchBeaconJson<BeaconSyncingResponse>(beaconNodeUrl, "/eth/v1/node/syncing", label);
+  if (syncing.data.is_syncing) {
+    throw new Error(`${label} beacon node is syncing: distance ${syncing.data.sync_distance}`);
+  }
+  if (syncing.data.is_optimistic) {
+    throw new Error(`${label} beacon node is optimistic; refusing to rely on beacon confirmation`);
+  }
+  if (syncing.data.el_offline) {
+    throw new Error(`${label} beacon node reports execution layer offline`);
+  }
+  return syncing.data;
 }
 
 async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label: string): Promise<T> {
