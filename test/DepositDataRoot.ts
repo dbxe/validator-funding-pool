@@ -16,7 +16,7 @@ function bytesToHex(bytes: Uint8Array): Hex {
 }
 
 describe("deposit data validation", function () {
-  it("matches a Lodestar-cross-checked 0x01 DepositData root", function () {
+  it("computes a stable 0x01 DepositData root fixture", function () {
     const pubkey =
       "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111";
     const withdrawalCredentials = "0x0100000000000000000000002222222222222222222222222222222222222222";
@@ -24,7 +24,7 @@ describe("deposit data validation", function () {
     const signature =
       "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    // Expected root generated with Lodestar ssz.phase0.DepositData.hashTreeRoot.
+    // Fixed fixture to catch accidental changes to deposit root encoding.
     assert.equal(
       computeDepositDataRoot(pubkey, withdrawalCredentials, amountGwei, signature),
       "0x6dd03ee1016b251f0b998ab6379b190847f2740987400fd59535b1c7894c2749",
