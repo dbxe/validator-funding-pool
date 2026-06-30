@@ -541,6 +541,55 @@ describe("ValidatorFundingPool", async function () {
     ]);
   });
 
+  it("treats forced pre-top-up ETH as proceeds while excluding old refunds", async function () {
+    const { pool, operatorPool, alicePool, bobPool, charliePool, operator, alice, bob, charlie, outsider, deadline } =
+      await networkHelpers.loadFixture(fundingFixture);
+    const forceSend = await viem.deployContract("ForceSend");
+
+    await wait(await alicePool.write.fund({ value: parseEther("5") }));
+    await wait(await outsider.sendTransaction({ to: forceSend.address, value: 32n }));
+    const forcedReceipt = await waitForReceipt(await forceSend.write.forceSend([pool.address]));
+    assertNoPoolEvents(pool, forcedReceipt);
+
+    await networkHelpers.time.increaseTo(deadline + 1n);
+    await wait(await pool.write.closeExpiredFundingAttempt());
+
+    assert.equal(await pool.read.totalRefundableWei(), parseEther("5"));
+    assert.equal(await publicClient.getBalance({ address: pool.address }), parseEther("5") + 32n);
+    assert.equal(await pool.read.grossPoolProceeds(), 32n);
+
+    await wait(
+      await pool.write.openFundingAttempt([
+        [operator.account.address, charlie.account.address, bob.account.address],
+        [OPERATOR_TARGET, ALICE_TARGET, BOB_TARGET],
+      ]),
+    );
+    await wait(await operatorPool.write.fund({ value: OPERATOR_TARGET - PREDEPOSIT }));
+    await wait(await charliePool.write.fund({ value: ALICE_TARGET }));
+    await wait(await bobPool.write.fund({ value: BOB_TARGET }));
+    await wait(await pool.write.topUpValidator());
+
+    assert.equal(await pool.read.totalRefundableWei(), parseEther("5"));
+    assert.equal(await publicClient.getBalance({ address: pool.address }), parseEther("5") + 32n);
+    assert.equal(await pool.read.grossPoolProceeds(), 32n);
+    assert.equal(await pool.read.claimable([operator.account.address]), 2n);
+    assert.equal(await pool.read.claimable([charlie.account.address]), 12n);
+    assert.equal(await pool.read.claimable([bob.account.address]), 18n);
+    assert.equal(await pool.read.claimable([alice.account.address]), 0n);
+
+    await wait(await charliePool.write.claim());
+    assert.equal(await pool.read.totalRefundableWei(), parseEther("5"));
+    assert.equal(await pool.read.grossPoolProceeds(), 32n);
+
+    await wait(await alicePool.write.refund());
+    assert.equal(await pool.read.totalRefundableWei(), 0n);
+    assert.equal(await pool.read.grossPoolProceeds(), 32n);
+
+    await wait(await operatorPool.write.claim());
+    await wait(await bobPool.write.claim());
+    assert.equal(await publicClient.getBalance({ address: pool.address }), 0n);
+  });
+
   it("treats post-top-up ETH as pro-rata proceeds with order-independent claims", async function () {
     const { pool, operatorPool, alicePool, bobPool, operator, alice, bob, charlie, outsider } =
       await networkHelpers.loadFixture(toppedUpFixture);
