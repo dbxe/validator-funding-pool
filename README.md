@@ -196,7 +196,7 @@ After beacon confirmation, open a fixed funding attempt:
 RPC_URL=http://localhost:8545 \
 PRIVATE_KEY=0x... \
 PARTICIPANTS=0xOperator,0xAlice,0xBob \
-FUNDING_TARGETS_GWEI=2000000000,12000000000,18000000000 \
+FUNDING_TARGETS_GWEI=20000000000,6000000000,6000000000 \
 npm run open-funding-attempt
 ```
 
