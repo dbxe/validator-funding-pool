@@ -12,11 +12,17 @@ interface IBeaconDepositContract {
 
 /// @title ValidatorFundingPool
 /// @notice Non-tokenized validator funding pool for known participants funding one validator.
-/// @dev The operator first makes the protocol-minimum 1 ETH validator deposit with
-///      pool-owned 0x01 withdrawal credentials. Participants then fund the remaining
-///      31 ETH only after off-chain beacon verification that the pubkey is bound to
-///      this pool. Failed funding attempts become passive refund claims and are never
-///      rolled into later attempts automatically.
+/// @dev This contract is intentionally narrow:
+///      - one validator pubkey;
+///      - pool-owned 0x01 withdrawal credentials;
+///      - no transferable claims;
+///      - no admin rescue or arbitrary external-call path;
+///      - no on-chain BLS proof-of-possession, beacon-state, or deposit-log validation.
+///
+///      The operator is trusted for validator key generation, validator operation,
+///      slashing avoidance, and EL priority fee / MEV recipient configuration.
+///      The contract only enforces custody and pro-rata distribution of ETH that
+///      reaches this contract, excluding outstanding failed-attempt refunds.
 contract ValidatorFundingPool {
     // -------------------------------------------------------------------------
     // Constants
@@ -131,13 +137,18 @@ contract ValidatorFundingPool {
     /// @notice Emitted after selected accounting actions to record observed pool state.
     /// @dev This is a reconciliation aid only. It is not a complete proceeds ledger,
     ///      not a source-of-funds classifier, and not evidence that no silent balance
-    ///      changes occurred between snapshots. Authoritative entitlement accounting
-    ///      remains balance-based and excludes outstanding refund liabilities.
+    ///      changes occurred between snapshots. Consensus withdrawals, priority-fee /
+    ///      coinbase balance increases, and forced ETH can increase this contract's
+    ///      balance without executing contract code and without emitting a pool event.
+    ///      Authoritative entitlement accounting remains balance-based and excludes
+    ///      outstanding refund liabilities.
     event AccountingSnapshot(
         State state,
+        uint256 fundingAttempt,
         uint256 balance,
         uint256 totalActiveFundedWei,
         uint256 totalRefundableWei,
+        uint256 totalRefundedWei,
         uint256 totalCreditedWei,
         uint256 totalClaimedWei,
         uint256 grossPoolProceeds
@@ -255,6 +266,10 @@ contract ValidatorFundingPool {
     /// @notice Commit validator data and submit the operator-funded 1 ETH predeposit.
     /// @dev The predeposit is the protocol minimum validator deposit. It is credited
     ///      to the operator economically, but is not refundable from this contract.
+    ///      The contract checks data lengths and nonzero roots, then relies on the
+    ///      deposit contract to check each supplied root against calldata. It does
+    ///      not verify BLS proof-of-possession, fork/domain correctness, beacon
+    ///      state, deposit-log ordering, or global pubkey freshness.
     function commitAndPredeposit(
         bytes calldata pubkey,
         bytes calldata predepositSignature_,
@@ -333,6 +348,7 @@ contract ValidatorFundingPool {
         delete _participants;
 
         totalActiveFundedWei = 0;
+        fundingDeadline = 0;
         state = State.Predeposited;
 
         emit FundingAttemptClosed(fundingAttempt);
@@ -586,9 +602,11 @@ contract ValidatorFundingPool {
     function _emitAccountingSnapshot() private {
         emit AccountingSnapshot(
             state,
+            fundingAttempt,
             address(this).balance,
             totalActiveFundedWei,
             totalRefundableWei,
+            totalRefundedWei,
             totalCreditedWei,
             totalClaimedWei,
             grossPoolProceeds()

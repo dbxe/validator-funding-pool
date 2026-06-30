@@ -48,7 +48,7 @@ async function main() {
   if (committedTopUpSignature.toLowerCase() !== topUp.signature.toLowerCase()) {
     throw new Error("Committed top-up signature does not match deposit-data file");
   }
-  await assertBeaconValidatorHasWithdrawalCredentials(predeposit.pubkey, expectedCredentials, "fund");
+  await assertBeaconValidatorHasWithdrawalCredentials(predeposit.pubkey, expectedCredentials, "fund", true);
 
   const remaining = await pool.read.fundingRemainingWeiOf([wallet.account.address]);
   if (remaining <= 0n) {

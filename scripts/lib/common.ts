@@ -14,6 +14,7 @@ export const PREDEPOSIT_GWEI = 1_000_000_000n;
 export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
+export const UNSAFE_SKIP_BEACON_CONFIRMATION = "UNSAFE_SKIP_BEACON_CONFIRMATION";
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 
 export interface DepositData {
@@ -174,9 +175,16 @@ export async function assertBeaconValidatorHasWithdrawalCredentials(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
+  required = false,
 ) {
   const beaconNodeUrl = process.env.BEACON_NODE_URL;
   if (!beaconNodeUrl) {
+    if (required && process.env[UNSAFE_SKIP_BEACON_CONFIRMATION] !== "1") {
+      throw new Error(
+        `${label} requires BEACON_NODE_URL to confirm pool withdrawal credentials. ` +
+          `Set ${UNSAFE_SKIP_BEACON_CONFIRMATION}=1 only for unsafe local/devnet bypasses.`,
+      );
+    }
     console.log(`Skipping ${label} beacon confirmation: BEACON_NODE_URL not set`);
     return;
   }

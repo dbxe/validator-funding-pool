@@ -57,7 +57,7 @@ Participants should not fund until beacon state confirms the predeposit locked t
 
 These values are not private. Deposit data is designed to be publishable and becomes public when submitted to the deposit contract. The operator must not share validator private keys, mnemonics, keystore passwords, remote signer credentials, or validator-client secrets.
 
-Repository scripts verify deposit roots and BLS signatures. `fund.ts` compares the local deposit-data file to the on-chain commitment before sending ETH. Beacon-state checks run when `BEACON_NODE_URL` is set.
+Repository scripts verify deposit roots and BLS signatures. `fund.ts` compares the local deposit-data file to the on-chain commitment before sending ETH. `fund.ts` and `top-up.ts` require `BEACON_NODE_URL` to confirm pool withdrawal credentials unless `UNSAFE_SKIP_BEACON_CONFIRMATION=1` is explicitly set for a local/devnet bypass.
 
 ## Trust Boundaries
 
@@ -71,7 +71,7 @@ The operator is trusted to:
 - run the validator correctly and avoid slashable behavior;
 - configure EL priority fee / MEV recipients as agreed off-chain.
 
-The predeposit flow removes the main first-deposit credential-capture risk for participants: they fund only after beacon state shows the validator pubkey is already bound to the pool. A malicious operator can still slash, abandon, or misoperate the validator after top-up. This contract is trust-minimized, not trustless.
+The predeposit flow mitigates the main first-deposit credential-capture risk by making participant funding conditional on beacon state showing the validator pubkey already bound to the pool. A malicious operator can still slash, abandon, or misoperate the validator after top-up. This contract is trust-minimized, not trustless.
 
 The contract only enforces custody and pro-rata distribution of ETH that reaches the pool. Consensus withdrawals and exited principal reach the pool because withdrawal credentials point to the pool. EL priority fees and MEV are operator-controlled. The default expectation is that the operator keeps those as hardware incentive; if the group wants to split them, the operator can configure the fee recipient / builder payout address to the pool.
 
@@ -109,7 +109,7 @@ Events are reconciliation aids, not the source of entitlement accounting.
 - `EthReceivedViaCall(sender, amount)` is emitted only when ETH reaches `receive()` after top-up.
 - `AccountingSnapshot(...)` is emitted after selected accounting actions and records the post-action observed state.
 - Snapshots are emitted after predeposit, funding-attempt open/close, successful funding, top-up, callable topped-up ETH receipt, claims, and refunds.
-- Snapshot events include balance, active funding, refund liabilities, final credited weights, claimed totals, and `grossPoolProceeds()`.
+- Snapshot events include funding attempt, balance, active funding, refund liabilities, refunded totals, final credited weights, claimed totals, and `grossPoolProceeds()`.
 - Silent balance increases can occur between snapshots and may not emit any pool event.
 
 Authoritative entitlement accounting remains balance-based. Events are useful for operations, audit trails, and reconciliation, but they are not a complete proceeds ledger or source-of-funds classifier.
@@ -148,6 +148,7 @@ Future Ethereum staking features may require contract changes or may simply be u
 | --- | --- |
 | Operator never predeposits | Participants cannot fund. |
 | Predeposit never appears in beacon state with pool credentials | Participants should not fund. |
+| Participant funds without beacon confirmation | The contract cannot prove the predeposit fixed pool credentials; this is an unsafe operational bypass. |
 | Funding attempt expires before top-up | Anyone can close it; active funding becomes refundable. |
 | Participant does not withdraw refund | Operator can still open a new attempt; old refund is excluded from proceeds. |
 | Operator disappears before top-up | Participants recover active funding after deadline close/refund; operator predeposit remains at risk. |
@@ -229,7 +230,8 @@ Environment variables:
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
 - `DEPOSIT_FORK_VERSION`: optional expected fork-version check. The deposit data itself must include `fork_version` unless this env var supplies it.
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
-- `BEACON_NODE_URL`: optional beacon REST URL for validator predeposit confirmation and exit preflight.
+- `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation and exit preflight; required by `fund` and `top-up` unless explicitly bypassed.
+- `UNSAFE_SKIP_BEACON_CONFIRMATION`: set to `1` only to bypass required `fund`/`top-up` beacon confirmation in local/devnet flows.
 
 ## License
 

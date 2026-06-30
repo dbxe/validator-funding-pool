@@ -79,16 +79,20 @@ describe("ValidatorFundingPool", async function () {
 
     const balance = await publicClient.getBalance({ address: pool.address });
     const state = Number(await pool.read.state());
+    const fundingAttempt = await pool.read.fundingAttempt();
     const totalActiveFundedWei = await pool.read.totalActiveFundedWei();
     const totalRefundableWei = await pool.read.totalRefundableWei();
+    const totalRefundedWei = await pool.read.totalRefundedWei();
     const totalCreditedWei = await pool.read.totalCreditedWei();
     const totalClaimedWei = await pool.read.totalClaimedWei();
     const grossPoolProceeds = await pool.read.grossPoolProceeds();
 
     assert.equal(numericArg(args, "state"), state);
+    assert.equal(bigintArg(args, "fundingAttempt"), fundingAttempt);
     assert.equal(bigintArg(args, "balance"), balance);
     assert.equal(bigintArg(args, "totalActiveFundedWei"), totalActiveFundedWei);
     assert.equal(bigintArg(args, "totalRefundableWei"), totalRefundableWei);
+    assert.equal(bigintArg(args, "totalRefundedWei"), totalRefundedWei);
     assert.equal(bigintArg(args, "totalCreditedWei"), totalCreditedWei);
     assert.equal(bigintArg(args, "totalClaimedWei"), totalClaimedWei);
     assert.equal(bigintArg(args, "grossPoolProceeds"), grossPoolProceeds);
@@ -96,9 +100,11 @@ describe("ValidatorFundingPool", async function () {
 
     return {
       state,
+      fundingAttempt,
       balance,
       totalActiveFundedWei,
       totalRefundableWei,
+      totalRefundedWei,
       totalCreditedWei,
       totalClaimedWei,
       grossPoolProceeds,
@@ -431,6 +437,7 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(closeSnapshot.balance, parseEther("5"));
     assert.equal(closeSnapshot.totalActiveFundedWei, 0n);
     assert.equal(closeSnapshot.totalRefundableWei, parseEther("5"));
+    assert.equal(await pool.read.fundingDeadline(), 0n);
     assert.equal(await pool.read.refundableWeiOf([alice.account.address]), parseEther("5"));
     assert.equal(await pool.read.participantCount(), 0n);
 

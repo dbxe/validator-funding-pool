@@ -21,7 +21,7 @@ async function main() {
     client: { wallet },
   });
   const pubkey = await pool.read.committedPubkey();
-  await assertBeaconValidatorHasWithdrawalCredentials(pubkey, deployment.withdrawalCredentials, "top-up");
+  await assertBeaconValidatorHasWithdrawalCredentials(pubkey, deployment.withdrawalCredentials, "top-up", true);
 
   console.log(`Submitting 31 ETH top-up through ${deployment.pool}`);
   console.log(`Validator pubkey: ${pubkey}`);
