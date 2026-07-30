@@ -104,7 +104,7 @@ interface PoolWithdrawalCredentialsReader {
 }
 
 export function asHex(value: string): Hex {
-  return (value.startsWith("0x") ? value : `0x${value}`) as Hex;
+  return (/^0x/i.test(value) ? `0x${value.slice(2)}` : `0x${value}`) as Hex;
 }
 
 export function asAddress(value: string): Address {
@@ -258,6 +258,17 @@ export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
       body.data.status
     } and withdrawal_credentials ${body.data.validator.withdrawal_credentials}`,
   );
+}
+
+export async function readBeaconGenesisForkVersion(label: string): Promise<Hex> {
+  const beaconNodeUrl = requireBeaconNodeUrl(label);
+  await assertBeaconNodeHealthy(beaconNodeUrl, label);
+  const genesis = await fetchBeaconJson<BeaconGenesisResponse>(
+    beaconNodeUrl,
+    "/eth/v1/beacon/genesis",
+    label,
+  );
+  return normalizeHexLength(genesis.data.genesis_fork_version, 4, "genesis_fork_version").toLowerCase() as Hex;
 }
 
 export async function assertBeaconValidatorHasWithdrawalCredentials(
@@ -504,6 +515,7 @@ export function readPredepositAndTopUpDepositData(
 export function validateDepositData(
   deposit: DepositData,
   expectedWithdrawalCredentials: Hex,
+  chainForkVersion: Hex,
   expectedPubkey?: Hex,
   expectedAmountGwei = VALIDATOR_DEPOSIT_GWEI,
 ) {
@@ -511,11 +523,8 @@ export function validateDepositData(
   const withdrawalCredentials = normalizeHexLength(deposit.withdrawal_credentials, 32, "withdrawal_credentials");
   const signature = normalizeHexLength(deposit.signature, 96, "signature");
   const depositDataRoot = normalizeHexLength(deposit.deposit_data_root, 32, "deposit_data_root");
-  const forkVersion = normalizeHexLength(
-    deposit.fork_version ?? process.env.DEPOSIT_FORK_VERSION ?? "",
-    4,
-    "fork_version",
-  );
+  const forkVersion = normalizeHexLength(deposit.fork_version ?? "", 4, "fork_version");
+  const normalizedChainForkVersion = normalizeHexLength(chainForkVersion, 4, "genesis_fork_version");
   const amountGwei = BigInt(deposit.amount);
 
   if (amountGwei !== expectedAmountGwei) {
@@ -532,7 +541,12 @@ export function validateDepositData(
   if (recomputedRoot.toLowerCase() !== depositDataRoot.toLowerCase()) {
     throw new Error(`Deposit data root ${depositDataRoot} != recomputed ${recomputedRoot}`);
   }
-  if (!verifyDepositSignature(pubkey, withdrawalCredentials, amountGwei, signature, forkVersion)) {
+  if (forkVersion.toLowerCase() !== normalizedChainForkVersion.toLowerCase()) {
+    throw new Error(
+      `Deposit fork_version ${forkVersion} != beacon genesis_fork_version ${normalizedChainForkVersion}`,
+    );
+  }
+  if (!verifyDepositSignature(pubkey, withdrawalCredentials, amountGwei, signature, normalizedChainForkVersion)) {
     throw new Error("Invalid BLS deposit signature");
   }
 
@@ -541,12 +555,14 @@ export function validateDepositData(
     throw new Error(`Deposit network_name ${deposit.network_name ?? "<missing>"} != expected ${expectedNetworkName}`);
   }
 
-  const expectedForkVersion = process.env.DEPOSIT_FORK_VERSION;
-  if (expectedForkVersion && forkVersion.toLowerCase() !== asHex(expectedForkVersion).toLowerCase()) {
-    throw new Error(`Deposit fork_version ${deposit.fork_version ?? "<missing>"} != expected ${expectedForkVersion}`);
-  }
-
-  return { pubkey, withdrawalCredentials, signature, depositDataRoot, amountGwei, forkVersion };
+  return {
+    pubkey,
+    withdrawalCredentials,
+    signature,
+    depositDataRoot,
+    amountGwei,
+    forkVersion: normalizedChainForkVersion,
+  };
 }
 
 function normalizeHexLength(value: string, bytes: number, field: string): Hex {

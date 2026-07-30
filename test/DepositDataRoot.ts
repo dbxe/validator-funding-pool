@@ -12,6 +12,9 @@ import {
   assertPoolWithdrawalCredentials,
   computeDepositDataRoot,
   computeDepositSigningRoot,
+  PREDEPOSIT_GWEI,
+  readBeaconGenesisForkVersion,
+  TOP_UP_GWEI,
   validateDepositData,
   VALIDATOR_DEPOSIT_GWEI,
 } from "../scripts/lib/common.js";
@@ -45,9 +48,7 @@ describe("deposit data validation", function () {
 
   it("validates the BLS deposit signature and rejects invalid signatures", function () {
     const originalNetworkName = process.env.DEPOSIT_NETWORK_NAME;
-    const originalForkVersion = process.env.DEPOSIT_FORK_VERSION;
     delete process.env.DEPOSIT_NETWORK_NAME;
-    delete process.env.DEPOSIT_FORK_VERSION;
 
     try {
       const secretKey = SecretKey.fromKeygen(Buffer.alloc(32, 1));
@@ -79,6 +80,7 @@ describe("deposit data validation", function () {
             fork_version: forkVersion,
           },
           withdrawalCredentials,
+          forkVersion,
         ),
         {
           pubkey,
@@ -110,6 +112,7 @@ describe("deposit data validation", function () {
               fork_version: forkVersion,
             },
             withdrawalCredentials,
+            forkVersion,
           ),
         /Invalid BLS deposit signature/,
       );
@@ -118,11 +121,6 @@ describe("deposit data validation", function () {
         delete process.env.DEPOSIT_NETWORK_NAME;
       } else {
         process.env.DEPOSIT_NETWORK_NAME = originalNetworkName;
-      }
-      if (originalForkVersion === undefined) {
-        delete process.env.DEPOSIT_FORK_VERSION;
-      } else {
-        process.env.DEPOSIT_FORK_VERSION = originalForkVersion;
       }
     }
   });
@@ -157,6 +155,54 @@ describe("deposit data validation", function () {
 });
 
 describe("beacon preflight checks", function () {
+  it("binds both deposit entries to the beacon genesis fork version before validator lookup", async function () {
+    const calls = installBeaconMock({
+      genesisForkVersion: "0XAABBCCDD",
+      validatorStatus: 404,
+    });
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      const chainForkVersion = await readBeaconGenesisForkVersion("deposit-test");
+      assert.equal(chainForkVersion, "0xaabbccdd");
+
+      const secretKey = SecretKey.fromKeygen(Buffer.alloc(32, 2));
+      const pubkey = bytesToHex(secretKey.toPublicKey().toBytes());
+      for (const amountGwei of [PREDEPOSIT_GWEI, TOP_UP_GWEI]) {
+        const deposit = signedDeposit(secretKey, pubkey, WITHDRAWAL_CREDENTIALS, amountGwei, "0xAaBbCcDd");
+        assert.equal(
+          validateDepositData(deposit, WITHDRAWAL_CREDENTIALS, chainForkVersion, pubkey, amountGwei).forkVersion,
+          chainForkVersion,
+        );
+      }
+
+      const wrongForkVersion = "0x01020304" as Hex;
+      const wrongNetworkDeposit = signedDeposit(
+        secretKey,
+        pubkey,
+        WITHDRAWAL_CREDENTIALS,
+        PREDEPOSIT_GWEI,
+        wrongForkVersion,
+      );
+      assert.throws(
+        () =>
+          validateDepositData(
+            wrongNetworkDeposit,
+            WITHDRAWAL_CREDENTIALS,
+            chainForkVersion,
+            pubkey,
+            PREDEPOSIT_GWEI,
+          ),
+        /Deposit fork_version 0x01020304 != beacon genesis_fork_version 0xaabbccdd/,
+      );
+      assert(!calls.some((pathname) => pathname.includes("/validators/")));
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
   it("checks top-up credentials at finalized state and mutable validator status at head", async function () {
     const calls = installBeaconMock({
       finalizedValidator: beaconValidator("pending_initialized"),
@@ -276,10 +322,14 @@ function installBeaconMock({
   finalizedValidator = beaconValidator("pending_initialized"),
   headValidator = beaconValidator("pending_initialized"),
   headSlot = "8192",
+  genesisForkVersion = "0x00000000",
+  validatorStatus = 200,
 }: {
   finalizedValidator?: ReturnType<typeof beaconValidator>;
   headValidator?: ReturnType<typeof beaconValidator>;
   headSlot?: string;
+  genesisForkVersion?: string;
+  validatorStatus?: number;
 }): string[] {
   const calls: string[] = [];
   originalFetch = globalThis.fetch;
@@ -296,7 +346,7 @@ function installBeaconMock({
         data: {
           genesis_time: "0",
           genesis_validators_root: `0x${"11".repeat(32)}`,
-          genesis_fork_version: "0x00000000",
+          genesis_fork_version: genesisForkVersion,
         },
       });
     }
@@ -315,6 +365,9 @@ function installBeaconMock({
 
     const validatorMatch = url.pathname.match(/^\/eth\/v1\/beacon\/states\/([^/]+)\/validators\//);
     if (validatorMatch !== null) {
+      if (validatorStatus !== 200) {
+        return new Response("validator not found", { status: validatorStatus });
+      }
       return jsonResponse(validatorMatch[1] === "head" ? headValidator : finalizedValidator);
     }
 
@@ -366,5 +419,24 @@ function beaconValidator(
         ...validatorOverrides,
       },
     },
+  };
+}
+
+function signedDeposit(
+  secretKey: SecretKey,
+  pubkey: Hex,
+  withdrawalCredentials: Hex,
+  amountGwei: bigint,
+  forkVersion: Hex,
+) {
+  const signingRoot = computeDepositSigningRoot(pubkey, withdrawalCredentials, amountGwei, forkVersion);
+  const signature = bytesToHex(secretKey.sign(Buffer.from(signingRoot.slice(2), "hex")).toBytes());
+  return {
+    pubkey,
+    withdrawal_credentials: withdrawalCredentials,
+    amount: amountGwei.toString(),
+    signature,
+    deposit_data_root: computeDepositDataRoot(pubkey, withdrawalCredentials, amountGwei, signature),
+    fork_version: forkVersion,
   };
 }

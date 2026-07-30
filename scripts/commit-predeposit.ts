@@ -7,6 +7,7 @@ import {
   assertPoolWithdrawalCredentials,
   asHex,
   PREDEPOSIT_GWEI,
+  readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
   TOP_UP_GWEI,
@@ -31,14 +32,22 @@ async function main() {
   });
   const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
   const expectedPubkey = process.env.EXPECTED_PUBKEY ? asHex(process.env.EXPECTED_PUBKEY) : undefined;
+  const chainForkVersion = await readBeaconGenesisForkVersion("commit-predeposit");
 
   const predeposit = validateDepositData(
     deposits.predeposit,
     expectedCredentials,
+    chainForkVersion,
     expectedPubkey,
     PREDEPOSIT_GWEI,
   );
-  const topUp = validateDepositData(deposits.topUp, expectedCredentials, predeposit.pubkey, TOP_UP_GWEI);
+  const topUp = validateDepositData(
+    deposits.topUp,
+    expectedCredentials,
+    chainForkVersion,
+    predeposit.pubkey,
+    TOP_UP_GWEI,
+  );
 
   await assertBeaconValidatorAbsent(predeposit.pubkey, "commit-predeposit");
 

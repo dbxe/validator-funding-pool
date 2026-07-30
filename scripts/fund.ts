@@ -8,6 +8,7 @@ import {
   envBigInt,
   formatWei,
   PREDEPOSIT_GWEI,
+  readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
   TOP_UP_GWEI,
@@ -31,8 +32,21 @@ async function main() {
   });
 
   const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
-  const predeposit = validateDepositData(deposits.predeposit, expectedCredentials, undefined, PREDEPOSIT_GWEI);
-  const topUp = validateDepositData(deposits.topUp, expectedCredentials, predeposit.pubkey, TOP_UP_GWEI);
+  const chainForkVersion = await readBeaconGenesisForkVersion("fund");
+  const predeposit = validateDepositData(
+    deposits.predeposit,
+    expectedCredentials,
+    chainForkVersion,
+    undefined,
+    PREDEPOSIT_GWEI,
+  );
+  const topUp = validateDepositData(
+    deposits.topUp,
+    expectedCredentials,
+    chainForkVersion,
+    predeposit.pubkey,
+    TOP_UP_GWEI,
+  );
 
   const committedPubkey = await pool.read.committedPubkey();
   const predepositRoot = await pool.read.predepositDataRoot();
