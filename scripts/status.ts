@@ -1,8 +1,7 @@
 import { network } from "hardhat";
 
 import {
-  assertDeploymentChain,
-  assertDeploymentSystemCodeHashes,
+  assertDeploymentIntegrity,
   formatWei,
   parseAddressList,
   readDeployment,
@@ -14,10 +13,8 @@ async function main() {
   const deployment = readDeployment();
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
-  await assertDeploymentChain(publicClient, deployment);
-  await assertDeploymentSystemCodeHashes(publicClient, deployment);
-
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
+  await assertDeploymentIntegrity(publicClient, pool, deployment);
   const state = Number(await pool.read.state());
   const participantCount = Number(await pool.read.participantCount());
   const balance = await publicClient.getBalance({ address: deployment.pool });

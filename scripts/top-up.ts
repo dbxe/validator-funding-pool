@@ -2,9 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertBeaconValidatorReadyForTopUp,
-  assertDeploymentChain,
-  assertDeploymentSystemCodeHashes,
-  assertPoolWithdrawalCredentials,
+  assertDeploymentIntegrity,
   readDeployment,
 } from "./lib/common.js";
 
@@ -13,17 +11,16 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  await assertDeploymentChain(publicClient, deployment);
-  await assertDeploymentSystemCodeHashes(publicClient, deployment);
-
-  if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
-    throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);
-  }
-
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
+  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+
+  if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
+    throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);
+  }
+
+  const expectedCredentials = liveConfig.withdrawalCredentials;
   const pubkey = await pool.read.committedPubkey();
   await assertBeaconValidatorReadyForTopUp(pubkey, expectedCredentials, "top-up");
 

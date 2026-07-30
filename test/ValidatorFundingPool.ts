@@ -4,7 +4,12 @@ import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { keccak256, parseEther, parseEventLogs, zeroAddress, type Address, type Hex } from "viem";
 
-import { computeDepositDataRoot } from "../scripts/lib/common.js";
+import {
+  assertDeploymentCanonicity,
+  assertDeploymentIntegrity,
+  computeDepositDataRoot,
+  DEFAULT_DEPOSIT_CONTRACT,
+} from "../scripts/lib/common.js";
 
 const STATE_UNINITIALIZED = 0;
 const STATE_PREDEPOSITED = 1;
@@ -270,6 +275,54 @@ describe("ValidatorFundingPool", async function () {
         FUNDING_WINDOW,
       ]),
       /InvalidWithdrawalRequestPredeploy/,
+    );
+  });
+
+  it("separates deployment consistency from known-chain canonicity", async function () {
+    const { pool, deposit, withdrawal, operator } = await networkHelpers.loadFixture(deployFixture);
+    const depositCode = await publicClient.getCode({ address: deposit.address });
+    const withdrawalCode = await publicClient.getCode({ address: withdrawal.address });
+    assert.ok(depositCode);
+    assert.ok(withdrawalCode);
+    const depositContractCodeHash = keccak256(depositCode);
+    const withdrawalRequestPredeployCodeHash = keccak256(withdrawalCode);
+    const deployment = {
+      chainId: await publicClient.getChainId(),
+      pool: pool.address,
+      depositContract: deposit.address,
+      depositContractCodeHash,
+      withdrawalRequestPredeploy: withdrawal.address,
+      withdrawalRequestPredeployCodeHash,
+      operator: operator.account.address,
+      fundingWindowDuration: FUNDING_WINDOW.toString(),
+      withdrawalCredentials: await pool.read.withdrawalCredentials(),
+    };
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      await assertDeploymentIntegrity(publicClient, pool, deployment);
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /canonicity is unverified.*consistency is enforced/);
+
+    await assert.rejects(
+      assertDeploymentCanonicity(
+        1,
+        {
+          depositContract: DEFAULT_DEPOSIT_CONTRACT,
+          withdrawalRequestPredeploy: withdrawal.address,
+        },
+        {
+          depositContractCodeHash:
+            "0x6c029a231254fadb724d63be769f75eedd66362df034a3e663252b49d062a666",
+          withdrawalRequestPredeployCodeHash,
+        },
+      ),
+      /withdrawalRequestPredeploy .* does not match canonical chain value/,
     );
   });
 

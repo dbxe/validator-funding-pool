@@ -159,7 +159,9 @@ EIP-7002 requests accepted by the execution-layer predeploy can still be ignored
 
 ### System Contract Addresses
 
-The contract and scripts check that configured system addresses have code. Deployment records include observed code hashes, and operational scripts re-check those hashes before submitting transactions. Code presence and recorded hashes help auditability, but operators must still verify the target chain and canonical system addresses.
+Every operational script reads all five pool immutables and refuses if the deployment record disagrees on the deposit contract, withdrawal-request predeploy, operator, withdrawal credentials, or funding-window duration. Code hashes are then computed at the two system addresses read from the live pool and checked against the record.
+
+On Ethereum mainnet, the scripts additionally pin both system-contract addresses and runtime code hashes to known canonical values from a source independent of the pool and record. This canonicity check catches a pool and record that agree with each other but were both configured with a false system contract. On an unrecognized test or development chain, the scripts keep enforcing record-to-pool consistency and print an explicit warning that canonicity is unverified.
 
 ### Future Protocol Operations
 
@@ -189,7 +191,7 @@ Future Ethereum staking features may require contract changes or may simply be u
 - Deposit data file: `deposit-data.json`
 - Deployment record: `deployments/latest.json`
 
-Override any address or path with environment variables when using a test chain. The contract checks that configured system addresses have code, but it does not hardcode mainnet-only addresses.
+Override any address or path with environment variables when using an unrecognized test chain. The contract itself checks that configured system addresses have code but does not hardcode mainnet-only addresses; the operational scripts enforce the chain-specific mainnet pins and warn rather than applying them to unknown chain IDs.
 
 ## Commands
 

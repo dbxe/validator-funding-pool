@@ -43,6 +43,14 @@ export interface DeploymentRecord {
   withdrawalCredentials: Hex;
 }
 
+export interface PoolDeploymentConfig {
+  depositContract: Address;
+  withdrawalRequestPredeploy: Address;
+  operator: Address;
+  withdrawalCredentials: Hex;
+  fundingWindowDuration: bigint;
+}
+
 interface BeaconValidatorResponse {
   data: {
     index: string;
@@ -99,11 +107,36 @@ interface BeaconValidatorPreflight {
   validator: BeaconValidatorResponse["data"];
 }
 
-interface PoolWithdrawalCredentialsReader {
+interface PoolDeploymentReader {
   read: {
+    depositContract: () => Promise<Address>;
+    withdrawalRequestPredeploy: () => Promise<Address>;
+    operator: () => Promise<Address>;
     withdrawalCredentials: () => Promise<Hex>;
+    fundingWindowDuration: () => Promise<bigint>;
   };
 }
+
+interface SystemCodeReader {
+  getCode: (args: { address: Address }) => Promise<Hex | undefined>;
+}
+
+interface CanonicalSystemContracts {
+  depositContract: Address;
+  depositContractCodeHash: Hex;
+  withdrawalRequestPredeploy: Address;
+  withdrawalRequestPredeployCodeHash: Hex;
+}
+
+const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystemContracts>> = {
+  1: {
+    depositContract: DEFAULT_DEPOSIT_CONTRACT,
+    depositContractCodeHash: "0x6c029a231254fadb724d63be769f75eedd66362df034a3e663252b49d062a666",
+    withdrawalRequestPredeploy: DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
+    withdrawalRequestPredeployCodeHash:
+      "0x0345a365d2f4c5975b9f1599abe0a2ee76b7a3a731bc68781bd04c84e4858f50",
+  },
+};
 
 export function asHex(value: string): Hex {
   return (/^0x/i.test(value) ? `0x${value.slice(2)}` : `0x${value}`) as Hex;
@@ -175,50 +208,159 @@ export function defaultDepositContract(): Address {
 export async function assertDeploymentChain(
   publicClient: { getChainId: () => Promise<number> },
   deployment: DeploymentRecord,
-) {
+): Promise<number> {
   const chainId = await publicClient.getChainId();
   if (chainId !== deployment.chainId) {
     throw new Error(`Deployment chainId ${deployment.chainId} does not match connected chainId ${chainId}`);
   }
+  return chainId;
 }
 
 export async function assertDeploymentSystemCodeHashes(
-  publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
+  publicClient: SystemCodeReader,
   deployment: DeploymentRecord,
-) {
-  const currentDepositCodeHash = await codeHash(publicClient, deployment.depositContract, "DEPOSIT_CONTRACT");
+  liveConfig: PoolDeploymentConfig,
+): Promise<{ depositContractCodeHash: Hex; withdrawalRequestPredeployCodeHash: Hex }> {
+  const currentDepositCodeHash = await codeHash(
+    publicClient,
+    liveConfig.depositContract,
+    "pool depositContract",
+  );
   if (currentDepositCodeHash.toLowerCase() !== deployment.depositContractCodeHash.toLowerCase()) {
     throw new Error(
-      `DEPOSIT_CONTRACT code hash ${currentDepositCodeHash} does not match deployment record ` +
+      `Pool depositContract code hash ${currentDepositCodeHash} does not match deployment record ` +
         deployment.depositContractCodeHash,
     );
   }
 
   const currentWithdrawalCodeHash = await codeHash(
     publicClient,
-    deployment.withdrawalRequestPredeploy,
-    "WITHDRAWAL_REQUEST_PREDEPLOY",
+    liveConfig.withdrawalRequestPredeploy,
+    "pool withdrawalRequestPredeploy",
   );
   if (currentWithdrawalCodeHash.toLowerCase() !== deployment.withdrawalRequestPredeployCodeHash.toLowerCase()) {
     throw new Error(
-      `WITHDRAWAL_REQUEST_PREDEPLOY code hash ${currentWithdrawalCodeHash} does not match deployment record ` +
+      `Pool withdrawalRequestPredeploy code hash ${currentWithdrawalCodeHash} does not match deployment record ` +
         deployment.withdrawalRequestPredeployCodeHash,
     );
   }
+
+  return {
+    depositContractCodeHash: currentDepositCodeHash,
+    withdrawalRequestPredeployCodeHash: currentWithdrawalCodeHash,
+  };
 }
 
-export async function assertPoolWithdrawalCredentials(
-  pool: PoolWithdrawalCredentialsReader,
+export async function assertDeploymentMatchesPool(
+  pool: PoolDeploymentReader,
   deployment: DeploymentRecord,
-): Promise<Hex> {
-  const liveWithdrawalCredentials = await pool.read.withdrawalCredentials();
-  if (liveWithdrawalCredentials.toLowerCase() !== deployment.withdrawalCredentials.toLowerCase()) {
-    throw new Error(
-      `Pool withdrawalCredentials ${liveWithdrawalCredentials} does not match deployment record ` +
-        deployment.withdrawalCredentials,
+): Promise<PoolDeploymentConfig> {
+  const [
+    depositContract,
+    withdrawalRequestPredeploy,
+    operator,
+    withdrawalCredentials,
+    fundingWindowDuration,
+  ] = await Promise.all([
+    pool.read.depositContract(),
+    pool.read.withdrawalRequestPredeploy(),
+    pool.read.operator(),
+    pool.read.withdrawalCredentials(),
+    pool.read.fundingWindowDuration(),
+  ]);
+  const liveConfig = {
+    depositContract,
+    withdrawalRequestPredeploy,
+    operator,
+    withdrawalCredentials,
+    fundingWindowDuration,
+  };
+
+  assertDeploymentField("depositContract", depositContract, deployment.depositContract, true);
+  assertDeploymentField(
+    "withdrawalRequestPredeploy",
+    withdrawalRequestPredeploy,
+    deployment.withdrawalRequestPredeploy,
+    true,
+  );
+  assertDeploymentField("operator", operator, deployment.operator, true);
+  assertDeploymentField(
+    "withdrawalCredentials",
+    withdrawalCredentials,
+    deployment.withdrawalCredentials,
+    true,
+  );
+  assertDeploymentField(
+    "fundingWindowDuration",
+    fundingWindowDuration,
+    BigInt(deployment.fundingWindowDuration),
+    false,
+  );
+  return liveConfig;
+}
+
+export async function assertDeploymentCanonicity(
+  chainId: number,
+  liveConfig: Pick<PoolDeploymentConfig, "depositContract" | "withdrawalRequestPredeploy">,
+  liveCodeHashes: { depositContractCodeHash: Hex; withdrawalRequestPredeployCodeHash: Hex },
+) {
+  const canonical = CANONICAL_SYSTEM_CONTRACTS[chainId];
+  if (canonical === undefined) {
+    console.warn(
+      `WARNING: no canonical system-contract pin is recorded for chainId ${chainId}; ` +
+        `canonicity is unverified and only deployment-record consistency is enforced`,
     );
+    return;
   }
-  return liveWithdrawalCredentials;
+
+  assertCanonicalField("depositContract", liveConfig.depositContract, canonical.depositContract);
+  assertCanonicalField(
+    "withdrawalRequestPredeploy",
+    liveConfig.withdrawalRequestPredeploy,
+    canonical.withdrawalRequestPredeploy,
+  );
+  assertCanonicalField(
+    "depositContract code hash",
+    liveCodeHashes.depositContractCodeHash,
+    canonical.depositContractCodeHash,
+  );
+  assertCanonicalField(
+    "withdrawalRequestPredeploy code hash",
+    liveCodeHashes.withdrawalRequestPredeployCodeHash,
+    canonical.withdrawalRequestPredeployCodeHash,
+  );
+}
+
+export async function assertDeploymentIntegrity(
+  publicClient: SystemCodeReader & { getChainId: () => Promise<number> },
+  pool: PoolDeploymentReader,
+  deployment: DeploymentRecord,
+): Promise<PoolDeploymentConfig> {
+  const chainId = await assertDeploymentChain(publicClient, deployment);
+  const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
+  const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
+  await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
+  return liveConfig;
+}
+
+function assertDeploymentField(
+  field: string,
+  liveValue: string | bigint,
+  recordedValue: string | bigint,
+  caseInsensitive: boolean,
+) {
+  const live = liveValue.toString();
+  const recorded = recordedValue.toString();
+  const matches = caseInsensitive ? live.toLowerCase() === recorded.toLowerCase() : live === recorded;
+  if (!matches) {
+    throw new Error(`Pool ${field} ${live} does not match deployment record ${recorded}`);
+  }
+}
+
+function assertCanonicalField(field: string, liveValue: string, canonicalValue: string) {
+  if (liveValue.toLowerCase() !== canonicalValue.toLowerCase()) {
+    throw new Error(`Pool ${field} ${liveValue} does not match canonical chain value ${canonicalValue}`);
+  }
 }
 
 export async function assertHasCode(

@@ -2,9 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertBeaconValidatorAbsent,
-  assertDeploymentChain,
-  assertDeploymentSystemCodeHashes,
-  assertPoolWithdrawalCredentials,
+  assertDeploymentIntegrity,
   asHex,
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
@@ -20,17 +18,16 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  await assertDeploymentChain(publicClient, deployment);
-  await assertDeploymentSystemCodeHashes(publicClient, deployment);
-
-  if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
-    throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);
-  }
-
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
+  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+
+  if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
+    throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);
+  }
+
+  const expectedCredentials = liveConfig.withdrawalCredentials;
   const expectedPubkey = process.env.EXPECTED_PUBKEY ? asHex(process.env.EXPECTED_PUBKEY) : undefined;
   const chainForkVersion = await readBeaconGenesisForkVersion("commit-predeposit");
 

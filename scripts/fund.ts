@@ -2,9 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertBeaconValidatorReadyForFunding,
-  assertDeploymentChain,
-  assertDeploymentSystemCodeHashes,
-  assertPoolWithdrawalCredentials,
+  assertDeploymentIntegrity,
   envBigInt,
   formatWei,
   PREDEPOSIT_GWEI,
@@ -24,14 +22,12 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  await assertDeploymentChain(publicClient, deployment);
-  await assertDeploymentSystemCodeHashes(publicClient, deployment);
-
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
+  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
 
-  const expectedCredentials = await assertPoolWithdrawalCredentials(pool, deployment);
+  const expectedCredentials = liveConfig.withdrawalCredentials;
   const chainForkVersion = await readBeaconGenesisForkVersion("fund");
   const predeposit = validateDepositData(
     deposits.predeposit,

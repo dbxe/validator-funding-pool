@@ -1,6 +1,9 @@
 import { network } from "hardhat";
 
 import {
+  assertDeploymentCanonicity,
+  assertDeploymentMatchesPool,
+  assertDeploymentSystemCodeHashes,
   assertHasCode,
   codeHash,
   defaultDepositContract,
@@ -31,6 +34,12 @@ async function main() {
 
   const operator = envAddress("OPERATOR", deployer.account.address);
   const fundingWindowDuration = envBigInt("FUNDING_WINDOW_SECONDS", 86_400n);
+  const chainId = await publicClient.getChainId();
+  await assertDeploymentCanonicity(
+    chainId,
+    { depositContract, withdrawalRequestPredeploy },
+    { depositContractCodeHash, withdrawalRequestPredeployCodeHash },
+  );
 
   const pool = await viem.deployContract("ValidatorFundingPool", [
     depositContract,
@@ -39,7 +48,6 @@ async function main() {
     fundingWindowDuration,
   ]);
 
-  const chainId = await publicClient.getChainId();
   const withdrawalCredentials = await pool.read.withdrawalCredentials();
 
   console.log("Pool deployed:", pool.address);
@@ -48,7 +56,7 @@ async function main() {
   console.log("Deposit contract code hash:", depositContractCodeHash);
   console.log("Withdrawal request predeploy code hash:", withdrawalRequestPredeployCodeHash);
 
-  writeDeployment({
+  const deployment = {
     chainId,
     pool: pool.address,
     depositContract,
@@ -58,7 +66,10 @@ async function main() {
     operator,
     fundingWindowDuration: fundingWindowDuration.toString(),
     withdrawalCredentials,
-  });
+  };
+  const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
+  await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
+  writeDeployment(deployment);
 }
 
 main().catch((error) => {

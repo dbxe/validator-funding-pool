@@ -2,8 +2,7 @@ import { network } from "hardhat";
 
 import {
   asAddress,
-  assertDeploymentChain,
-  assertDeploymentSystemCodeHashes,
+  assertDeploymentIntegrity,
   formatWei,
   readDeployment,
 } from "./lib/common.js";
@@ -13,12 +12,10 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  await assertDeploymentChain(publicClient, deployment);
-  await assertDeploymentSystemCodeHashes(publicClient, deployment);
-
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
+  await assertDeploymentIntegrity(publicClient, pool, deployment);
 
   const refundable = await pool.read.refundableWeiOf([wallet.account.address]);
   console.log(`Refundable for ${wallet.account.address}: ${formatWei(refundable)}`);

@@ -1,8 +1,7 @@
 import { network } from "hardhat";
 
 import {
-  assertDeploymentChain,
-  assertDeploymentSystemCodeHashes,
+  assertDeploymentIntegrity,
   parseAddressList,
   parseBigIntList,
   readDeployment,
@@ -16,16 +15,18 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  await assertDeploymentChain(publicClient, deployment);
-  await assertDeploymentSystemCodeHashes(publicClient, deployment);
+  const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
+    client: { wallet },
+  });
+  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
 
-  if (wallet.account.address.toLowerCase() !== deployment.operator.toLowerCase()) {
-    throw new Error(`PRIVATE_KEY must be the operator ${deployment.operator}`);
+  if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
+    throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);
   }
 
   const participants = process.env.PARTICIPANTS
     ? parseAddressList(process.env.PARTICIPANTS)
-    : [deployment.operator];
+    : [liveConfig.operator];
   const fundingTargetsGwei = process.env.FUNDING_TARGETS_GWEI
     ? parseBigIntList(process.env.FUNDING_TARGETS_GWEI)
     : [VALIDATOR_DEPOSIT_GWEI];
@@ -34,10 +35,6 @@ async function main() {
   }
 
   const fundingTargetsWei = fundingTargetsGwei.map((value) => value * GWEI);
-  const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
-    client: { wallet },
-  });
-
   console.log(`Opening funding attempt for ${deployment.pool}`);
   for (let i = 0; i < participants.length; ++i) {
     console.log(`Participant ${i}: ${participants[i]} target=${fundingTargetsGwei[i]} Gwei`);

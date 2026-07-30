@@ -10,7 +10,7 @@ import {
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorReadyForTopUp,
   assertBeaconValidatorHasWithdrawalCredentials,
-  assertPoolWithdrawalCredentials,
+  assertDeploymentMatchesPool,
   computeDepositDataRoot,
   computeDepositSigningRoot,
   PREDEPOSIT_GWEI,
@@ -408,24 +408,49 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("compares live pool withdrawal credentials against the deployment record", async function () {
+  it("compares every recorded immutable against the live pool", async function () {
+    const depositContract = "0x1111111111111111111111111111111111111111" as const;
+    const withdrawalRequestPredeploy = "0x2222222222222222222222222222222222222222" as const;
+    const operator = "0x3333333333333333333333333333333333333333" as const;
+    const fundingWindowDuration = 3600n;
     const pool = {
       read: {
+        depositContract: async () => depositContract,
+        withdrawalRequestPredeploy: async () => withdrawalRequestPredeploy,
+        operator: async () => operator,
         withdrawalCredentials: async () => WITHDRAWAL_CREDENTIALS,
+        fundingWindowDuration: async () => fundingWindowDuration,
       },
     };
     const deployment = {
+      depositContract,
+      withdrawalRequestPredeploy,
+      operator,
       withdrawalCredentials: WITHDRAWAL_CREDENTIALS,
+      fundingWindowDuration: fundingWindowDuration.toString(),
     } as any;
 
-    assert.equal(await assertPoolWithdrawalCredentials(pool, deployment), WITHDRAWAL_CREDENTIALS);
+    assert.deepEqual(await assertDeploymentMatchesPool(pool, deployment), {
+      depositContract,
+      withdrawalRequestPredeploy,
+      operator,
+      withdrawalCredentials: WITHDRAWAL_CREDENTIALS,
+      fundingWindowDuration,
+    });
 
-    await assert.rejects(
-      assertPoolWithdrawalCredentials(pool, {
-        withdrawalCredentials: OTHER_WITHDRAWAL_CREDENTIALS,
-      } as any),
-      /does not match deployment record/,
-    );
+    const mismatches = [
+      { field: "depositContract", value: operator },
+      { field: "withdrawalRequestPredeploy", value: operator },
+      { field: "operator", value: depositContract },
+      { field: "withdrawalCredentials", value: OTHER_WITHDRAWAL_CREDENTIALS },
+      { field: "fundingWindowDuration", value: "3601" },
+    ];
+    for (const mismatch of mismatches) {
+      await assert.rejects(
+        assertDeploymentMatchesPool(pool, { ...deployment, [mismatch.field]: mismatch.value }),
+        new RegExp(`Pool ${mismatch.field} .* does not match deployment record`),
+      );
+    }
   });
 });
 
