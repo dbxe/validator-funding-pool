@@ -8,6 +8,7 @@ import { SecretKey } from "@chainsafe/blst";
 import type { Hex } from "viem";
 
 import {
+  assertBeaconMatchesExecutionChain,
   assertBeaconValidatorAbsent,
   assertBeaconValidatorReadyForExit,
   assertBeaconValidatorReadyForFunding,
@@ -200,6 +201,94 @@ describe("deposit data validation", function () {
 });
 
 describe("beacon preflight checks", function () {
+  it("rejects a beacon chain mismatch before consuming the genesis fork version", async function () {
+    const calls = installBeaconMock({
+      beaconChainId: "1",
+      genesisForkVersion: "0xaabbccdd",
+    });
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      await assert.rejects(
+        (async () => {
+          await assertBeaconMatchesExecutionChain(
+            { chainId: 31337 },
+            { depositContract: "0x1111111111111111111111111111111111111111" },
+            "deposit-test",
+          );
+          await readBeaconGenesisForkVersion("deposit-test");
+        })(),
+        /deposit-test beacon deposit chain_id 1 does not match deployment chainId 31337/,
+      );
+      assert.deepEqual(calls, ["/eth/v1/config/deposit_contract"]);
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("rejects a beacon deposit contract mismatch against the live pool", async function () {
+    const calls = installBeaconMock({
+      beaconChainId: "31337",
+      depositContractAddress: "0x2222222222222222222222222222222222222222",
+    });
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      await assert.rejects(
+        assertBeaconMatchesExecutionChain(
+          { chainId: 31337 },
+          { depositContract: "0x1111111111111111111111111111111111111111" },
+          "fund-test",
+        ),
+        /fund-test beacon deposit contract 0x2222222222222222222222222222222222222222 does not match pool depositContract 0x1111111111111111111111111111111111111111/,
+      );
+      assert.deepEqual(calls, ["/eth/v1/config/deposit_contract"]);
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("accepts a matching beacon endpoint and lets advisory exit preflight skip it", async function () {
+    const calls = installBeaconMock({
+      beaconChainId: "31337",
+      depositContractAddress: "0x1111111111111111111111111111111111111111",
+    });
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      assert.equal(
+        await assertBeaconMatchesExecutionChain(
+          { chainId: 31337 },
+          { depositContract: "0x1111111111111111111111111111111111111111" },
+          "top-up-test",
+        ),
+        true,
+      );
+      assert.deepEqual(calls, ["/eth/v1/config/deposit_contract"]);
+
+      delete process.env.BEACON_NODE_URL;
+      assert.equal(
+        await assertBeaconMatchesExecutionChain(
+          { chainId: 31337 },
+          { depositContract: "0x1111111111111111111111111111111111111111" },
+          "exit-test",
+          { optional: true },
+        ),
+        false,
+      );
+      await assertBeaconValidatorReadyForExit(PUBKEY, WITHDRAWAL_CREDENTIALS, "exit-test");
+      assert.deepEqual(calls, ["/eth/v1/config/deposit_contract"]);
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
   it("binds both deposit entries to the beacon genesis fork version before validator lookup", async function () {
     const calls = installBeaconMock({
       genesisForkVersion: "0XAABBCCDD",
@@ -511,12 +600,16 @@ function installBeaconMock({
   headValidator = beaconValidator("pending_initialized"),
   headSlot = "8192",
   genesisForkVersion = "0x00000000",
+  beaconChainId = "31337",
+  depositContractAddress = "0x1111111111111111111111111111111111111111",
   validatorStatus = 200,
 }: {
   finalizedValidator?: ReturnType<typeof beaconValidator>;
   headValidator?: ReturnType<typeof beaconValidator>;
   headSlot?: string;
   genesisForkVersion?: string;
+  beaconChainId?: string;
+  depositContractAddress?: string;
   validatorStatus?: number;
 }): string[] {
   const calls: string[] = [];
@@ -549,6 +642,9 @@ function installBeaconMock({
     }
     if (url.pathname === "/eth/v1/config/spec") {
       return jsonResponse({ data: { SLOTS_PER_EPOCH: "32", SHARD_COMMITTEE_PERIOD: "256" } });
+    }
+    if (url.pathname === "/eth/v1/config/deposit_contract") {
+      return jsonResponse({ data: { chain_id: beaconChainId, address: depositContractAddress } });
     }
 
     const validatorMatch = url.pathname.match(/^\/eth\/v1\/beacon\/states\/([^/]+)\/validators\//);

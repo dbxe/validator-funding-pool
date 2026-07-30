@@ -1,6 +1,7 @@
 import { network } from "hardhat";
 
 import {
+  assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForFunding,
   assertDeploymentIntegrity,
   envBigInt,
@@ -26,6 +27,7 @@ async function main() {
     client: { wallet },
   });
   const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+  await assertBeaconMatchesExecutionChain(deployment, liveConfig, "fund");
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
   const chainForkVersion = await readBeaconGenesisForkVersion("fund");

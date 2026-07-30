@@ -1,6 +1,7 @@
 import { network } from "hardhat";
 
 import {
+  assertBeaconMatchesExecutionChain,
   assertBeaconValidatorAbsent,
   assertDeploymentIntegrity,
   asHex,
@@ -22,6 +23,7 @@ async function main() {
     client: { wallet },
   });
   const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+  await assertBeaconMatchesExecutionChain(deployment, liveConfig, "commit-predeposit");
 
   if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
     throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);

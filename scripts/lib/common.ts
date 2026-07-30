@@ -107,6 +107,13 @@ interface BeaconSpecResponse {
   data: Record<string, string>;
 }
 
+interface BeaconDepositContractResponse {
+  data: {
+    chain_id: string;
+    address: string;
+  };
+}
+
 interface BeaconValidatorPreflight {
   stateId: string;
   genesis: BeaconGenesisResponse["data"];
@@ -451,6 +458,50 @@ export async function codeHash(
   label: string,
 ): Promise<Hex> {
   return keccak256(await assertHasCode(publicClient, address, label));
+}
+
+export async function assertBeaconMatchesExecutionChain(
+  deployment: Pick<DeploymentRecord, "chainId">,
+  liveConfig: Pick<PoolDeploymentConfig, "depositContract">,
+  label: string,
+  options: { optional?: boolean } = {},
+): Promise<boolean> {
+  const beaconNodeUrl = process.env.BEACON_NODE_URL;
+  if (!beaconNodeUrl) {
+    if (options.optional) return false;
+    throw new Error(`${label} requires BEACON_NODE_URL for mandatory beacon confirmation`);
+  }
+
+  const config = await fetchBeaconJson<BeaconDepositContractResponse>(
+    beaconNodeUrl,
+    "/eth/v1/config/deposit_contract",
+    label,
+  );
+  let beaconChainId: bigint;
+  try {
+    beaconChainId = BigInt(config.data.chain_id);
+  } catch {
+    throw new Error(`${label} beacon deposit chain_id ${config.data.chain_id} is invalid`);
+  }
+  if (beaconChainId !== BigInt(deployment.chainId)) {
+    throw new Error(
+      `${label} beacon deposit chain_id ${config.data.chain_id} does not match deployment chainId ` +
+        deployment.chainId,
+    );
+  }
+
+  if (!isAddress(config.data.address)) {
+    throw new Error(`${label} beacon deposit contract address ${config.data.address} is invalid`);
+  }
+  if (config.data.address.toLowerCase() !== liveConfig.depositContract.toLowerCase()) {
+    throw new Error(
+      `${label} beacon deposit contract ${config.data.address} does not match pool depositContract ` +
+        liveConfig.depositContract,
+    );
+  }
+
+  // This catches endpoint misconfiguration; it does not authenticate a dishonest beacon node.
+  return true;
 }
 
 export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {

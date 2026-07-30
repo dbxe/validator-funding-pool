@@ -1,6 +1,7 @@
 import { network } from "hardhat";
 
 import {
+  assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForExit,
   assertDeploymentIntegrity,
   envBigInt,
@@ -17,6 +18,9 @@ async function main() {
     client: { wallet },
   });
   const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+  await assertBeaconMatchesExecutionChain(deployment, liveConfig, "request-exit", {
+    optional: true,
+  });
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
   const pubkey = await pool.read.committedPubkey();
