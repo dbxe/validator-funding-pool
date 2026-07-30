@@ -59,7 +59,7 @@ These values are not private. Deposit data is designed to be publishable and bec
 
 Repository scripts verify deposit roots and BLS signatures. `fund.ts` compares the local deposit-data file to the on-chain commitment before sending ETH, prints the current funding attempt, allocation, and operator target percentage, and supports optional expected-value checks for participants who want an extra local guardrail. Scripts that use withdrawal credentials read them from the live pool and compare them to the deployment record before relying on either value.
 
-`fund.ts` and `top-up.ts` require `BEACON_NODE_URL` to confirm pool withdrawal credentials unless both `UNSAFE_SKIP_BEACON_CONFIRMATION=1` and `I_UNDERSTAND_FUNDS_CAN_BE_LOST=1` are explicitly set for a local/devnet bypass. Credential confirmation uses finalized state by default. `top-up.ts` then checks head state immediately before submitting the `31 ETH` top-up and refuses unless the validator is not slashed, has not initiated exit, and is still in a pending validator status. `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
+Beacon confirmation is mandatory in the supported repository scripts on every path that puts capital at risk: `commit-predeposit`, `fund`, and `top-up`. These paths require `BEACON_NODE_URL` with no bypass. Credential confirmation uses finalized state by default. `top-up.ts` then checks head state immediately before submitting the `31 ETH` top-up and refuses unless the validator is not slashed, has not initiated exit, and is still in a pending validator status. The `request-exit` recovery path deliberately treats its beacon preflight as advisory: without `BEACON_NODE_URL`, it warns and proceeds so an unavailable beacon API cannot disable the escape hatch. With a beacon URL, `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
 
 ## Trust Boundaries
 
@@ -255,10 +255,8 @@ Environment variables:
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
 - `DEPOSIT_FORK_VERSION`: optional expected fork-version check. The deposit data itself must include `fork_version` unless this env var supplies it.
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
-- `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, top-up preflight, and exit preflight; required by `fund` and `top-up` unless explicitly bypassed.
+- `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, funding and top-up preflights, and the advisory exit preflight; required by `commit-predeposit`, `fund`, and `top-up`.
 - `BEACON_CONFIRMATION_STATE_ID`: optional beacon state id for withdrawal-credential confirmation; defaults to `finalized`. Mutable top-up and exit checks use head state.
-- `UNSAFE_SKIP_BEACON_CONFIRMATION`: set to `1` only to bypass required `fund`/`top-up` beacon confirmation in local/devnet flows.
-- `I_UNDERSTAND_FUNDS_CAN_BE_LOST`: must also be `1` when using the unsafe beacon confirmation bypass.
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.
 
 ## License

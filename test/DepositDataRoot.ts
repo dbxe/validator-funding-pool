@@ -5,14 +5,13 @@ import { SecretKey } from "@chainsafe/blst";
 import type { Hex } from "viem";
 
 import {
+  assertBeaconValidatorAbsent,
   assertBeaconValidatorReadyForExit,
   assertBeaconValidatorReadyForTopUp,
   assertBeaconValidatorHasWithdrawalCredentials,
   assertPoolWithdrawalCredentials,
   computeDepositDataRoot,
   computeDepositSigningRoot,
-  UNSAFE_BEACON_BYPASS_ACK,
-  UNSAFE_SKIP_BEACON_CONFIRMATION,
   validateDepositData,
   VALIDATOR_DEPOSIT_GWEI,
 } from "../scripts/lib/common.js";
@@ -128,50 +127,31 @@ describe("deposit data validation", function () {
     }
   });
 
-  it("requires an explicit acknowledgement for unsafe required beacon bypasses", async function () {
+  it("requires BEACON_NODE_URL on every capital-risk path despite obsolete bypass variables", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
-    const originalUnsafeSkip = process.env[UNSAFE_SKIP_BEACON_CONFIRMATION];
-    const originalUnsafeAck = process.env[UNSAFE_BEACON_BYPASS_ACK];
+    const originalUnsafeSkip = process.env.UNSAFE_SKIP_BEACON_CONFIRMATION;
+    const originalUnsafeAck = process.env.I_UNDERSTAND_FUNDS_CAN_BE_LOST;
     delete process.env.BEACON_NODE_URL;
-    delete process.env[UNSAFE_SKIP_BEACON_CONFIRMATION];
-    delete process.env[UNSAFE_BEACON_BYPASS_ACK];
+    process.env.UNSAFE_SKIP_BEACON_CONFIRMATION = "1";
+    process.env.I_UNDERSTAND_FUNDS_CAN_BE_LOST = "1";
 
     try {
       await assert.rejects(
-        assertBeaconValidatorHasWithdrawalCredentials(
-          "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
-          "0x0100000000000000000000002222222222222222222222222222222222222222",
-          "test",
-          true,
-        ),
-        /I_UNDERSTAND_FUNDS_CAN_BE_LOST/,
+        assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit"),
+        /commit-predeposit requires BEACON_NODE_URL/,
       );
-
-      process.env[UNSAFE_SKIP_BEACON_CONFIRMATION] = "1";
       await assert.rejects(
-        assertBeaconValidatorHasWithdrawalCredentials(
-          "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
-          "0x0100000000000000000000002222222222222222222222222222222222222222",
-          "test",
-          true,
-        ),
-        /I_UNDERSTAND_FUNDS_CAN_BE_LOST/,
+        assertBeaconValidatorHasWithdrawalCredentials(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund"),
+        /fund requires BEACON_NODE_URL/,
       );
-
-      process.env[UNSAFE_BEACON_BYPASS_ACK] = "1";
-      assert.equal(
-        await assertBeaconValidatorHasWithdrawalCredentials(
-          "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
-          "0x0100000000000000000000002222222222222222222222222222222222222222",
-          "test",
-          true,
-        ),
-        undefined,
+      await assert.rejects(
+        assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up"),
+        /top-up requires BEACON_NODE_URL/,
       );
     } finally {
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
-      restoreEnv(UNSAFE_SKIP_BEACON_CONFIRMATION, originalUnsafeSkip);
-      restoreEnv(UNSAFE_BEACON_BYPASS_ACK, originalUnsafeAck);
+      restoreEnv("UNSAFE_SKIP_BEACON_CONFIRMATION", originalUnsafeSkip);
+      restoreEnv("I_UNDERSTAND_FUNDS_CAN_BE_LOST", originalUnsafeAck);
     }
   });
 });

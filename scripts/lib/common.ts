@@ -14,8 +14,6 @@ export const PREDEPOSIT_GWEI = 1_000_000_000n;
 export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
-export const UNSAFE_SKIP_BEACON_CONFIRMATION = "UNSAFE_SKIP_BEACON_CONFIRMATION";
-export const UNSAFE_BEACON_BYPASS_ACK = "I_UNDERSTAND_FUNDS_CAN_BE_LOST";
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
 const HEAD_STATE_ID = "head";
@@ -242,12 +240,7 @@ export async function codeHash(
 }
 
 export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
-  const beaconNodeUrl = process.env.BEACON_NODE_URL;
-  if (!beaconNodeUrl) {
-    console.log(`Skipping ${label} beacon preflight: BEACON_NODE_URL not set`);
-    return;
-  }
-
+  const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconNodeHealthy(beaconNodeUrl, label);
   const url = new URL(`/eth/v1/beacon/states/head/validators/${pubkey}`, beaconNodeUrl);
   const response = await fetch(url);
@@ -271,21 +264,22 @@ export async function assertBeaconValidatorHasWithdrawalCredentials(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
-  required = false,
-): Promise<BeaconValidatorPreflight | undefined> {
-  const beaconNodeUrl = process.env.BEACON_NODE_URL;
-  if (!beaconNodeUrl) {
-    if (required && !unsafeBeaconBypassEnabled(label)) {
-      throw new Error(
-        `${label} requires BEACON_NODE_URL to confirm pool withdrawal credentials. ` +
-          `Set ${UNSAFE_SKIP_BEACON_CONFIRMATION}=1 and ${UNSAFE_BEACON_BYPASS_ACK}=1 ` +
-          `only for unsafe local/devnet bypasses.`,
-      );
-    }
-    console.log(`Skipping ${label} beacon confirmation: BEACON_NODE_URL not set`);
-    return undefined;
-  }
+): Promise<BeaconValidatorPreflight> {
+  const beaconNodeUrl = requireBeaconNodeUrl(label);
+  return assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
+    beaconNodeUrl,
+    pubkey,
+    expectedWithdrawalCredentials,
+    label,
+  );
+}
 
+async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
+  beaconNodeUrl: string,
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+): Promise<BeaconValidatorPreflight> {
   const preflight = await readBeaconValidatorPreflight(
     beaconNodeUrl,
     pubkey,
@@ -303,16 +297,16 @@ export async function assertBeaconValidatorReadyForTopUp(
   expectedWithdrawalCredentials: Hex,
   label: string,
 ) {
-  const finalizedPreflight = await assertBeaconValidatorHasWithdrawalCredentials(
+  const beaconNodeUrl = requireBeaconNodeUrl(label);
+  await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
+    beaconNodeUrl,
     pubkey,
     expectedWithdrawalCredentials,
     label,
-    true,
   );
-  if (finalizedPreflight === undefined) return;
 
   const headPreflight = await readBeaconValidatorPreflight(
-    process.env.BEACON_NODE_URL as string,
+    beaconNodeUrl,
     pubkey,
     HEAD_STATE_ID,
     `${label} head`,
@@ -454,16 +448,12 @@ async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label
   return (await response.json()) as T;
 }
 
-function unsafeBeaconBypassEnabled(label: string): boolean {
-  if (process.env[UNSAFE_SKIP_BEACON_CONFIRMATION] !== "1") return false;
-  if (process.env[UNSAFE_BEACON_BYPASS_ACK] !== "1") return false;
-
-  console.warn(
-    `${label}: UNSAFE beacon confirmation bypass enabled. This is only appropriate for local/devnet ` +
-      `flows; on real networks it can lead to participant funds being sent before pool withdrawal ` +
-      `credentials are confirmed.`,
-  );
-  return true;
+function requireBeaconNodeUrl(label: string): string {
+  const beaconNodeUrl = process.env.BEACON_NODE_URL;
+  if (!beaconNodeUrl) {
+    throw new Error(`${label} requires BEACON_NODE_URL for mandatory beacon confirmation`);
+  }
+  return beaconNodeUrl;
 }
 
 function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight) {
