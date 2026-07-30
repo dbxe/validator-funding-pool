@@ -203,6 +203,7 @@ describe("FeeRecipientForwarder", async function () {
     const receipt = await wait(await outsiderForwarder.write.sweep());
     const events = parseEventLogs({ abi: forwarder.abi, logs: receipt.logs });
 
+    assert.equal(receipt.logs[0]?.address.toLowerCase(), forwarder.address.toLowerCase());
     assert.equal(events.length, 1);
     assert.equal(events[0].eventName, "Swept");
     assert.equal(events[0].args.caller.toLowerCase(), outsider.account.address.toLowerCase());

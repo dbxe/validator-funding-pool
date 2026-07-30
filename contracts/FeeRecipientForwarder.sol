@@ -41,9 +41,9 @@ contract FeeRecipientForwarder {
         uint256 amount = address(this).balance;
         if (amount == 0) revert EmptyBalance();
 
+        emit Swept(msg.sender, amount);
+
         (bool ok,) = pool.call{value: amount}("");
         if (!ok) revert SweepFailed();
-
-        emit Swept(msg.sender, amount);
     }
 }
