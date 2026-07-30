@@ -7,6 +7,7 @@ import type { Hex } from "viem";
 import {
   assertBeaconValidatorAbsent,
   assertBeaconValidatorReadyForExit,
+  assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorReadyForTopUp,
   assertBeaconValidatorHasWithdrawalCredentials,
   assertPoolWithdrawalCredentials,
@@ -15,6 +16,8 @@ import {
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
   TOP_UP_GWEI,
+  UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY,
+  UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK,
   validateDepositData,
   VALIDATOR_DEPOSIT_GWEI,
 } from "../scripts/lib/common.js";
@@ -203,7 +206,60 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("checks top-up credentials at finalized state and mutable validator status at head", async function () {
+  it("refuses participant funding for every fresh-predeposit mutable-state anomaly", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      const cases: Array<{
+        validator?: Parameters<typeof beaconValidator>[1];
+        response?: Parameters<typeof beaconValidator>[2];
+        message: RegExp;
+      }> = [
+        {
+          response: { balance: "1000000001" },
+          message: /balance 1000000001 is not exactly 1000000000 Gwei/,
+        },
+        { validator: { slashed: true }, message: /validator is slashed/ },
+        {
+          validator: { activation_epoch: "12" },
+          message: /activation_epoch 12 is not FAR_FUTURE_EPOCH/,
+        },
+        {
+          validator: { activation_eligibility_epoch: "13" },
+          message: /activation_eligibility_epoch 13 is not FAR_FUTURE_EPOCH/,
+        },
+        { validator: { exit_epoch: "14" }, message: /exit_epoch 14 is not FAR_FUTURE_EPOCH/ },
+        {
+          validator: { withdrawable_epoch: "15" },
+          message: /withdrawable_epoch 15 is not FAR_FUTURE_EPOCH/,
+        },
+      ];
+
+      for (const testCase of cases) {
+        installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: beaconValidator(
+            "pending_initialized",
+            testCase.validator,
+            testCase.response,
+          ),
+        });
+        try {
+          await assert.rejects(
+            assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund-test"),
+            testCase.message,
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("uses finalized credentials and head consensus fields rather than the status label", async function () {
     const calls = installBeaconMock({
       finalizedValidator: beaconValidator("pending_initialized"),
       headValidator: beaconValidator("active_ongoing"),
@@ -214,10 +270,7 @@ describe("beacon preflight checks", function () {
     delete process.env.BEACON_CONFIRMATION_STATE_ID;
 
     try {
-      await assert.rejects(
-        assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test"),
-        /top-up-test head beacon validator status active_ongoing is not safe/,
-      );
+      await assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test");
       assert(calls.includes(`/eth/v1/beacon/states/finalized/validators/${PUBKEY}`));
       assert(calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
     } finally {
@@ -227,19 +280,87 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("rejects top-up when the head validator has already initiated exit", async function () {
+  it("rejects a head-state credential divergence even with the top-up anomaly override", async function () {
     installBeaconMock({
       finalizedValidator: beaconValidator("pending_initialized"),
-      headValidator: beaconValidator("pending_initialized", { exit_epoch: "17" }),
+      headValidator: beaconValidator("pending_initialized", {
+        withdrawal_credentials: OTHER_WITHDRAWAL_CREDENTIALS,
+        exit_epoch: "17",
+      }),
     });
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    const originalOverride = process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY];
+    const originalAck = process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK];
     process.env.BEACON_NODE_URL = "http://beacon.example";
+    process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY] = "1";
+    process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK] = "1";
 
     try {
       await assert.rejects(
         assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test"),
-        /exit_epoch 17 is not FAR_FUTURE_EPOCH/,
+        /head beacon withdrawal_credentials .* != pool/,
       );
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+      restoreEnv(UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY, originalOverride);
+      restoreEnv(UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK, originalAck);
+    }
+  });
+
+  it("allows only top-up to waive mutable anomalies with both override variables", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    const originalOverride = process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY];
+    const originalAck = process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK];
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY] = "1";
+    process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK] = "1";
+
+    try {
+      installBeaconMock({
+        finalizedValidator: beaconValidator("pending_initialized"),
+        headValidator: beaconValidator(
+          "active_exiting",
+          {
+            slashed: true,
+            activation_epoch: "12",
+            activation_eligibility_epoch: "11",
+            exit_epoch: "14",
+            withdrawable_epoch: "15",
+          },
+          { balance: "32000000000" },
+        ),
+      });
+      await assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test");
+      restoreFetch();
+
+      installBeaconMock({
+        finalizedValidator: beaconValidator("pending_initialized"),
+        headValidator: beaconValidator("pending_initialized", {}, { balance: "1000000001" }),
+      });
+      await assert.rejects(
+        assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund-test"),
+        /balance 1000000001 is not exactly 1000000000 Gwei/,
+      );
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+      restoreEnv(UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY, originalOverride);
+      restoreEnv(UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK, originalAck);
+    }
+  });
+
+  it("passes funding and top-up for a healthy fresh 1 ETH validator", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      installBeaconMock({});
+      await assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund-test");
+      restoreFetch();
+
+      installBeaconMock({});
+      await assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test");
     } finally {
       restoreFetch();
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
@@ -401,19 +522,21 @@ function beaconValidator(
     exit_epoch: string;
     withdrawable_epoch: string;
   }> = {},
+  responseOverrides: Partial<{ balance: string }> = {},
 ) {
   return {
     data: {
       index: "123",
       balance: "1000000000",
       status,
+      ...responseOverrides,
       validator: {
         pubkey: PUBKEY,
         withdrawal_credentials: WITHDRAWAL_CREDENTIALS,
         effective_balance: "1000000000",
         slashed: false,
-        activation_eligibility_epoch: "0",
-        activation_epoch: "0",
+        activation_eligibility_epoch: FAR_FUTURE_EPOCH,
+        activation_epoch: FAR_FUTURE_EPOCH,
         exit_epoch: FAR_FUTURE_EPOCH,
         withdrawable_epoch: FAR_FUTURE_EPOCH,
         ...validatorOverrides,

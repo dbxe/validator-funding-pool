@@ -1,7 +1,7 @@
 import { network } from "hardhat";
 
 import {
-  assertBeaconValidatorHasWithdrawalCredentials,
+  assertBeaconValidatorReadyForFunding,
   assertDeploymentChain,
   assertDeploymentSystemCodeHashes,
   assertPoolWithdrawalCredentials,
@@ -68,7 +68,7 @@ async function main() {
   if (committedTopUpSignature.toLowerCase() !== topUp.signature.toLowerCase()) {
     throw new Error("Committed top-up signature does not match deposit-data file");
   }
-  await assertBeaconValidatorHasWithdrawalCredentials(predeposit.pubkey, expectedCredentials, "fund");
+  await assertBeaconValidatorReadyForFunding(predeposit.pubkey, expectedCredentials, "fund");
 
   await printAndCheckFundingReview(pool, wallet.account.address);
 

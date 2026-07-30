@@ -59,7 +59,11 @@ These values are not private. Deposit data is designed to be publishable and bec
 
 Repository scripts read the authoritative `genesis_fork_version` from the connected beacon node, require both deposit-data entries to declare that value, and use it to verify deposit roots and BLS signatures. `fund.ts` performs this chain check before looking up the validator, compares the local deposit-data file to the on-chain commitment before sending ETH, prints the current funding attempt, allocation, and operator target percentage, and supports optional expected-value checks for participants who want an extra local guardrail. Scripts that use withdrawal credentials read them from the live pool and compare them to the deployment record before relying on either value.
 
-Beacon confirmation is mandatory in the supported repository scripts on every path that puts capital at risk: `commit-predeposit`, `fund`, and `top-up`. These paths require `BEACON_NODE_URL` with no bypass. Credential confirmation uses finalized state by default. `top-up.ts` then checks head state immediately before submitting the `31 ETH` top-up and refuses unless the validator is not slashed, has not initiated exit, and is still in a pending validator status. The `request-exit` recovery path deliberately treats its beacon preflight as advisory: without `BEACON_NODE_URL`, it warns and proceeds so an unavailable beacon API cannot disable the escape hatch. With a beacon URL, `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
+Beacon confirmation is mandatory in the supported repository scripts on every path that puts capital at risk: `commit-predeposit`, `fund`, and `top-up`. These paths require `BEACON_NODE_URL` with no bypass. Before both participant funding and the operator top-up, credentials are confirmed at finalized state and re-confirmed at head; head state must also show exactly the fresh 1 ETH predeposit: a 1,000,000,000 Gwei balance, no slashing, and activation, activation-eligibility, exit, and withdrawable epochs all equal to `FAR_FUTURE_EPOCH`. These checks use the consensus fields rather than the Beacon API status label.
+
+`top-up` alone has an emergency two-variable override for mutable head-state anomalies. Setting both `UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY=1` and `I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY=1` waives only the balance, slashing, activation-epoch, and exit-epoch assertions so a validator externally funded into an anomalous state cannot permanently trap pool funds. It cannot waive beacon availability or health, chain fork identity, or withdrawal-credential confirmation at finalized or head state. `fund` has no override.
+
+The `request-exit` recovery path deliberately treats its beacon preflight as advisory: without `BEACON_NODE_URL`, it warns and proceeds so an unavailable beacon API cannot disable the escape hatch. With a beacon URL, `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
 
 ## Trust Boundaries
 
@@ -256,6 +260,8 @@ Environment variables:
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
 - `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, funding and top-up preflights, and the advisory exit preflight; required by `commit-predeposit`, `fund`, and `top-up`.
 - `BEACON_CONFIRMATION_STATE_ID`: optional beacon state id for withdrawal-credential confirmation; defaults to `finalized`. Mutable top-up and exit checks use head state.
+- `UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY`: set to `1` only for an operator top-up that must waive mutable head-state balance, slashing, activation, or exit anomalies.
+- `I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY`: must also be `1` to acknowledge the narrow top-up anomaly override; it never waives beacon availability, health, fork identity, or withdrawal-credential checks.
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.
 
 ## License

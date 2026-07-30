@@ -14,6 +14,8 @@ export const PREDEPOSIT_GWEI = 1_000_000_000n;
 export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
+export const UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY = "UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY";
+export const UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK = "I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY";
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
 const HEAD_STATE_ID = "head";
@@ -308,6 +310,33 @@ export async function assertBeaconValidatorReadyForTopUp(
   expectedWithdrawalCredentials: Hex,
   label: string,
 ) {
+  return assertBeaconValidatorIsFreshPredeposit(
+    pubkey,
+    expectedWithdrawalCredentials,
+    label,
+    true,
+  );
+}
+
+export async function assertBeaconValidatorReadyForFunding(
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+) {
+  return assertBeaconValidatorIsFreshPredeposit(
+    pubkey,
+    expectedWithdrawalCredentials,
+    label,
+    false,
+  );
+}
+
+async function assertBeaconValidatorIsFreshPredeposit(
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+  allowTopUpOverride: boolean,
+) {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
     beaconNodeUrl,
@@ -324,20 +353,47 @@ export async function assertBeaconValidatorReadyForTopUp(
   );
   assertBeaconValidatorWithdrawalCredentials(headPreflight, expectedWithdrawalCredentials, `${label} head`);
 
-  const { status, validator } = headPreflight.validator;
+  const mutableAnomalyOverride = allowTopUpOverride && topUpValidatorAnomalyOverrideEnabled(label);
+  if (!mutableAnomalyOverride) {
+    assertFreshPredepositMutableState(headPreflight, label);
+  }
+
+  printBeaconPreflight(`${label} head`, headPreflight);
+  console.log(`${label} head beacon fresh-predeposit preflight passed`);
+}
+
+function assertFreshPredepositMutableState(preflight: BeaconValidatorPreflight, label: string) {
+  const { balance, validator } = preflight.validator;
+  if (balance !== PREDEPOSIT_GWEI.toString()) {
+    throw new Error(
+      `${label} head beacon validator balance ${balance} is not exactly ${PREDEPOSIT_GWEI} Gwei`,
+    );
+  }
   if (validator.slashed) {
     throw new Error(`${label} head beacon validator is slashed`);
+  }
+  if (validator.activation_epoch !== FAR_FUTURE_EPOCH) {
+    throw new Error(
+      `${label} head beacon validator activation_epoch ${validator.activation_epoch} is not FAR_FUTURE_EPOCH`,
+    );
+  }
+  if (validator.activation_eligibility_epoch !== FAR_FUTURE_EPOCH) {
+    throw new Error(
+      `${label} head beacon validator activation_eligibility_epoch ` +
+        `${validator.activation_eligibility_epoch} is not FAR_FUTURE_EPOCH`,
+    );
   }
   if (validator.exit_epoch !== FAR_FUTURE_EPOCH) {
     throw new Error(
       `${label} head beacon validator exit_epoch ${validator.exit_epoch} is not FAR_FUTURE_EPOCH`,
     );
   }
-  if (!["pending_initialized", "pending_queued"].includes(status)) {
-    throw new Error(`${label} head beacon validator status ${status} is not safe for 31 ETH top-up`);
+  if (validator.withdrawable_epoch !== FAR_FUTURE_EPOCH) {
+    throw new Error(
+      `${label} head beacon validator withdrawable_epoch ${validator.withdrawable_epoch} ` +
+        `is not FAR_FUTURE_EPOCH`,
+    );
   }
-  printBeaconPreflight(`${label} head`, headPreflight);
-  console.log(`${label} head beacon top-up preflight passed`);
 }
 
 export async function assertBeaconValidatorReadyForExit(
@@ -467,6 +523,23 @@ function requireBeaconNodeUrl(label: string): string {
   return beaconNodeUrl;
 }
 
+function topUpValidatorAnomalyOverrideEnabled(label: string): boolean {
+  if (process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY] !== "1") return false;
+  if (process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK] !== "1") {
+    throw new Error(
+      `${label}: ${UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY}=1 requires ` +
+        `${UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK}=1`,
+    );
+  }
+
+  console.warn(
+    `${label}: UNSAFE top-up validator anomaly override enabled. Mutable head-state assertions for ` +
+      `balance, slashing, activation epochs, and exit epochs are waived. Beacon availability, node ` +
+      `health, and finalized and head withdrawal-credential confirmation remain mandatory.`,
+  );
+  return true;
+}
+
 function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight) {
   const { genesis, syncing, finality, validator, stateId } = preflight;
   console.log(`${label} beacon state id: ${stateId}`);
@@ -481,6 +554,9 @@ function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight
   console.log(`${label} validator balance: ${validator.balance} Gwei`);
   console.log(`${label} validator effective balance: ${validator.validator.effective_balance} Gwei`);
   console.log(`${label} validator slashed: ${validator.validator.slashed}`);
+  console.log(
+    `${label} validator activation eligibility epoch: ${validator.validator.activation_eligibility_epoch}`,
+  );
   console.log(`${label} validator activation epoch: ${validator.validator.activation_epoch}`);
   console.log(`${label} validator exit epoch: ${validator.validator.exit_epoch}`);
   console.log(`${label} validator withdrawable epoch: ${validator.validator.withdrawable_epoch}`);
