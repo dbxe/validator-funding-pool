@@ -4,7 +4,14 @@ import path from "node:path";
 import { PublicKey, Signature, verify } from "@chainsafe/blst";
 import { DOMAIN_DEPOSIT } from "@lodestar/params";
 import { ssz } from "@lodestar/types";
-import { formatEther, isAddress, keccak256, type Address, type Hex } from "viem";
+import {
+  formatEther,
+  isAddress,
+  keccak256,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from "viem";
 
 export const DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY: Address =
   "0x00000961Ef480Eb55e80D19ad83579A64c007002";
@@ -41,6 +48,7 @@ export interface DeploymentRecord {
   operator: Address;
   fundingWindowDuration: string;
   withdrawalCredentials: Hex;
+  feeRecipientForwarder?: Address;
 }
 
 export interface PoolDeploymentConfig {
@@ -119,6 +127,15 @@ interface PoolDeploymentReader {
 
 interface SystemCodeReader {
   getCode: (args: { address: Address }) => Promise<Hex | undefined>;
+}
+
+type DeploymentPublicClient = Pick<PublicClient, "getChainId" | "getCode" | "readContract">;
+
+interface FeeRecipientForwarderReader {
+  address: Address;
+  read: {
+    pool: () => Promise<Address>;
+  };
 }
 
 interface CanonicalSystemContracts {
@@ -332,7 +349,7 @@ export async function assertDeploymentCanonicity(
 }
 
 export async function assertDeploymentIntegrity(
-  publicClient: SystemCodeReader & { getChainId: () => Promise<number> },
+  publicClient: DeploymentPublicClient,
   pool: PoolDeploymentReader,
   deployment: DeploymentRecord,
 ): Promise<PoolDeploymentConfig> {
@@ -340,7 +357,60 @@ export async function assertDeploymentIntegrity(
   const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
+  if (deployment.feeRecipientForwarder !== undefined) {
+    await assertHasCode(
+      publicClient,
+      deployment.feeRecipientForwarder,
+      "feeRecipientForwarder",
+    );
+    const forwarderPool = await publicClient.readContract({
+      address: deployment.feeRecipientForwarder,
+      abi: [
+        {
+          type: "function",
+          name: "pool",
+          stateMutability: "view",
+          inputs: [],
+          outputs: [{ name: "", type: "address" }],
+        },
+      ] as const,
+      functionName: "pool",
+    }) as Address;
+    assertForwarderPool(forwarderPool, deployment.pool);
+  }
   return liveConfig;
+}
+
+export async function assertFeeRecipientForwarderMatchesDeployment(
+  publicClient: SystemCodeReader,
+  forwarder: FeeRecipientForwarderReader,
+  deployment: DeploymentRecord,
+): Promise<Address> {
+  if (deployment.feeRecipientForwarder === undefined) {
+    throw new Error("Deployment record has no feeRecipientForwarder");
+  }
+  if (forwarder.address.toLowerCase() !== deployment.feeRecipientForwarder.toLowerCase()) {
+    throw new Error(
+      `FeeRecipientForwarder address ${forwarder.address} does not match deployment record ` +
+        deployment.feeRecipientForwarder,
+    );
+  }
+  await assertHasCode(
+    publicClient,
+    deployment.feeRecipientForwarder,
+    "feeRecipientForwarder",
+  );
+  const livePool = await forwarder.read.pool();
+  assertForwarderPool(livePool, deployment.pool);
+  return livePool;
+}
+
+function assertForwarderPool(livePool: Address, deploymentPool: Address) {
+  if (livePool.toLowerCase() !== deploymentPool.toLowerCase()) {
+    throw new Error(
+      `FeeRecipientForwarder pool ${livePool} does not match deployment pool ${deploymentPool}`,
+    );
+  }
 }
 
 function assertDeploymentField(

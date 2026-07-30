@@ -39,6 +39,15 @@ async function main() {
   console.log(`Top-up root: ${await pool.read.topUpDepositDataRoot()}`);
   console.log(`Exit request count: ${await pool.read.exitRequestAttemptCount()}`);
   console.log(`Last exit request fee: ${formatWei(await pool.read.lastExitRequestFeePaid())}`);
+  if (deployment.feeRecipientForwarder !== undefined) {
+    const forwarderBalance = await publicClient.getBalance({
+      address: deployment.feeRecipientForwarder,
+    });
+    console.log(`Fee recipient forwarder: ${deployment.feeRecipientForwarder}`);
+    console.log(`Forwarder pending balance: ${formatWei(forwarderBalance)}`);
+  } else {
+    console.log("Fee recipient forwarder: not configured");
+  }
 
   for (let i = 0; i < participantCount; ++i) {
     const participant = await pool.read.participantAt([BigInt(i)]);

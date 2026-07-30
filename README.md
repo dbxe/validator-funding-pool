@@ -81,7 +81,19 @@ The predeposit flow mitigates the main first-deposit credential-capture risk by 
 
 The contract only enforces custody and pro-rata distribution of ETH that reaches the pool. Consensus withdrawals and exited principal reach the pool because withdrawal credentials point to the pool. EL priority fees and MEV follow the operator-controlled `fee_recipient`, never withdrawal credentials, and remain outside anything this contract can enforce. The default expectation is that the operator keeps those rewards as hardware incentive.
 
-Do not configure the pool itself as `fee_recipient`. Its `receive()` is state-dependent and rejects ordinary transfers before funding or top-up, which is the wrong property for a set-and-forget validator-client destination. It is also a heavier recipient than a baseline ETH transfer. If the group explicitly decides to pool EL rewards, the planned sidecar is a fixed-destination forwarder with an unconditional empty `receive()` and a permissionless `sweep()` into the pool. That forwarder is not implemented or supported yet.
+Do not configure the pool itself as `fee_recipient`. Its `receive()` is state-dependent and rejects ordinary transfers before funding or top-up, which is the wrong property for a set-and-forget validator-client destination. It is also a heavier recipient than a baseline ETH transfer. If the group explicitly decides to pool EL rewards, use the optional `FeeRecipientForwarder` sidecar described below.
+
+### Optional EL Rewards Forwarder
+
+`FeeRecipientForwarder` is a fixed-destination sidecar for groups that choose to distribute EL priority fees and MEV through the pool. Its `receive()` is empty and unconditional, so a builder payment transaction does not depend on pool lifecycle state and stays near baseline transfer gas. Its immutable `pool` is validated at construction by checking the full pool-owned withdrawal credentials. There is no owner, pause, upgrade, rescue, arbitrary call, or alternate recipient.
+
+Deploy it against the pool recorded in the deployment file with `npm run deploy-forwarder`. The script verifies the pool deployment, deploys the sidecar, verifies the forwarder's immutable destination, and adds the optional `feeRecipientForwarder` address to the record. Existing deployment records without that field remain valid.
+
+Only after the pool is topped up, configure the validator client's `fee_recipient` to the recorded forwarder address. Validator-client configuration syntax varies by client. Do not point `fee_recipient` at the forwarder before top-up: although the forwarder always accepts ETH, `sweep()` cannot deliver it while the pool rejects ordinary ETH, and there is no rescue path if the pool never reaches `ToppedUp`.
+
+Anyone can run `npm run sweep`. It transfers the forwarder's entire balance to the immutable pool, where the ETH becomes pool proceeds distributed pro rata by final credited weight. A zero-balance sweep reverts, and a sweep rejected by the pool remains permissionlessly retryable. `status` verifies the configured forwarder and displays its pending balance.
+
+Pooling EL rewards changes the group's economics and must be an explicit group decision. The sidecar makes pooling possible and verifiable when it is configured, but it does not make MEV trustless or enforce the configuration. The operator still controls `fee_recipient` and can change or unset it at any time. The operator is also responsible for confirming contract-recipient behavior with the actual relay and builder set.
 
 ## Trust And Incentives
 
@@ -197,6 +209,7 @@ Future Ethereum staking features may require contract changes or may simply be u
 | Validator exits from CL side without EIP-7002 | Returned ETH is pool proceeds, excluding outstanding refunds. |
 | Participant cannot receive ETH directly | Participant can use `claimTo` or `refundTo`. |
 | ETH is forced into the pool | It follows the forced-ETH rules above; no sender rescue exists. |
+| Forwarder receives ETH before pool top-up | Funds remain in the forwarder until a permissionless sweep succeeds; they are stranded if the pool never tops up. |
 
 ## Defaults
 
@@ -247,6 +260,13 @@ Participants fund, then the operator submits the top-up:
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run fund
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run top-up
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
+```
+
+Optionally deploy the EL-rewards sidecar after top-up, configure the validator client's `fee_recipient` to the printed forwarder address, and sweep accumulated rewards permissionlessly:
+
+```bash
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run deploy-forwarder
+RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run sweep
 ```
 
 Operational scripts:

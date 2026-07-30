@@ -10,6 +10,7 @@
     "test": "hardhat test",
     "test:prod": "hardhat test --build-profile production",
     "deploy": "hardhat run scripts/deploy.ts --network rpc",
+    "deploy-forwarder": "hardhat run scripts/deploy-forwarder.ts --network rpc",
     "commit-predeposit": "hardhat run scripts/commit-predeposit.ts --network rpc",
     "open-funding-attempt": "hardhat run scripts/open-funding-attempt.ts --network rpc",
     "close-expired-funding-attempt": "hardhat run scripts/close-expired-funding-attempt.ts --network rpc",
@@ -18,6 +19,7 @@
     "top-up": "hardhat run scripts/top-up.ts --network rpc",
     "claim": "hardhat run scripts/claim.ts --network rpc",
     "request-exit": "hardhat run scripts/request-exit.ts --network rpc",
+    "sweep": "hardhat run scripts/sweep.ts --network rpc",
     "status": "hardhat run scripts/status.ts --network rpc"
   },
   "devDependencies": {

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import { SecretKey } from "@chainsafe/blst";
@@ -15,11 +18,13 @@ import {
   computeDepositSigningRoot,
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
+  readDeployment,
   TOP_UP_GWEI,
   UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY,
   UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK,
   validateDepositData,
   VALIDATOR_DEPOSIT_GWEI,
+  writeDeployment,
 } from "../scripts/lib/common.js";
 
 const PUBKEY =
@@ -153,6 +158,43 @@ describe("deposit data validation", function () {
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
       restoreEnv("UNSAFE_SKIP_BEACON_CONFIRMATION", originalUnsafeSkip);
       restoreEnv("I_UNDERSTAND_FUNDS_CAN_BE_LOST", originalUnsafeAck);
+    }
+  });
+
+  it("round-trips deployment records with and without an optional fee recipient forwarder", function () {
+    const directory = mkdtempSync(path.join(tmpdir(), "validator-funding-pool-"));
+    const deploymentFile = path.join(directory, "deployment.json");
+    const originalDeploymentFile = process.env.DEPLOYMENT_FILE;
+    const originalLog = console.log;
+    process.env.DEPLOYMENT_FILE = deploymentFile;
+    console.log = () => {};
+
+    const deployment = {
+      chainId: 31337,
+      pool: "0x1111111111111111111111111111111111111111",
+      depositContract: "0x2222222222222222222222222222222222222222",
+      depositContractCodeHash: `0x${"11".repeat(32)}`,
+      withdrawalRequestPredeploy: "0x3333333333333333333333333333333333333333",
+      withdrawalRequestPredeployCodeHash: `0x${"22".repeat(32)}`,
+      operator: "0x4444444444444444444444444444444444444444",
+      fundingWindowDuration: "3600",
+      withdrawalCredentials: `0x01${"00".repeat(11)}${"11".repeat(20)}`,
+    } as const;
+
+    try {
+      writeDeployment(deployment);
+      assert.deepEqual(readDeployment(), deployment);
+
+      const withForwarder = {
+        ...deployment,
+        feeRecipientForwarder: "0x5555555555555555555555555555555555555555" as const,
+      };
+      writeDeployment(withForwarder);
+      assert.deepEqual(readDeployment(), withForwarder);
+    } finally {
+      console.log = originalLog;
+      restoreEnv("DEPLOYMENT_FILE", originalDeploymentFile);
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });
