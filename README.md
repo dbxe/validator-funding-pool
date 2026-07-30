@@ -129,7 +129,7 @@ Events are reconciliation aids, not the source of entitlement accounting.
 - `EthReceivedViaCall(sender, amount)` is emitted only when ETH reaches `receive()` after top-up.
 - `RefundCredited(attempt, participant, amount, participantTotal, totalRefundableWei)` is emitted when an expired attempt turns active funding into a passive refund claim.
 - `AccountingSnapshot(...)` is emitted after selected accounting actions and records the post-action observed state.
-- Snapshots are emitted after predeposit, funding-attempt open/close, successful funding, top-up, callable topped-up ETH receipt, claims, and refunds.
+- Snapshots are emitted after predeposit, funding-attempt open/close, successful funding, top-up, claims, and refunds, where the contract's accounting state changes.
 - Snapshot events include funding attempt, balance, active funding, refund liabilities, refunded totals, final credited weights, claimed totals, and `grossPoolProceeds()`.
 - Silent balance increases can occur between snapshots and may not emit any pool event.
 

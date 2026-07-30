@@ -764,17 +764,16 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(await pool.read.claimable([bob.account.address]), 18n);
   });
 
-  it("snapshots callable topped-up ETH and excludes EIP-7002 request attempts", async function () {
+  it("emits only the receipt marker for callable topped-up ETH and excludes exit attempts", async function () {
     const { pool, operatorPool, outsider, withdrawal } = await networkHelpers.loadFixture(toppedUpFixture);
 
     const receiveReceipt = await waitForReceipt(await outsider.sendTransaction({ to: pool.address, value: 6n }));
-    const receiveSnapshot = await assertAccountingSnapshot(pool, receiveReceipt, [
-      "EthReceivedViaCall",
-      "AccountingSnapshot",
-    ]);
-    assert.equal(receiveSnapshot.state, STATE_TOPPED_UP);
-    assert.equal(receiveSnapshot.balance, 6n);
-    assert.equal(receiveSnapshot.grossPoolProceeds, 6n);
+    assert.deepEqual(
+      parsePoolEvents(pool, receiveReceipt).map((event) => event.eventName),
+      ["EthReceivedViaCall"],
+    );
+    assert.ok(receiveReceipt.gasUsed <= 26_000n, `topped-up receive gas ${receiveReceipt.gasUsed} exceeds 26,000`);
+    assert.equal(await pool.read.grossPoolProceeds(), 6n);
 
     const exitReceipt = await waitForReceipt(await operatorPool.write.requestExit([EXIT_FEE], { value: EXIT_FEE }));
     assert.deepEqual(

@@ -254,7 +254,6 @@ contract ValidatorFundingPool {
 
         if (state == State.ToppedUp) {
             emit EthReceivedViaCall(msg.sender, msg.value);
-            _emitAccountingSnapshot();
             return;
         }
 
