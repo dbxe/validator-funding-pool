@@ -152,6 +152,29 @@ interface CanonicalSystemContracts {
   withdrawalRequestPredeployCodeHash: Hex;
 }
 
+// Canonical mainnet system contracts.
+//
+// These hashes are PINS, not observations. They are what live chain state must match, derived
+// independently of any RPC endpoint, and they are the only thing separating a canonicity check
+// from the weaker record-to-pool consistency check performed alongside it.
+//
+// Provenance and how to re-derive:
+//
+//   depositContractCodeHash
+//     keccak256 of the runtime bytecode produced by deploying the creation bytecode in
+//     consensus-specs solidity_deposit_contract/deposit_contract.json (v1.6.1, 5fa6edcca).
+//     Deploy it on a local chain, read eth_getCode, keccak256 the result. Runtime is 6358 bytes.
+//
+//   withdrawalRequestPredeployCodeHash
+//     keccak256 of the 504-byte EIP-7002 predeploy runtime shipped in go-ethereum v1.17.5
+//     (9621c6ad1), cmd/devp2p/internal/ethtest/testdata/genesis.json, which matches
+//     headstate.json byte-for-byte. Unchanged since v1.17.3.
+//
+// If assertDeploymentCanonicity fails, the pool is wired to a non-canonical system contract.
+// That is the finding, and it is exactly what this table exists to surface. Do NOT update these
+// constants to match what is observed on chain: doing so silently downgrades the canonicity pin
+// to a consistency check and defeats the layer entirely. Re-derive from the sources above and
+// change a value only when the upstream artifact itself has changed.
 const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystemContracts>> = {
   1: {
     depositContract: DEFAULT_DEPOSIT_CONTRACT,
