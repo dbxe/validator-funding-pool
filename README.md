@@ -79,7 +79,9 @@ The operator is trusted to:
 
 The predeposit flow mitigates the main first-deposit credential-capture risk by making participant funding conditional on beacon state showing the validator pubkey already bound to the pool. A malicious operator can still slash, abandon, or misoperate the validator after top-up. This contract is trust-minimized, not trustless.
 
-The contract only enforces custody and pro-rata distribution of ETH that reaches the pool. Consensus withdrawals and exited principal reach the pool because withdrawal credentials point to the pool. EL priority fees and MEV are operator-controlled. The default expectation is that the operator keeps those as hardware incentive; if the group wants to split them, the operator can configure the fee recipient / builder payout address to the pool.
+The contract only enforces custody and pro-rata distribution of ETH that reaches the pool. Consensus withdrawals and exited principal reach the pool because withdrawal credentials point to the pool. EL priority fees and MEV follow the operator-controlled `fee_recipient`, never withdrawal credentials, and remain outside anything this contract can enforce. The default expectation is that the operator keeps those rewards as hardware incentive.
+
+Do not configure the pool itself as `fee_recipient`. Its `receive()` is state-dependent and rejects ordinary transfers before funding or top-up, which is the wrong property for a set-and-forget validator-client destination. It is also a heavier recipient than a baseline ETH transfer. If the group explicitly decides to pool EL rewards, the planned sidecar is a fixed-destination forwarder with an unconditional empty `receive()` and a permissionless `sweep()` into the pool. That forwarder is not implemented or supported yet.
 
 ## Trust And Incentives
 
@@ -94,6 +96,18 @@ Poor validator operation is still an operator trust boundary. The intended incen
 The unilateral escape hatch is EIP-7002. The operator can request exits before or after top-up because the operator bears the predeposit exposure. After top-up, final credited participants can request a full exit without operator permission. Current funding-attempt participants recover through the funding deadline and `refundTo()` if top-up does not happen; refund-only holders cannot request exits for a later validator they did not fund. Consensus processing still enforces validator-state preconditions, so execution-layer accepted requests can be ignored until those conditions are met; the contract therefore records attempts and allows retries. See the consensus [`process_withdrawal_request`](https://github.com/ethereum/consensus-specs/blob/5fa6edcca8ab4cf548653e6680b17b9d3e04d225/specs/electra/beacon-chain.md#new-process_withdrawal_request) flow.
 
 This is not a complete validator exit gate. The validator active key can still sign a consensus-layer voluntary exit outside this contract, and anyone with a valid pre-signed voluntary exit can submit it. If withdrawal credentials are correct, exited funds still return to the pool, but timing and opportunity cost can bypass the pool's local EIP-7002 caller restrictions.
+
+## Considered And Rejected
+
+### On-Chain Minimum Operator Weight
+
+The pool does not enforce an immutable minimum operator target beyond the credited 1 ETH predeposit. Final targets must total exactly 32 ETH, so a participant's own target is exactly that participant's economic share; `EXPECTED_MY_TARGET_GWEI` can pin it without relying on any other participant's identity or target. A larger operator target is an alignment choice, not a custody or arithmetic invariant.
+
+An immutable operator-weight floor was rejected because funding composition is deliberately re-formable across attempts. If the group later re-forms around a participant contributing more capital, a stale floor could force a redeploy. A redeploy changes the withdrawal credentials, while the original 1 ETH predeposit remains permanently bound to the old pool. The extra constructor surface would also need correct lower and upper bounds to avoid making predeposit accounting unsound or deploying a pool that can never open a valid funding attempt. It would improve legibility but would not tighten a protocol boundary.
+
+### Required Beacon Preflight For Exit
+
+`request-exit` deliberately does not require beacon API availability. Its preflight warns and proceeds when `BEACON_NODE_URL` is absent because the downside is a potentially wasted EIP-7002 request fee, while refusing would let an unavailable beacon endpoint disable the participants' recovery path during an emergency. Capital-entry paths fail closed; the escape hatch preserves liveness.
 
 ## Accounting Model
 
