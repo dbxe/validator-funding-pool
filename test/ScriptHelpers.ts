@@ -11,6 +11,7 @@ import {
   beaconApiUrl,
   describeFatalError,
   envBigInt,
+  formatPoolState,
   fundViaPlainTransfer,
   optionalEnvBigInt,
   parseBigIntList,
@@ -1081,5 +1082,18 @@ describe("describeFatalError", function () {
   it("says something for a thrown non-error", function () {
     assert.deepEqual(describeFatalError("plain string"), ["plain string"]);
     assert.deepEqual(describeFatalError(undefined), ["undefined"]);
+  });
+});
+
+describe("formatPoolState", function () {
+  it("names every state the pool declares, and keeps the ordinal", function () {
+    assert.equal(formatPoolState(0), "Uninitialized (0)");
+    assert.equal(formatPoolState(1), "Predeposited (1)");
+    assert.equal(formatPoolState(2), "Funding (2)");
+    assert.equal(formatPoolState(3n), "ToppedUp (3)");
+  });
+
+  it("does not invent a name for an ordinal the enum does not have", function () {
+    assert.equal(formatPoolState(4), "4 (unknown state)");
   });
 });

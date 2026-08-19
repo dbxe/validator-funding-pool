@@ -12,6 +12,7 @@ import {
   assertFundingWasCredited,
   assertStillFundable,
   envBigInt,
+  formatPoolState,
   formatWei,
   fundViaPlainTransfer,
   PREDEPOSIT_GWEI,
@@ -163,7 +164,7 @@ async function printAndCheckFundingReview(
   const operator = await pool.read.operator();
 
   console.log(`Funding review for pool ${pool.address}`);
-  console.log(`State: ${state}`);
+  console.log(`State: ${formatPoolState(state)}`);
   console.log(`Funding attempt: ${fundingAttempt}`);
   console.log(`Funding deadline: ${fundingDeadline}`);
   console.log(`Total active funded: ${formatWei(totalActiveFundedWei)}`);

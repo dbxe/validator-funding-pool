@@ -2,14 +2,13 @@ import { network } from "hardhat";
 
 import {
   assertDeploymentIntegrity,
+  formatPoolState,
   formatWei,
   parseAddressList,
   readDeployment,
   reportFatalError,
   warnOnPlaintextEndpoints,
 } from "./lib/common.js";
-
-const STATE_NAMES = ["Uninitialized", "Predeposited", "Funding", "ToppedUp"];
 
 async function main() {
   // Every other command reaches this through `assertActiveSigner`. `status` signs nothing,
@@ -26,7 +25,7 @@ async function main() {
   const balance = await publicClient.getBalance({ address: deployment.pool });
 
   console.log(`Pool: ${deployment.pool}`);
-  console.log(`State: ${STATE_NAMES[state] ?? state}`);
+  console.log(`State: ${formatPoolState(state)}`);
   console.log(`Operator: ${await pool.read.operator()}`);
   console.log(`Funding attempt: ${await pool.read.fundingAttempt()}`);
   console.log(`Funding deadline: ${await pool.read.fundingDeadline()}`);

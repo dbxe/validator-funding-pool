@@ -461,6 +461,21 @@ export function reportFatalError(error: unknown, label: string) {
   );
 }
 
+/// The pool's `State` enum, by ordinal. `ValidatorFundingPool.sol:39-44`.
+///
+/// One table, read everywhere a state is printed. `status` named the states while the
+/// funding review printed the bare ordinal, so the same pool read two ways said `ToppedUp`
+/// in one place and `3` in the other — and `3` is precisely the state in which a plain
+/// transfer stops being funding and becomes a donation. The ordinal is kept alongside the
+/// name because it is what the contract's own reverts and events carry.
+export const POOL_STATE_NAMES = ["Uninitialized", "Predeposited", "Funding", "ToppedUp"] as const;
+
+export function formatPoolState(state: number | bigint): string {
+  const ordinal = Number(state);
+  const name = POOL_STATE_NAMES[ordinal];
+  return name === undefined ? `${ordinal} (unknown state)` : `${name} (${ordinal})`;
+}
+
 /// Asserts that the wallet a script is about to sign with is the wallet the operator
 /// intended, and prints it on every network.
 ///
