@@ -7,10 +7,12 @@ import {
   assertDeploymentMatchesPool,
   assertDeploymentSystemCodeHashes,
   assertHasCode,
+  assertPoolRuntimeCodeMatchesLocalBuild,
   codeHash,
   defaultDepositContract,
   envAddress,
   envBigInt,
+  readLocalPoolBuildArtifacts,
   waitForSenderVerifiedReceipt,
   writeDeployment,
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
@@ -83,6 +85,18 @@ async function main() {
   };
   const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
   await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
+  // Every other command runs this through `assertDeploymentIntegrity`, and the
+  // documentation says every script compares the pool's runtime code against a local build.
+  // `deploy` did not, which made it the one command that could write a deployment record
+  // for a pool whose code it never checked -- and the record is what every later command
+  // starts from. It reads the chain rather than the artifact it just deployed from, so a
+  // creation transaction that landed as something other than what was compiled is caught
+  // here, before the address is written down or published.
+  await assertPoolRuntimeCodeMatchesLocalBuild(
+    publicClient,
+    pool.address,
+    readLocalPoolBuildArtifacts(),
+  );
   writeDeployment(deployment);
 }
 
