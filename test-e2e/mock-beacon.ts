@@ -88,6 +88,24 @@ export function freshPredepositValidator(withdrawalCredentials: Hex): ValidatorS
   };
 }
 
+/// A validator the exit preflight will accept: active, unexited, unslashed, and activated
+/// long enough ago to be past `SHARD_COMMITTEE_PERIOD` at the head slot below.
+export function activeValidator(withdrawalCredentials: Hex): ValidatorState {
+  return {
+    present: true,
+    index: "1863048",
+    status: "active_ongoing",
+    balanceGwei: "32000000000",
+    effectiveBalanceGwei: "32000000000",
+    slashed: false,
+    withdrawalCredentials,
+    activationEligibilityEpoch: "356100",
+    activationEpoch: "356200",
+    exitEpoch: FAR_FUTURE_EPOCH,
+    withdrawableEpoch: FAR_FUTURE_EPOCH,
+  };
+}
+
 export function absentValidator(): ValidatorState {
   return { ...freshPredepositValidator(`0x${"00".repeat(32)}`), present: false };
 }

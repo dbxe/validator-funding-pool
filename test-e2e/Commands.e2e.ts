@@ -10,6 +10,7 @@ import {
   DEFAULT_DEPOSIT_CONTRACT,
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
   deriveWithdrawalCredentials,
+  formatWei,
   type DeploymentRecord,
 } from "../scripts/lib/common.js";
 import { buildDepositData, writeDepositDataFile, type GeneratedDepositData } from "./deposit-data.js";
@@ -22,6 +23,7 @@ import {
 } from "./local-chain.js";
 import {
   absentValidator,
+  activeValidator,
   freshPredepositValidator,
   GENESIS_FORK_VERSION,
   MockBeaconNode,
@@ -710,7 +712,49 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
   });
 
   // -------------------------------------------------------------------------
-  // 12. The ToppedUp plain-transfer race, on a pool of its own
+  // 12. request-exit, against the real EIP-7002 predeploy
+  // -------------------------------------------------------------------------
+
+  it("request-exit sends a full-exit request once the validator is exit-eligible", async () => {
+    // The fee comes from the real predeploy runtime, not a mock: `currentExitRequestFee`
+    // staticcalls it with empty calldata and requires exactly 32 bytes back, and
+    // `requestExit` forwards the live fee and refunds the rest in the same transaction.
+    const fee = await readPool<bigint>("currentExitRequestFee");
+    assert.ok(fee > 0n, "the EIP-7002 predeploy reported a zero fee");
+
+    const belowFee = await beacon.withScenario(
+      () => beacon.setValidator(deposits.pubkey, activeValidator(withdrawalCredentials)),
+      () =>
+        runCommand({ script: "request-exit", env: asOperator({ MAX_FEE_WEI: (fee - 1n).toString() }) }),
+    );
+    expectFailure(belowFee);
+    assertReadableFailure(
+      belowFee,
+      "request-exit",
+      `MAX_FEE_WEI ${formatWei(fee - 1n)} is below the current EIP-7002 fee ${formatWei(fee)}`,
+    );
+    assertOutputLacks(belowFee, "Exit requested in block");
+    assert.equal(await readPool<bigint>("exitRequestAttemptCount"), 0n);
+
+    const result = await beacon.withScenario(
+      () => beacon.setValidator(deposits.pubkey, activeValidator(withdrawalCredentials)),
+      () => runCommand({ script: "request-exit", env: asOperator() }),
+    );
+
+    expectSuccess(result);
+    assertActiveSignerPrinted(result, "request-exit", operator.address.toLowerCase());
+    assertOutputContains(result, "request-exit beacon exit preflight passed");
+    assertOutputContains(result, "request-exit beacon SHARD_COMMITTEE_PERIOD: 256");
+    assertOutputContains(result, `Requesting full exit for ${deposits.pubkey}`);
+    assertOutputContains(result, `EIP-7002 fee: ${fee} wei`);
+    assertOutputContains(result, "Exit requested in block ");
+
+    assert.equal(await readPool<bigint>("exitRequestAttemptCount"), 1n);
+    assert.equal(await readPool<bigint>("lastExitRequestFeePaid"), fee);
+  });
+
+  // -------------------------------------------------------------------------
+  // 13. The ToppedUp plain-transfer race, on a pool of its own
   // -------------------------------------------------------------------------
 
   it("a plain transfer that lands after the pool tops up is reported as uncredited", async () => {
