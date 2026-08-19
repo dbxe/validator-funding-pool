@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { Address, Hex } from "viem";
+import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "viem";
 
 import {
   assertActiveSigner,
   assertDeployedAt,
+  assertFundingWasCredited,
   assertStillFundable,
   envBigInt,
   fundViaPlainTransfer,
@@ -113,6 +114,15 @@ async function silentlyAsync<T>(run: () => Promise<T>): Promise<T> {
   const log = captureLog();
   try {
     return await run();
+  } finally {
+    log.restore();
+  }
+}
+
+function silently<T>(run: () => T): T {
+  const log = captureLog();
+  try {
+    return run();
   } finally {
     log.restore();
   }
@@ -547,6 +557,151 @@ describe("fundViaPlainTransfer", function () {
       }
     } finally {
       restoreEnv("FUND_VIA_TRANSFER", original);
+    }
+  });
+});
+
+describe("assertFundingWasCredited", function () {
+  // Encoded independently of the implementation, from the event signatures in
+  // `contracts/ValidatorFundingPool.sol:117-123` and `:139`.
+  const POOL_EVENTS = [
+    {
+      type: "event",
+      name: "ParticipantFunded",
+      inputs: [
+        { name: "attempt", type: "uint256", indexed: true },
+        { name: "participant", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+        { name: "participantTotal", type: "uint256", indexed: false },
+        { name: "attemptTotal", type: "uint256", indexed: false },
+      ],
+    },
+    {
+      type: "event",
+      name: "EthReceivedViaCall",
+      inputs: [
+        { name: "sender", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+    // An event the check must ignore rather than choke on.
+    {
+      type: "event",
+      name: "PoolToppedUp",
+      inputs: [],
+    },
+  ] as const;
+
+  const AMOUNT = 1_000n;
+
+  function participantFunded(participant: Address, amount: bigint, address: Address = POOL) {
+    return {
+      address,
+      topics: encodeEventTopics({
+        abi: POOL_EVENTS,
+        eventName: "ParticipantFunded",
+        args: { attempt: 3n, participant },
+      }) as Hex[],
+      data: encodeAbiParameters(
+        [{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
+        [amount, amount, amount],
+      ),
+    };
+  }
+
+  function ethReceivedViaCall(sender: Address, amount: bigint) {
+    return {
+      address: POOL,
+      topics: encodeEventTopics({ abi: POOL_EVENTS, eventName: "EthReceivedViaCall", args: { sender } }) as Hex[],
+      data: encodeAbiParameters([{ type: "uint256" }], [amount]),
+    };
+  }
+
+  const poolToppedUp = {
+    address: POOL,
+    topics: encodeEventTopics({ abi: POOL_EVENTS, eventName: "PoolToppedUp" }) as Hex[],
+    data: "0x" as Hex,
+  };
+
+  it("passes when the receipt credits the signer with exactly the sent amount", async function () {
+    const log = captureLog();
+    try {
+      assertFundingWasCredited(
+        { logs: [poolToppedUp, participantFunded(SIGNER, AMOUNT)] },
+        POOL,
+        SIGNER,
+        AMOUNT,
+        "fund",
+      );
+      assert.equal(log.lines.length, 1);
+      assert.match(log.lines[0], /fund credit confirmed from the receipt/);
+      assert.match(log.lines[0], new RegExp(SIGNER));
+    } finally {
+      log.restore();
+    }
+
+    // Case differences between the log's address and the signer are not differences.
+    assert.doesNotThrow(() =>
+      silently(() =>
+        assertFundingWasCredited(
+          { logs: [participantFunded(SIGNER.toUpperCase().replace("0X", "0x") as Address, AMOUNT)] },
+          POOL.toUpperCase().replace("0X", "0x") as Address,
+          SIGNER,
+          AMOUNT,
+          "fund",
+        ),
+      ),
+    );
+  });
+
+  it("is fatal for an EthReceivedViaCall-only receipt, naming what actually happened", function () {
+    assert.throws(
+      () =>
+        assertFundingWasCredited(
+          { logs: [ethReceivedViaCall(SIGNER, AMOUNT)] },
+          POOL,
+          SIGNER,
+          AMOUNT,
+          "fund",
+        ),
+      (error: Error) => {
+        assert.match(error.message, /was NOT credited as funding/);
+        assert.match(error.message, /emitted EthReceivedViaCall/);
+        assert.match(error.message, /POST-TOP-UP PROCEEDS/);
+        assert.match(error.message, /recovers only their own share/);
+        assert.match(error.message, /DETECTS an uncredited transfer, it cannot prevent one/);
+        assert.match(error.message, /npm run status/);
+        return true;
+      },
+    );
+  });
+
+  it("is fatal when the credited amount is not the amount that was sent", function () {
+    assert.throws(
+      () =>
+        assertFundingWasCredited(
+          { logs: [participantFunded(SIGNER, AMOUNT - 1n)] },
+          POOL,
+          SIGNER,
+          AMOUNT,
+          "fund",
+        ),
+      /the pool credited 999 wei .*, not the 1000 wei .* that was sent/,
+    );
+  });
+
+  it("is fatal when the credited participant is somebody else, or the log is another contract's", function () {
+    for (const logs of [
+      [participantFunded(OTHER_SIGNER, AMOUNT)],
+      // Right event, right participant, right amount — emitted by a contract that is not
+      // the pool. An impostor cannot forge the pool's credit.
+      [participantFunded(SIGNER, AMOUNT, OTHER_SIGNER)],
+      [],
+    ]) {
+      assert.throws(
+        () => assertFundingWasCredited({ logs }, POOL, SIGNER, AMOUNT, "fund"),
+        /emitted no ParticipantFunded for .* at all/,
+      );
     }
   });
 });

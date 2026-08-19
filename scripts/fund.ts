@@ -6,6 +6,7 @@ import {
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorStillFresh,
   assertDeploymentIntegrity,
+  assertFundingWasCredited,
   assertStillFundable,
   envBigInt,
   formatWei,
@@ -118,6 +119,11 @@ async function main() {
     ? await wallet.sendTransaction({ to: deployment.pool, value: amount })
     : await pool.write.fund({ value: amount });
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "fund");
+  // A successful receipt is not proof of funding. On the plain-transfer path a pool that
+  // reached `ToppedUp` accepts the ETH as proceeds and emits `EthReceivedViaCall` instead
+  // of crediting it, and the transaction still succeeds. The receipt's own logs are what
+  // tell the two apart.
+  assertFundingWasCredited(receipt, deployment.pool, signer, amount, "fund");
   console.log(`Funded in block ${receipt.blockNumber}`);
 }
 

@@ -6,6 +6,7 @@ import { PublicKey, Signature, verify } from "@chainsafe/blst";
 import { DOMAIN_DEPOSIT } from "@lodestar/params";
 import { ssz } from "@lodestar/types";
 import {
+  decodeEventLog,
   formatEther,
   isAddress,
   keccak256,
@@ -1972,6 +1973,121 @@ export function fundViaPlainTransfer(networkConfig: { ledgerAccounts?: readonly 
     throw new Error(`FUND_VIA_TRANSFER must be 0 or 1, got ${override}`);
   }
   return (networkConfig.ledgerAccounts ?? []).length > 0;
+}
+
+/// The two pool events that tell apart the only two things the pool can do with ETH sent to
+/// it on the funding path. `ValidatorFundingPool.sol:117-123` and `:139`; `_fund` emits the
+/// first (`:586-592`) on both the `fund()` and the plain-transfer route, and `receive()`
+/// emits the second (`:256`) when it accepts ETH as post-top-up proceeds instead.
+const POOL_FUNDING_EVENTS_ABI = [
+  {
+    type: "event",
+    name: "ParticipantFunded",
+    inputs: [
+      { name: "attempt", type: "uint256", indexed: true },
+      { name: "participant", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "participantTotal", type: "uint256", indexed: false },
+      { name: "attemptTotal", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "EthReceivedViaCall",
+    inputs: [
+      { name: "sender", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+/// The receipt fields the funding credit check reads. A subset of viem's
+/// `TransactionReceipt`, so a real receipt satisfies it structurally.
+export interface ObservedLog {
+  address: Address;
+  topics: readonly Hex[];
+  data: Hex;
+}
+
+/// Requires the mined funding receipt to prove the ETH was CREDITED, not merely accepted.
+///
+/// A successful receipt from the right sender is not evidence that funding happened. The
+/// pool's `receive()` accepts ETH in the `ToppedUp` state as pool proceeds and emits
+/// `EthReceivedViaCall` instead of crediting the sender — the transaction succeeds, the
+/// balance moves, and the sender recovers only their pro-rata share. Both plain-transfer
+/// routes into that state (the double-send race and the lying-EL-RPC route, `SECURITY.md`
+/// §5, "The `ToppedUp` plain-transfer race") end in exactly this receipt, and every
+/// pre-broadcast check read the same endpoint that let it happen. The receipt itself is the
+/// one piece of evidence that does not come from a fresh read: it is authoritative about
+/// what the pool did, and immune to an endpoint that would lie about it afterwards.
+///
+/// This is detection, not prevention — the ETH has already moved. It converts a silent
+/// donation into a loud, named failure at the moment it happens.
+export function assertFundingWasCredited(
+  receipt: { logs: readonly ObservedLog[] },
+  poolAddress: Address,
+  signer: Address,
+  amount: bigint,
+  label: string,
+): void {
+  const credited: bigint[] = [];
+  const acceptedAsProceeds: bigint[] = [];
+
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== poolAddress.toLowerCase()) continue;
+    let decoded: ReturnType<typeof decodeEventLog<typeof POOL_FUNDING_EVENTS_ABI>>;
+    try {
+      decoded = decodeEventLog({
+        abi: POOL_FUNDING_EVENTS_ABI,
+        data: log.data,
+        topics: log.topics as [Hex, ...Hex[]],
+      });
+    } catch {
+      // Any other pool event, `AccountingSnapshot` above all, is not this decision's
+      // business.
+      continue;
+    }
+    if (
+      decoded.eventName === "ParticipantFunded" &&
+      decoded.args.participant.toLowerCase() === signer.toLowerCase()
+    ) {
+      credited.push(decoded.args.amount);
+    }
+    if (
+      decoded.eventName === "EthReceivedViaCall" &&
+      decoded.args.sender.toLowerCase() === signer.toLowerCase()
+    ) {
+      acceptedAsProceeds.push(decoded.args.amount);
+    }
+  }
+
+  if (credited.length === 1 && credited[0] === amount) {
+    console.log(
+      `${label} credit confirmed from the receipt: the pool emitted ParticipantFunded for ` +
+        `${signer} with exactly ${formatWei(amount)}`,
+    );
+    return;
+  }
+
+  const whatHappened =
+    acceptedAsProceeds.length > 0
+      ? `the pool emitted EthReceivedViaCall for ${signer} (${acceptedAsProceeds
+          .map(formatWei)
+          .join(", ")}) and no ParticipantFunded. The ETH was accepted as POST-TOP-UP ` +
+        `PROCEEDS, not as credited funding: it is now shared pro rata by final credited ` +
+        `weight, and ${signer} recovers only their own share of it through claim()`
+      : credited.length === 0
+        ? `the pool emitted no ParticipantFunded for ${signer} at all`
+        : `the pool credited ${credited.map(formatWei).join(", ")} to ${signer}, not the ` +
+          `${formatWei(amount)} that was sent`;
+
+  throw new Error(
+    `FATAL: ${label} transaction succeeded but the ${formatWei(amount)} it sent was NOT ` +
+      `credited as funding. Reading the receipt's own logs, ${whatHappened}. The transaction is ` +
+      `already on chain: this check DETECTS an uncredited transfer, it cannot prevent one. Run ` +
+      `"npm run status" and reconcile the pool's actual state — activeFundedWeiOf, ` +
+      `refundableWeiOf, and claimable for ${signer} — before sending anything else`,
+  );
 }
 
 interface FundingStateReader {
