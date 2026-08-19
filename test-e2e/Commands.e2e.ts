@@ -974,6 +974,48 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputLacks(result, "active signer:");
   });
 
+  it("EXPECTED_CHAIN_ID pins the connection, and refuses a chain that is not it", async () => {
+    // The pin is hardhat's own `chainId` field on the http network, which installs a
+    // ChainIdValidatorHandler ahead of every other request handler. Mainnet operators set
+    // EXPECTED_CHAIN_ID=1; here the chain is 31337, so declaring mainnet must refuse.
+    const wrong = expectFailure(
+      await runCommand({
+        script: "status",
+        network: "read",
+        env: {
+          RPC_URL: chain.url,
+          DEPLOYMENT_FILE: deploymentFile,
+          PRIVATE_KEY: undefined,
+          EXPECTED_CHAIN_ID: "1",
+        },
+      }),
+    );
+    assertReadableFailure(
+      wrong,
+      "status",
+      `HHE708: Hardhat was set to use chain id "1", but connected to a chain with id ` +
+        `"${LOCAL_CHAIN_ID}".`,
+    );
+    assertOutputLacks(wrong, `Pool: ${pool}`);
+
+    // And the matching declaration changes nothing, which is what keeps the devnet and
+    // testnet flows working: the field is absent entirely when the variable is unset.
+    const right = expectSuccess(
+      await runCommand({
+        script: "status",
+        network: "read",
+        env: {
+          RPC_URL: chain.url,
+          DEPLOYMENT_FILE: deploymentFile,
+          PRIVATE_KEY: undefined,
+          EXPECTED_CHAIN_ID: `${LOCAL_CHAIN_ID}`,
+        },
+      }),
+    );
+    assertOutputContains(right, `Pool: ${pool}`);
+    assertOutputContains(right, "State: ToppedUp (3)");
+  });
+
   it("refuses --no-compile, in the exact form npm passes it through", async () => {
     // `npm run status -- --no-compile` is how an operator would type it, and npm forwards
     // everything after `--` to the underlying `hardhat run ... --network read`. The flag

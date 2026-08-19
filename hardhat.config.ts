@@ -55,6 +55,40 @@ function ledgerAccounts(): string[] {
   return [address];
 }
 
+/// The chain id every http network is pinned to, or `undefined` when nothing is
+/// declared.
+///
+/// Hardhat installs a `ChainIdValidatorHandler` as the FIRST request handler of an
+/// http network whose config carries a `chainId`
+/// (`hardhat/dist/src/internal/builtin-plugins/network-manager/request-handlers/handlers-array.js`
+/// lines 20-22). It answers the first request that is not `eth_chainId` or
+/// `net_version` by fetching the connection's chain id and throwing
+/// `HHE708: Hardhat was set to use chain id "<pinned>", but connected to a chain
+/// with id "<actual>"` on a mismatch
+/// (`.../handlers/chain-id/chain-id-handler.js`). Verified by experiment on
+/// hardhat 3.12.0 against a local chain: pinned `1` against chain 31337 threw
+/// HHE708 before the wallet client was even obtained — nothing signed, nothing
+/// sent — and the matching pin ran the command normally. `SECURITY.md` §5 records
+/// the measurement, including what the pin does NOT close.
+///
+/// Read eagerly from the environment rather than through `configVariable()`,
+/// exactly like `LEDGER_ADDRESS`: the field is a plain number, not a
+/// `SensitiveString`, and a chain id is public. Unset leaves the field off
+/// entirely, which is what keeps devnet and testnet runs working — the handler is
+/// installed only when the field is present.
+function expectedChainId(): number | undefined {
+  const declared = process.env.EXPECTED_CHAIN_ID ?? "";
+  if (declared === "") return undefined;
+  if (!/^[1-9][0-9]*$/.test(declared)) {
+    throw new Error(
+      `EXPECTED_CHAIN_ID ${declared} is not a canonical positive decimal integer: no 0x ` +
+        `prefix, no sign, no leading zeros, no separators, no surrounding whitespace. ` +
+        `Mainnet is EXPECTED_CHAIN_ID=1`,
+    );
+  }
+  return Number(declared);
+}
+
 const config: HardhatUserConfig = {
   plugins: [hardhatToolboxViemPlugin, hardhatLedgerPlugin],
   solidity: {
@@ -81,6 +115,7 @@ const config: HardhatUserConfig = {
     rpc: {
       type: "http",
       chainType: "l1",
+      chainId: expectedChainId(),
       url: configVariable("RPC_URL"),
       accounts: [configVariable("PRIVATE_KEY")],
     },
@@ -95,6 +130,7 @@ const config: HardhatUserConfig = {
     read: {
       type: "http",
       chainType: "l1",
+      chainId: expectedChainId(),
       url: configVariable("RPC_URL"),
     },
     // Hardware-wallet path. No `accounts` entry: the signing key never reaches
@@ -103,6 +139,7 @@ const config: HardhatUserConfig = {
     [LEDGER_NETWORK]: {
       type: "http",
       chainType: "l1",
+      chainId: expectedChainId(),
       url: configVariable("RPC_URL"),
       ledgerAccounts: ledgerAccounts(),
     },
