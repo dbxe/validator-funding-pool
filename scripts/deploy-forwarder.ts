@@ -1,23 +1,41 @@
 import { network } from "hardhat";
 
 import {
+  assertActiveSigner,
+  assertDeployedAt,
   assertDeploymentIntegrity,
   assertFeeRecipientForwarderMatchesDeployment,
   readDeployment,
+  waitForSenderVerifiedReceipt,
   writeDeployment,
 } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "deploy-forwarder");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
   await assertDeploymentIntegrity(publicClient, pool, deployment);
 
-  const forwarder = await viem.deployContract("FeeRecipientForwarder", [deployment.pool]);
+  // See deploy.ts: sendDeploymentTransaction is used for the transaction hash the
+  // post-broadcast sender check needs.
+  const { contract: forwarder, deploymentTransaction } = await viem.sendDeploymentTransaction(
+    "FeeRecipientForwarder",
+    [deployment.pool],
+  );
+  const deploymentReceipt = await waitForSenderVerifiedReceipt(
+    publicClient,
+    deploymentTransaction.hash,
+    signer,
+    "deploy-forwarder",
+  );
+  assertDeployedAt(deploymentReceipt.contractAddress, forwarder.address, "FeeRecipientForwarder");
+
   const updatedDeployment = {
     ...deployment,
     feeRecipientForwarder: forwarder.address,

@@ -185,6 +185,113 @@ const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystemContrac
   },
 };
 
+/// Minimal view of a resolved `network.create()` connection. Scripts pass the whole
+/// connection; only these two fields are read.
+export interface SignerConnection {
+  networkName: string;
+  networkConfig: { ledgerAccounts?: readonly string[] };
+}
+
+interface SenderVerifiedReceipt {
+  from: Address;
+  blockNumber: bigint;
+}
+
+/// Asserts that the wallet a script is about to sign with is the wallet the operator
+/// intended, and prints it on every network.
+///
+/// The Ledger connection is detected from the resolved connection rather than from
+/// argv. `@nomicfoundation/hardhat-ledger` writes `ledgerAccounts` onto every resolved
+/// network config at config-resolution time, defaulting to `[]`
+/// (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/config/resolve-ledger-user-config.js`
+/// lines 6-10), so the field is non-empty exactly for the network whose signing is
+/// routed through the device. It describes the connection that was actually created,
+/// which `--network` argv scanning does not: a script cannot see task-level network
+/// overrides, and a second parse is a second place to get the spelling wrong.
+/// `networkName` was rejected as the hook because it only names a config entry and
+/// proves nothing about whether a device sits in the signing path.
+///
+/// On the Ledger path the active address must equal `LEDGER_ADDRESS`. This is the
+/// account-confusion guard: `eth_accounts` on the ledger network returns the node's
+/// own accounts first and the device account last
+/// (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/hook-handlers/network.js`
+/// lines 47-63), so a node that exposes unlocked accounts would otherwise have every
+/// script sign with one of them.
+export function assertActiveSigner(
+  connection: SignerConnection,
+  activeAddress: Address,
+  label: string,
+): Address {
+  console.log(`${label} active signer: ${activeAddress} (network ${connection.networkName})`);
+
+  const ledgerAccounts = connection.networkConfig.ledgerAccounts ?? [];
+  if (ledgerAccounts.length === 0) return activeAddress;
+
+  const ledgerAddress = process.env.LEDGER_ADDRESS ?? "";
+  if (ledgerAddress === "") {
+    throw new Error(
+      `${label} is connected to a Ledger-signing network but LEDGER_ADDRESS is unset; ` +
+        `set it to the device account and re-run`,
+    );
+  }
+  if (activeAddress.toLowerCase() !== ledgerAddress.toLowerCase()) {
+    throw new Error(
+      `${label} would sign with ${activeAddress}, not the Ledger account ${ledgerAddress}. ` +
+        `The connected node exposes accounts of its own and they are ordered ahead of the ` +
+        `device account; point RPC_URL at a node with no unlocked accounts and re-run`,
+    );
+  }
+  return activeAddress;
+}
+
+/// Waits for a broadcast transaction and asserts the chain recorded the intended sender.
+///
+/// This is detection, not prevention: the transaction is already mined by the time the
+/// mismatch is visible, and nothing here can undo it. It exists because
+/// `@nomicfoundation/hardhat-ledger` caches an address-to-derivation-path mapping and
+/// returns the cached path without re-deriving it on the connected device
+/// (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/handler.js` lines
+/// 190-192, cache file `<hardhat config dir>/ledger/accounts.json` per
+/// `internal/cache.js`). A device or seed swapped since the mapping was written signs at
+/// the cached path with a different key, and the plugin reports no error.
+export async function waitForSenderVerifiedReceipt<T extends SenderVerifiedReceipt>(
+  publicClient: { waitForTransactionReceipt: (args: { hash: Hex }) => Promise<T> },
+  hash: Hex,
+  intendedSender: Address,
+  label: string,
+): Promise<T> {
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.from.toLowerCase() !== intendedSender.toLowerCase()) {
+    throw new Error(
+      `FATAL SIGNER MISMATCH: ${label} transaction ${hash} was mined with from=${receipt.from}, ` +
+        `but this script signed for ${intendedSender}. The transaction is already on chain: ` +
+        `this check DETECTS a swapped signer, it cannot prevent one. A Ledger with a different ` +
+        `device or seed than the one that populated the plugin's cached derivation path produces ` +
+        `exactly this. Stop, run "npm run status", and reconcile pool state before sending anything else`,
+    );
+  }
+  return receipt;
+}
+
+/// Confirms the mined deployment receipt created the contract at the address the
+/// deployment helper predicted from sender and nonce.
+export function assertDeployedAt(
+  receiptContractAddress: Address | null | undefined,
+  expected: Address,
+  label: string,
+) {
+  if (
+    receiptContractAddress === null ||
+    receiptContractAddress === undefined ||
+    receiptContractAddress.toLowerCase() !== expected.toLowerCase()
+  ) {
+    throw new Error(
+      `${label} deployment receipt created a contract at ${receiptContractAddress ?? "<none>"}, ` +
+        `not the expected ${expected}`,
+    );
+  }
+}
+
 export function asHex(value: string): Hex {
   return (/^0x/i.test(value) ? `0x${value.slice(2)}` : `0x${value}`) as Hex;
 }

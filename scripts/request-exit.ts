@@ -1,19 +1,23 @@
 import { network } from "hardhat";
 
 import {
+  assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForExit,
   assertDeploymentIntegrity,
   envBigInt,
   formatWei,
   readDeployment,
+  waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "request-exit");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
@@ -33,7 +37,7 @@ async function main() {
   console.log(`EIP-7002 fee: ${formatWei(fee)}`);
   console.log(`Max fee sent: ${formatWei(maxFee)}`);
   const hash = await pool.write.requestExit([maxFee], { value: maxFee });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "request-exit");
   console.log(`Exit requested in block ${receipt.blockNumber}`);
 }
 

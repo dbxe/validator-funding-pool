@@ -1,6 +1,7 @@
 import { network } from "hardhat";
 
 import {
+  assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorAbsent,
   assertDeploymentIntegrity,
@@ -11,22 +12,25 @@ import {
   readPredepositAndTopUpDepositData,
   TOP_UP_GWEI,
   validateDepositData,
+  waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
   const deposits = readPredepositAndTopUpDepositData();
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "commit-predeposit");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
   const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
   await assertBeaconMatchesExecutionChain(deployment, liveConfig, "commit-predeposit");
 
-  if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
-    throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);
+  if (signer.toLowerCase() !== liveConfig.operator.toLowerCase()) {
+    throw new Error(`commit-predeposit must be signed by the operator ${liveConfig.operator}`);
   }
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
@@ -56,7 +60,12 @@ async function main() {
     [predeposit.pubkey, predeposit.signature, predeposit.depositDataRoot, topUp.signature, topUp.depositDataRoot],
     { value: await pool.read.PREDEPOSIT_WEI() },
   );
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(
+    publicClient,
+    hash,
+    signer,
+    "commit-predeposit",
+  );
   console.log(`Predeposited in block ${receipt.blockNumber}`);
   console.log("Participants should wait for beacon confirmation before funding.");
 }

@@ -1,27 +1,31 @@
 import { network } from "hardhat";
 
 import {
+  assertActiveSigner,
   assertDeploymentIntegrity,
   parseAddressList,
   parseBigIntList,
   readDeployment,
   VALIDATOR_DEPOSIT_GWEI,
+  waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 const GWEI = 1_000_000_000n;
 
 async function main() {
   const deployment = readDeployment();
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "open-funding-attempt");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
   const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
 
-  if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
-    throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);
+  if (signer.toLowerCase() !== liveConfig.operator.toLowerCase()) {
+    throw new Error(`open-funding-attempt must be signed by the operator ${liveConfig.operator}`);
   }
 
   const participants = process.env.PARTICIPANTS
@@ -40,7 +44,12 @@ async function main() {
     console.log(`Participant ${i}: ${participants[i]} target=${fundingTargetsGwei[i]} Gwei`);
   }
   const hash = await pool.write.openFundingAttempt([participants, fundingTargetsWei]);
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(
+    publicClient,
+    hash,
+    signer,
+    "open-funding-attempt",
+  );
   console.log(`Opened in block ${receipt.blockNumber}`);
   console.log(`Funding deadline: ${await pool.read.fundingDeadline()}`);
 }

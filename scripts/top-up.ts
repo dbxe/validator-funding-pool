@@ -1,25 +1,29 @@
 import { network } from "hardhat";
 
 import {
+  assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForTopUp,
   assertDeploymentIntegrity,
   readDeployment,
+  waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "top-up");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
   const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
   await assertBeaconMatchesExecutionChain(deployment, liveConfig, "top-up");
 
-  if (wallet.account.address.toLowerCase() !== liveConfig.operator.toLowerCase()) {
-    throw new Error(`PRIVATE_KEY must be the operator ${liveConfig.operator}`);
+  if (signer.toLowerCase() !== liveConfig.operator.toLowerCase()) {
+    throw new Error(`top-up must be signed by the operator ${liveConfig.operator}`);
   }
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
@@ -30,7 +34,7 @@ async function main() {
   console.log(`Validator pubkey: ${pubkey}`);
   console.log(`Top-up deposit data root: ${await pool.read.topUpDepositDataRoot()}`);
   const hash = await pool.write.topUpValidator();
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "top-up");
   console.log(`Topped up in block ${receipt.blockNumber}`);
 }
 

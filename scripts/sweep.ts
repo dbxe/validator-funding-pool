@@ -1,10 +1,12 @@
 import { network } from "hardhat";
 
 import {
+  assertActiveSigner,
   assertDeploymentIntegrity,
   assertFeeRecipientForwarderMatchesDeployment,
   formatWei,
   readDeployment,
+  waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 async function main() {
@@ -13,9 +15,11 @@ async function main() {
     throw new Error("Deployment record has no feeRecipientForwarder; run deploy-forwarder first");
   }
 
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "sweep");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
   await assertDeploymentIntegrity(publicClient, pool, deployment);
   const forwarder = await viem.getContractAt(
@@ -33,7 +37,7 @@ async function main() {
   console.log(`Pool balance before: ${formatWei(poolBalanceBefore)}`);
 
   const hash = await forwarder.write.sweep();
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "sweep");
   const forwarderBalanceAfter = await publicClient.getBalance({
     address: deployment.feeRecipientForwarder,
   });

@@ -2,6 +2,7 @@ import { network } from "hardhat";
 import type { Address } from "viem";
 
 import {
+  assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForFunding,
   assertDeploymentIntegrity,
@@ -14,6 +15,7 @@ import {
   TOP_UP_GWEI,
   validateDepositData,
   VALIDATOR_DEPOSIT_WEI,
+  waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 const GWEI = 1_000_000_000n;
@@ -26,6 +28,7 @@ async function main() {
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(connection, wallet.account.address, "fund");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
@@ -71,11 +74,11 @@ async function main() {
   }
   await assertBeaconValidatorReadyForFunding(predeposit.pubkey, expectedCredentials, "fund");
 
-  await printAndCheckFundingReview(pool, wallet.account.address);
+  await printAndCheckFundingReview(pool, signer);
 
-  const remaining = await pool.read.fundingRemainingWeiOf([wallet.account.address]);
+  const remaining = await pool.read.fundingRemainingWeiOf([signer]);
   if (remaining <= 0n) {
-    throw new Error(`No remaining funding cap for ${wallet.account.address}`);
+    throw new Error(`No remaining funding cap for ${signer}`);
   }
 
   const amount = envBigInt("AMOUNT_WEI", remaining);
@@ -85,19 +88,19 @@ async function main() {
 
   const viaTransfer = fundViaPlainTransfer(connection.networkConfig);
   console.log(
-    `Funding ${deployment.pool} from ${wallet.account.address}: ${formatWei(amount)} ` +
+    `Funding ${deployment.pool} from ${signer}: ${formatWei(amount)} ` +
       `via ${viaTransfer ? "plain transfer (zero calldata)" : "fund() calldata"}`,
   );
 
   // Final race-narrowing re-read, immediately before signing. It cannot close the
   // race, only shorten it: see "Plain-Transfer Funding" in the README for the one
   // window where a plain transfer behaves differently from a reverting fund().
-  await assertStillFundable(pool, publicClient, wallet.account.address, amount);
+  await assertStillFundable(pool, publicClient, signer, amount);
 
   const hash = viaTransfer
     ? await wallet.sendTransaction({ to: deployment.pool, value: amount })
     : await pool.write.fund({ value: amount });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "fund");
   console.log(`Funded in block ${receipt.blockNumber}`);
 }
 

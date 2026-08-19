@@ -1,12 +1,23 @@
 import { network } from "hardhat";
 
-import { assertDeploymentIntegrity, readDeployment } from "./lib/common.js";
+import {
+  assertActiveSigner,
+  assertDeploymentIntegrity,
+  readDeployment,
+  waitForSenderVerifiedReceipt,
+} from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
-  const { viem } = await network.create();
+  const connection = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
+  const signer = assertActiveSigner(
+    connection,
+    wallet.account.address,
+    "close-expired-funding-attempt",
+  );
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
@@ -14,7 +25,12 @@ async function main() {
 
   console.log(`Closing expired funding attempt for ${deployment.pool}`);
   const hash = await pool.write.closeExpiredFundingAttempt();
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForSenderVerifiedReceipt(
+    publicClient,
+    hash,
+    signer,
+    "close-expired-funding-attempt",
+  );
   console.log(`Closed in block ${receipt.blockNumber}`);
 }
 
