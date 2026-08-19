@@ -6,6 +6,7 @@ import {
   parseAddressList,
   parseBigIntList,
   readDeployment,
+  reportFatalError,
   VALIDATOR_DEPOSIT_GWEI,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
@@ -54,7 +55,4 @@ async function main() {
   console.log(`Funding deadline: ${await pool.read.fundingDeadline()}`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "open-funding-attempt"));

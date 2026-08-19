@@ -9,6 +9,7 @@ import {
   assertFundingWasCredited,
   assertStillFundable,
   beaconApiUrl,
+  describeFatalError,
   envBigInt,
   fundViaPlainTransfer,
   optionalEnvBigInt,
@@ -1011,5 +1012,74 @@ describe("assertDeployedAt", function () {
         /ValidatorFundingPool deployment receipt created a contract at/,
       );
     }
+  });
+});
+
+describe("describeFatalError", function () {
+  /// One level of a viem error object. viem's error classes are ordinary objects carrying
+  /// these fields plus a `cause`, so a literal is structurally what the walker sees.
+  function viemLevel(fields: Record<string, unknown>): Record<string, unknown> {
+    return fields;
+  }
+
+  it("prints an ordinary Error's message in full", function () {
+    // Errors raised by this codebase ARE the guidance: their whole text is actionable and
+    // none of it may be trimmed to a first line.
+    const message =
+      "fund head beacon validator balance changed from 1000000000 Gwei at the preflight to " +
+      "2000000000 Gwei immediately before broadcast; nothing was sent. Re-run this command " +
+      "so the preflight decides on the state that exists now";
+    assert.deepEqual(describeFatalError(new Error(message)), [message]);
+  });
+
+  it("summarises a viem revert and hoists the decoded custom error to the top", function () {
+    const lines = describeFatalError(
+      viemLevel({
+        // The long `message` a viem error carries is the one with the ABI in it. It is
+        // never printed when a `shortMessage` exists.
+        message: `The contract function "closeExpiredFundingAttempt" reverted.\n\n${"abi ".repeat(400)}`,
+        shortMessage: 'The contract function "closeExpiredFundingAttempt" reverted.',
+        functionName: "closeExpiredFundingAttempt",
+        contractAddress: POOL,
+        sender: SIGNER,
+        details:
+          "VM Exception while processing transaction: reverted with custom error 'FundingStillOpen()'",
+        cause: viemLevel({
+          shortMessage: 'The contract function "closeExpiredFundingAttempt" reverted.',
+          data: { errorName: "FundingStillOpen", args: [] },
+        }),
+      }),
+    );
+
+    assert.deepEqual(lines, [
+      'The contract function "closeExpiredFundingAttempt" reverted.',
+      "Contract error: FundingStillOpen()",
+      `Contract call: closeExpiredFundingAttempt() at ${POOL}`,
+      `Sender: ${SIGNER}`,
+      "Details: VM Exception while processing transaction: reverted with custom error 'FundingStillOpen()'",
+    ]);
+    assert.ok(!lines.some((line) => line.includes("abi abi")));
+  });
+
+  it("renders a custom error's arguments, which are what say how far off the value was", function () {
+    const lines = describeFatalError(
+      viemLevel({
+        shortMessage: 'The contract function "requestExit" reverted.',
+        cause: viemLevel({ data: { errorName: "ExitFeeTooHigh", args: [3n, 2n] } }),
+      }),
+    );
+    assert.ok(lines.includes("Contract error: ExitFeeTooHigh(3, 2)"));
+  });
+
+  it("does not loop on a cyclic cause chain", function () {
+    const outer: Record<string, unknown> = { shortMessage: "outer" };
+    const inner: Record<string, unknown> = { shortMessage: "inner", cause: outer };
+    outer.cause = inner;
+    assert.deepEqual(describeFatalError(outer), ["outer", "inner"]);
+  });
+
+  it("says something for a thrown non-error", function () {
+    assert.deepEqual(describeFatalError("plain string"), ["plain string"]);
+    assert.deepEqual(describeFatalError(undefined), ["undefined"]);
   });
 });

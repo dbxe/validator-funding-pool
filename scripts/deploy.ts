@@ -13,6 +13,7 @@ import {
   envAddress,
   envBigInt,
   readLocalPoolBuildArtifacts,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
   writeDeployment,
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
@@ -100,7 +101,4 @@ async function main() {
   writeDeployment(deployment);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "deploy"));

@@ -5,6 +5,7 @@ import {
   formatWei,
   parseAddressList,
   readDeployment,
+  reportFatalError,
   warnOnPlaintextEndpoints,
 } from "./lib/common.js";
 
@@ -77,7 +78,4 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "status"));

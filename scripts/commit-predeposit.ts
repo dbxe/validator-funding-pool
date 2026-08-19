@@ -10,6 +10,7 @@ import {
   readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
+  reportFatalError,
   TOP_UP_GWEI,
   validateDepositData,
   waitForSenderVerifiedReceipt,
@@ -70,7 +71,4 @@ async function main() {
   console.log("Participants should wait for beacon confirmation before funding.");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "commit-predeposit"));

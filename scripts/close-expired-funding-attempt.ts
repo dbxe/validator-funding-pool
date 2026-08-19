@@ -4,6 +4,7 @@ import {
   assertActiveSigner,
   assertDeploymentIntegrity,
   readDeployment,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -34,7 +35,4 @@ async function main() {
   console.log(`Closed in block ${receipt.blockNumber}`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "close-expired-funding-attempt"));

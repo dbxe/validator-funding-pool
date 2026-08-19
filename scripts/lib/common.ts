@@ -306,6 +306,161 @@ export function warnOnPlaintextEndpoints() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Command failure presentation
+//
+// Every command ends in `main().catch(...)`. What that catch prints is the last
+// thing an operator reads about a capital operation that did not happen, and it
+// used to be `console.error(error)` on a viem error object: 566 lines of ABI and
+// stack frames with `Error: FundingStillOpen()` on line 13. The one actionable
+// line was there; nobody was going to find it.
+//
+// So the catch path is shared, and it prints the walked cause chain's short
+// messages instead. Nothing is hidden: `DEBUG=1` restores the complete object,
+// and the exit code is unchanged either way. Errors this codebase raises itself
+// are printed in full, because their whole text is the guidance.
+// ---------------------------------------------------------------------------
+
+/// How far down `cause` the description walks. viem nests three to four levels
+/// (`ContractFunctionExecutionError` -> `ContractFunctionRevertedError` ->
+/// `TransactionExecutionError` -> `RpcRequestError`); the bound is there so a cyclic or
+/// pathological chain cannot turn the summary back into a wall of text.
+const MAX_ERROR_CAUSE_DEPTH = 8;
+
+/// Set to `1` or `true` to get the raw error object back.
+const FULL_ERROR_DUMP_ENV = "DEBUG";
+
+export function fullErrorDumpRequested(): boolean {
+  const value = process.env[FULL_ERROR_DUMP_ENV];
+  return value === "1" || value === "true";
+}
+
+/// The fields viem's error classes carry that say what actually failed. Structural rather
+/// than an import of viem's `BaseError`, because the chain also contains plain `Error`s
+/// raised by this file and by node's fetch, and every level is described the same way.
+interface DescribableError {
+  message?: unknown;
+  shortMessage?: unknown;
+  details?: unknown;
+  reason?: unknown;
+  signature?: unknown;
+  data?: unknown;
+  functionName?: unknown;
+  contractAddress?: unknown;
+  sender?: unknown;
+  cause?: unknown;
+}
+
+/// Reduces an error, and everything it was caused by, to the lines worth reading.
+///
+/// Exported for the tests, which assert on the shape rather than on a screenful of output.
+export function describeFatalError(error: unknown): string[] {
+  const lines: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+
+  for (let depth = 0; depth < MAX_ERROR_CAUSE_DEPTH; ++depth) {
+    if (current === undefined || current === null) break;
+    if (typeof current === "object") {
+      if (seen.has(current)) break;
+      seen.add(current);
+    }
+    for (const line of describeOneError(current)) appendUnlessPresent(lines, line);
+    if (typeof current !== "object") break;
+    current = (current as DescribableError).cause;
+  }
+
+  if (lines.length === 0) appendUnlessPresent(lines, String(error));
+  return hoistDecodedRevert(lines);
+}
+
+/// Moves the decoded revert — the custom error name, or the revert string — directly under
+/// the first line.
+///
+/// viem splits one failure across the cause chain: the outer error names the function that
+/// reverted, and the level below it holds the decoded `errorName`. Described in chain order,
+/// `InvalidState()` therefore lands beneath the call context, which is the wrong way round.
+/// The name of the error is what the operator is looking for.
+function hoistDecodedRevert(lines: string[]): string[] {
+  const isDecodedRevert = (line: string) =>
+    line.startsWith("Contract error: ") || line.startsWith("Revert reason: ");
+  const decoded = lines.filter(isDecodedRevert);
+  if (decoded.length === 0) return lines;
+  const rest = lines.filter((line) => !isDecodedRevert(line));
+  return [...rest.slice(0, 1), ...decoded, ...rest.slice(1)];
+}
+
+function describeOneError(error: unknown): string[] {
+  if (typeof error !== "object" || error === null) return [String(error)];
+  const described = error as DescribableError;
+  const lines: string[] = [];
+
+  // viem's `shortMessage` is the one-line form of a message whose long form carries the
+  // ABI. An error without one is this codebase's own, or node's: its `message` IS the
+  // actionable text and is printed whole.
+  if (typeof described.shortMessage === "string" && described.shortMessage !== "") {
+    lines.push(...described.shortMessage.split("\n"));
+  } else if (typeof described.message === "string" && described.message !== "") {
+    lines.push(...described.message.split("\n"));
+  }
+
+  const customError = describeCustomError(described.data);
+  if (customError !== undefined) lines.push(`Contract error: ${customError}`);
+  if (typeof described.reason === "string" && described.reason !== "") {
+    lines.push(`Revert reason: ${described.reason}`);
+  }
+  if (typeof described.signature === "string" && described.signature !== "") {
+    lines.push(`Revert signature: ${described.signature}`);
+  }
+  if (typeof described.functionName === "string" && described.functionName !== "") {
+    const address = typeof described.contractAddress === "string" ? described.contractAddress : "<unknown>";
+    lines.push(`Contract call: ${described.functionName}() at ${address}`);
+    if (typeof described.sender === "string" && described.sender !== "") {
+      lines.push(`Sender: ${described.sender}`);
+    }
+  }
+  if (typeof described.details === "string" && described.details !== "") {
+    lines.push(`Details: ${described.details}`);
+  }
+
+  return lines.filter((line) => line.trim() !== "");
+}
+
+/// Renders a decoded custom error as it is declared in the contract, arguments included.
+/// `ExitFeeTooHigh(fee, maxFee)` says which fee was too high; `ExitFeeTooHigh` alone does
+/// not.
+function describeCustomError(data: unknown): string | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const { errorName, args } = data as { errorName?: unknown; args?: unknown };
+  if (typeof errorName !== "string" || errorName === "") return undefined;
+  if (!Array.isArray(args)) return `${errorName}()`;
+  return `${errorName}(${args.map((argument) => String(argument)).join(", ")})`;
+}
+
+function appendUnlessPresent(lines: string[], line: string) {
+  const trimmed = line.trimEnd();
+  if (trimmed.trim() === "" || lines.includes(trimmed)) return;
+  lines.push(trimmed);
+}
+
+/// The shared `main().catch` body for every command.
+///
+/// It sets `process.exitCode` rather than calling `process.exit`, exactly as the individual
+/// catch blocks did, so buffered output still flushes before the process ends.
+export function reportFatalError(error: unknown, label: string) {
+  process.exitCode = 1;
+  if (fullErrorDumpRequested()) {
+    console.error(error);
+    return;
+  }
+  console.error(`\nFATAL: ${label} did not complete.`);
+  for (const line of describeFatalError(error)) console.error(`  ${line}`);
+  console.error(
+    `\nRe-run with ${FULL_ERROR_DUMP_ENV}=1 for the complete error object, including the ` +
+      `contract ABI, the full cause chain, and stack traces.\n`,
+  );
+}
+
 /// Asserts that the wallet a script is about to sign with is the wallet the operator
 /// intended, and prints it on every network.
 ///

@@ -8,6 +8,7 @@ import {
   envBigInt,
   formatWei,
   readDeployment,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -53,7 +54,4 @@ async function main() {
   console.log(`Exit requested in block ${receipt.blockNumber}`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "request-exit"));

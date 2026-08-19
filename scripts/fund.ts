@@ -18,6 +18,7 @@ import {
   readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
+  reportFatalError,
   TOP_UP_GWEI,
   validateDepositData,
   VALIDATOR_DEPOSIT_WEI,
@@ -197,7 +198,4 @@ function formatPercent(value: bigint): string {
   return `${basisPoints / 100n}.${(basisPoints % 100n).toString().padStart(2, "0")}%`;
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "fund"));

@@ -6,6 +6,7 @@ import {
   assertDeploymentIntegrity,
   assertFeeRecipientForwarderMatchesDeployment,
   readDeployment,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
   writeDeployment,
 } from "./lib/common.js";
@@ -48,7 +49,4 @@ async function main() {
   console.log("Do not configure fee_recipient until the pool is topped up.");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "deploy-forwarder"));

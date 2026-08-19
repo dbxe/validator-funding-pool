@@ -6,6 +6,7 @@ import {
   assertFeeRecipientForwarderMatchesDeployment,
   formatWei,
   readDeployment,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -47,7 +48,4 @@ async function main() {
   console.log(`Pool balance after: ${formatWei(poolBalanceAfter)}`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "sweep"));

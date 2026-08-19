@@ -6,6 +6,7 @@ import {
   assertDeploymentIntegrity,
   formatWei,
   readDeployment,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -37,7 +38,4 @@ async function main() {
   console.log(`Refunded to ${recipient} in block ${receipt.blockNumber}`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "refund"));

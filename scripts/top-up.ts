@@ -7,6 +7,7 @@ import {
   assertBeaconValidatorStillFresh,
   assertDeploymentIntegrity,
   readDeployment,
+  reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -47,7 +48,4 @@ async function main() {
   console.log(`Topped up in block ${receipt.blockNumber}`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => reportFatalError(error, "top-up"));
