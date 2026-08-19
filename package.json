@@ -20,7 +20,18 @@
     "claim": "hardhat run scripts/claim.ts --network rpc",
     "request-exit": "hardhat run scripts/request-exit.ts --network rpc",
     "sweep": "hardhat run scripts/sweep.ts --network rpc",
-    "status": "hardhat run scripts/status.ts --network rpc"
+    "status": "hardhat run scripts/status.ts --network rpc",
+    "deploy:ledger": "hardhat run scripts/deploy.ts --network ledger",
+    "deploy-forwarder:ledger": "hardhat run scripts/deploy-forwarder.ts --network ledger",
+    "commit-predeposit:ledger": "hardhat run scripts/commit-predeposit.ts --network ledger",
+    "open-funding-attempt:ledger": "hardhat run scripts/open-funding-attempt.ts --network ledger",
+    "close-expired-funding-attempt:ledger": "hardhat run scripts/close-expired-funding-attempt.ts --network ledger",
+    "fund:ledger": "hardhat run scripts/fund.ts --network ledger",
+    "refund:ledger": "hardhat run scripts/refund.ts --network ledger",
+    "top-up:ledger": "hardhat run scripts/top-up.ts --network ledger",
+    "claim:ledger": "hardhat run scripts/claim.ts --network ledger",
+    "request-exit:ledger": "hardhat run scripts/request-exit.ts --network ledger",
+    "sweep:ledger": "hardhat run scripts/sweep.ts --network ledger"
   },
   "devDependencies": {
     "@chainsafe/blst": "^2.2.0",
