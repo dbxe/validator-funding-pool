@@ -15,6 +15,7 @@ import {
   type Hex,
   type PublicClient,
   type SignedAuthorizationList,
+  type Transaction,
   type TransactionType,
 } from "viem";
 
@@ -236,6 +237,10 @@ interface SenderVerifiedReceipt {
 /// `authorizationList` (eip7702, `SignedAuthorizationList` from
 /// `types/authorization.d.ts`).
 ///
+/// That claim is not left to this comment: the block below compiles it against viem's own
+/// types, and a field a future viem adds fails `npm run typecheck` rather than passing this
+/// policy uncompared.
+///
 /// Everything on those types that is NOT compared is one of: a fee value (`gas`,
 /// `gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `maxFeePerBlobGas`, from the
 /// `FeeValues*` mixins), a signature (`r`, `s`, `v`, `yParity`), inclusion metadata
@@ -254,6 +259,115 @@ interface ObservedTransaction {
   blobVersionedHashes?: readonly Hex[] | undefined;
   authorizationList?: SignedAuthorizationList | undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Replacement-check exhaustiveness
+//
+// The comment above is a claim about a THIRD-PARTY type: that `ObservedTransaction`'s
+// compared fields are every non-fee semantic field viem's `Transaction` carries. It was
+// true when it was written and checked by hand. A viem release that adds a field to a
+// transaction variant — a new transaction type's payload, the way EIP-4844 added
+// `blobVersionedHashes` and EIP-7702 added `authorizationList` — would make it silently
+// false, and the failure mode is the one this whole policy exists to prevent: a
+// same-nonce substitute differing in exactly that field, compared on nothing, and
+// reported as an acceptable reprice.
+//
+// So the claim is compiled instead of asserted in prose. The three declarations below
+// derive the union of keys across every variant of viem's `Transaction`, subtract an
+// explicit allowlist of keys that are deliberately not compared, and require the
+// remainder to be EXACTLY what `differingSemanticFields` compares. A new field in a
+// future viem lands in neither set and fails `npm run typecheck`, naming itself, which
+// forces the decision — compare it, or add it to the allowlist with a reason — to be
+// made by a person.
+// ---------------------------------------------------------------------------
+
+/// `keyof` a union is the INTERSECTION of its members' keys. The distributive conditional
+/// is what turns it into the union, which is what exhaustiveness needs: a field present on
+/// one transaction type and absent from the rest must still be accounted for.
+type UnionKeys<T> = T extends unknown ? keyof T : never;
+
+/// Every key of viem's `Transaction` that the replacement policy deliberately does not
+/// compare, with the reason it is exempt. Anything not on this list must be compared.
+///
+///   `gas`, `gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `maxFeePerBlobGas`
+///     The price. Changing it is the definition of a reprice — the one substitution this
+///     policy accepts — so comparing these would reject every acceptable case.
+///
+///   `r`, `s`, `v`, `yParity`
+///     The signature. A repriced transaction is signed afresh over different fee values,
+///     so these differ on every legitimate reprice.
+///
+///   `hash`
+///     Derived from everything else, signature included, so it differs on every reprice.
+///     It is carried on `ObservedTransaction` to be PRINTED — the mined hash is what the
+///     operator needs to look the transaction up — and never compared.
+///
+///   `blockHash`, `blockNumber`, `blockTimestamp`, `transactionIndex`
+///     Inclusion metadata, decided by the block that included the transaction and not by
+///     what was signed. The replaced transaction was never included at all.
+///
+///   `from`, `nonce`
+///     Identical by construction: viem locates the replacement by matching `from` and
+///     `nonce` against the transaction being waited on
+///     (`waitForTransactionReceipt.js` line 157), so a payload reaching this policy with
+///     either one different cannot exist. `receipt.from` is separately required to equal
+///     the intended signer in `waitForSenderVerifiedReceipt`, which is the check that
+///     actually defends the sender.
+///
+///   `typeHex`
+///     The hex spelling of `type`, which IS compared. Comparing both would report one
+///     difference twice.
+///
+///   `chainId`
+///     The chain this client is watching. Both transactions come from the same client's
+///     view of the same chain, and `assertDeploymentChain` pins that chain against the
+///     deployment record on every command.
+type UncomparedTransactionKeys =
+  | "gas"
+  | "gasPrice"
+  | "maxFeePerGas"
+  | "maxPriorityFeePerGas"
+  | "maxFeePerBlobGas"
+  | "r"
+  | "s"
+  | "v"
+  | "yParity"
+  | "hash"
+  | "blockHash"
+  | "blockNumber"
+  | "blockTimestamp"
+  | "transactionIndex"
+  | "from"
+  | "nonce"
+  | "typeHex"
+  | "chainId";
+
+/// What viem's transaction union carries that is not on the allowlist: the fields a
+/// replacement is not allowed to change.
+type SemanticTransactionKeys = Exclude<UnionKeys<Transaction>, UncomparedTransactionKeys>;
+
+/// What `differingSemanticFields` actually compares. `hash` is on `ObservedTransaction` for
+/// printing only, so it is excluded here and, correspondingly, allowlisted above.
+type ComparedTransactionKeys = Exclude<keyof ObservedTransaction, "hash">;
+
+/// Fails to compile unless `T` is empty, naming the members that are not.
+type MustBeEmpty<T extends never> = T;
+
+/// A semantic field viem's `Transaction` has that `ObservedTransaction` does not compare.
+/// If this line fails, a substitution could change that field and still be accepted as a
+/// reprice: add it to `ObservedTransaction` and to `differingSemanticFields`, or — if it is
+/// genuinely a fee, a signature, or inclusion metadata — to `UncomparedTransactionKeys`
+/// with the reason written down.
+type _NoUncomparedSemanticField = MustBeEmpty<
+  Exclude<SemanticTransactionKeys, ComparedTransactionKeys>
+>;
+
+/// The converse: a field this policy compares that viem's `Transaction` no longer has.
+/// Such a comparison is dead code and its mention in the error messages is a lie about
+/// what was checked.
+type _NoComparedFieldMissingFromViem = MustBeEmpty<
+  Exclude<ComparedTransactionKeys, SemanticTransactionKeys>
+>;
 
 /// The `onReplaced` payload, narrowed to what the policy below decides on.
 /// `transactionReceipt` is deliberately absent: viem resolves the promise with the very

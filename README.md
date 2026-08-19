@@ -421,10 +421,12 @@ See `clear-signing/README.md` for the deployment binding and registry submission
 Install dependencies and run the local checks:
 
 ```bash
-npm install
+npm ci
 npm run build
 npm test
 ```
+
+`npm ci`, not `npm install`: it installs exactly the tree `package-lock.json` names and fails if the lockfile and `package.json` disagree, where `npm install` is free to resolve a newer version and rewrite the lockfile underneath you. What runs the capital paths, verifies the pool's runtime code, and computes deposit data should be the audited tree, not whatever resolved today. Use `npm install` only when a dependency update is the change you intend to make, and commit the resulting lockfile as part of it.
 
 ### End-To-End Command Tests
 
