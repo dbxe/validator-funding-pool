@@ -342,6 +342,33 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
   // 3. open-funding-attempt
   // -------------------------------------------------------------------------
 
+  it("open-funding-attempt refuses a FUNDING_WINDOW_SECONDS it cannot apply", async () => {
+    // The window is the pool's immutable, fixed at deploy time. A value set here would be
+    // ignored, and being ignored is exactly the problem: the operator setting it believes
+    // they are bounding how long a listed participant can lock everyone else's capital.
+    const result = expectFailure(
+      await runCommand({
+        script: "open-funding-attempt",
+        env: asOperator({
+          FUNDING_WINDOW_SECONDS: "3600",
+          PARTICIPANTS: `${operator.address},${participant.address}`,
+          FUNDING_TARGETS_GWEI: `${TARGET_GWEI},${TARGET_GWEI}`,
+        }),
+      }),
+    );
+
+    assertReadableFailure(
+      result,
+      "open-funding-attempt",
+      'open-funding-attempt: FUNDING_WINDOW_SECONDS is set to "3600", and this command cannot ' +
+        "apply it.",
+    );
+    // It refuses before the record is even opened, so nothing about the pool was read.
+    assertOutputLacks(result, `Deployment record: ${deploymentFile}`);
+    assertOutputLacks(result, "Opened in block");
+    assert.equal(await readPool<number>("state"), 1);
+  });
+
   it("open-funding-attempt opens the declared participant set", async () => {
     const result = expectSuccess(
       await runCommand({
@@ -358,6 +385,9 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, `Participant 0: ${operator.address} target=${TARGET_GWEI} Gwei`);
     assertOutputContains(result, `Participant 1: ${participant.address} target=${TARGET_GWEI} Gwei`);
     assertOutputContains(result, "Opened in block ");
+    // The window is the pool's immutable, read back from the pool, printed next to the
+    // deadline it produced. Nothing about the attempt chose it.
+    assertOutputContains(result, "Funding window (immutable): 86400s");
     assertOutputContains(result, `Funding deadline: ${await fundingDeadline()}`);
 
     assert.equal(await readPool<number>("state"), 2);

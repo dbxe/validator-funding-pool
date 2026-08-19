@@ -16,6 +16,7 @@ import {
   assertExpectedPool,
   assertExpectedPubkey,
   assertFundingWasCredited,
+  assertFundingWindowNotDeclared,
   assertStillFundable,
   assertSweepWasCredited,
   beaconApiUrl,
@@ -858,6 +859,51 @@ describe("assertSweepWasCredited", function () {
           return true;
         },
       );
+    }
+  });
+});
+
+describe("assertFundingWindowNotDeclared", function () {
+  it("asserts nothing when the variable is unset or empty", function () {
+    const original = process.env.FUNDING_WINDOW_SECONDS;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("FUNDING_WINDOW_SECONDS", value);
+        assert.doesNotThrow(() => assertFundingWindowNotDeclared("open-funding-attempt"));
+      }
+    } finally {
+      restoreEnv("FUNDING_WINDOW_SECONDS", original);
+    }
+  });
+
+  it("is fatal for any declared value, including the deployed default", function () {
+    const original = process.env.FUNDING_WINDOW_SECONDS;
+
+    try {
+      // The default is refused as loudly as an unusual value: an operator who typed the
+      // number that happens to match is still expecting this command to decide it, and it
+      // cannot. A well-formed value is refused for the same reason a malformed one is —
+      // the failure is that the input has no effect, not that it could not be parsed.
+      for (const value of ["86400", "0", "3600", "not-a-number"]) {
+        process.env.FUNDING_WINDOW_SECONDS = value;
+        assert.throws(
+          () => assertFundingWindowNotDeclared("open-funding-attempt"),
+          (error: Error) => {
+            assert.match(
+              error.message,
+              new RegExp(`^open-funding-attempt: FUNDING_WINDOW_SECONDS is set to "${value}"`),
+            );
+            assert.match(error.message, /immutable fundingWindowDuration/);
+            assert.match(error.message, /read from the environment by "npm run deploy" only/);
+            assert.match(error.message, /strands this one's 1 ETH predeposit/);
+            assert.match(error.message, /Nothing has been sent/);
+            return true;
+          },
+        );
+      }
+    } finally {
+      restoreEnv("FUNDING_WINDOW_SECONDS", original);
     }
   });
 });

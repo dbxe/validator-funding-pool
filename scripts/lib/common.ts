@@ -914,6 +914,33 @@ export function optionalEnvBigInt(name: string): bigint | undefined {
   return envBigInt(name);
 }
 
+/// Refuses a run whose environment declares a funding window this command cannot apply.
+///
+/// `FUNDING_WINDOW_SECONDS` is a DEPLOY-TIME variable and nothing else. `fundingWindowDuration`
+/// is an `immutable` written once by the pool's constructor, `deploy.ts` is the only script that
+/// reads the variable, and `openFundingAttempt(address[],uint256[])` takes no duration argument:
+/// the deadline it sets is `block.timestamp + fundingWindowDuration`, read from the pool. So a
+/// `FUNDING_WINDOW_SECONDS` in `open-funding-attempt`'s environment changes nothing at all.
+///
+/// That is fatal rather than a warning. The window is the whole mitigation for the free
+/// liveness grief a listed participant can inflict (`SECURITY.md` §2, "Participants"): an
+/// operator who sets it here believes they are bounding how long everyone else's capital can be
+/// locked, and a warning on a security-relevant input that was silently ignored is a pass
+/// reported for a decision that was never made.
+export function assertFundingWindowNotDeclared(label: string) {
+  const declared = process.env.FUNDING_WINDOW_SECONDS ?? "";
+  if (declared === "") return;
+  throw new Error(
+    `${label}: FUNDING_WINDOW_SECONDS is set to ${JSON.stringify(declared)}, and this command ` +
+      `cannot apply it. The funding window is the pool's immutable fundingWindowDuration, fixed ` +
+      `in the constructor at deploy time and read from the environment by "npm run deploy" only; ` +
+      `openFundingAttempt takes no duration, and the deadline it sets is block.timestamp plus the ` +
+      `pool's own immutable. Changing the window means deploying a new pool, which strands this ` +
+      `one's 1 ETH predeposit. Nothing has been sent. Unset FUNDING_WINDOW_SECONDS to open the ` +
+      `attempt on the window this pool was deployed with, which this command prints`,
+  );
+}
+
 export function parseAddressList(value: string): Address[] {
   return value.split(",").map((entry) => asAddress(entry.trim()));
 }

@@ -503,6 +503,19 @@ Environment variables. Every numeric one — amounts, fees, windows, targets —
 
 Use `https://` for `RPC_URL` and `BEACON_NODE_URL` unless the node is on loopback. Over plaintext `http://` to any other host, everything a dishonest endpoint could do — described in [`SECURITY.md`](SECURITY.md) §2 — is available to anyone on the network path instead. Every command prints a loud warning when either URL is plaintext to a non-loopback host; it is a warning rather than a refusal because a LAN node over plain HTTP is a legitimate setup, and loopback is never warned about.
 
+They divide into two classes, and the class matters more than any individual entry.
+
+### Deploy-Time Variables
+
+Four variables are read by `npm run deploy` and by nothing else. Each becomes an `immutable` in the pool's constructor, so what `deploy` was given is what the pool has for the rest of its life; a later command that sets one is not changing anything, and the only way to change one is to deploy a new pool — which strands the first pool's 1 ETH predeposit. Every other command reads these values back *from the pool* and refuses if the deployment record disagrees.
+
+- `DEPOSIT_CONTRACT`: deposit contract address. Defaults to mainnet's.
+- `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address. Defaults to mainnet's.
+- `OPERATOR`: operator address; defaults to the deployer.
+- `FUNDING_WINDOW_SECONDS`: the funding window, in seconds, baked into the pool at deploy time and immutable thereafter; defaults to `86400`. It is **not** per attempt: `openFundingAttempt` takes no duration, and every attempt this pool ever opens gets a deadline of `block.timestamp + fundingWindowDuration`. Choose it at deployment as a security decision — a short window bounds how long a listed participant who never funds can lock everyone else's capital ([`SECURITY.md`](SECURITY.md) §2, "Participants"). Setting it in `open-funding-attempt`'s environment is a fatal error rather than a silent no-op, and that command prints the pool's actual window next to the deadline it sets.
+
+### Per-Command Variables
+
 - `RPC_URL`: execution-layer JSON-RPC endpoint used by every command.
 - `DEPLOYMENT_FILE`: path to the deployment record; defaults to `deployments/latest.json`. This selects the *subject* of every check a command makes, not merely where a file lives: the record names the pool, and the chain-id comparison, the five immutables, both system-contract code hashes, the canonicity pin, the forwarder binding, and the address capital is sent to are all read from — or compared against — the record this variable chooses. `deploy` writes it; every other command reads it. Every command prints the resolved path in its opening lines, next to the active-signer line, so which record a run acted on is never a guess.
 - `DEPOSIT_DATA_FILE`: path to the deposit-data file; defaults to `deposit-data.json`. It selects the pubkey, signatures, and deposit-data roots that `commit-predeposit` commits, that `fund` compares against the on-chain commitment before sending, and that `top-up` and `request-exit` cross-check the committed pubkey against. `request-exit` is the one command that only *warns* when the file is unreadable and proceeds on the RPC's value, because the recovery path must not be disableable by a missing file. Like `DEPLOYMENT_FILE` it selects the *subject* of the checks rather than waiving one — the record chooses which pool, this chooses which validator — so each of those three commands prints `Deposit data file: <path>` before it opens the file, and which file a run acted on is never a guess.
@@ -511,10 +524,6 @@ Use `https://` for `RPC_URL` and `BEACON_NODE_URL` unless the node is on loopbac
 - `LEDGER_ADDRESS`: Ledger account address for the `ledger` network; required by every `:ledger` command.
 - `EXPECTED_SIGNER`: optional declared signing address. Every command prints the account it is about to sign with; set this and the command additionally refuses to sign with anything else, on any network including `ledger`. It is the check that catches a forgotten `PRIVATE_KEY` in the environment outranking a keystore entry.
 - `FUND_VIA_TRANSFER`: `1` forces `fund` to send a zero-calldata transfer, `0` forces the `fund()` calldata path. Defaults to the transfer path on the `ledger` network and to calldata elsewhere.
-- `DEPOSIT_CONTRACT`: deposit contract address.
-- `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address.
-- `OPERATOR`: operator address; defaults to the deployer.
-- `FUNDING_WINDOW_SECONDS`: funding window per attempt; defaults to `86400`.
 - `PARTICIPANTS`: comma-separated addresses for `open-funding-attempt`; must include the operator.
 - `FUNDING_TARGETS_GWEI`: comma-separated final economic weights matching `PARTICIPANTS`; must sum to `32000000000`.
 - `AMOUNT_WEI`: optional partial funding amount for `fund`; defaults to the caller's entire remaining allocation and may not exceed it.

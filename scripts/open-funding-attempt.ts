@@ -3,6 +3,7 @@ import { network } from "hardhat";
 import {
   assertActiveSigner,
   assertDeploymentIntegrity,
+  assertFundingWindowNotDeclared,
   parseAddressList,
   parseBigIntList,
   readDeployment,
@@ -14,6 +15,9 @@ import {
 const GWEI = 1_000_000_000n;
 
 async function main() {
+  // Before the record is even opened: this is an input the operator supplied for THIS command,
+  // and this command cannot act on it.
+  assertFundingWindowNotDeclared("open-funding-attempt");
   const deployment = readDeployment();
   const connection = await network.create();
   const { viem } = connection;
@@ -52,6 +56,10 @@ async function main() {
     "open-funding-attempt",
   );
   console.log(`Opened in block ${receipt.blockNumber}`);
+  // The deadline and the window it came from, together: the deadline is
+  // `block.timestamp + fundingWindowDuration`, and the window is this pool's immutable — the
+  // one number in the pair that no later command, this one included, can change.
+  console.log(`Funding window (immutable): ${liveConfig.fundingWindowDuration}s`);
   console.log(`Funding deadline: ${await pool.read.fundingDeadline()}`);
 }
 
