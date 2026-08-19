@@ -245,11 +245,12 @@ interface SenderVerifiedReceipt {
 /// Everything on those types that is NOT compared is one of: a fee value (`gas`,
 /// `gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `maxFeePerBlobGas`, from the
 /// `FeeValues*` mixins), a signature (`r`, `s`, `v`, `yParity`), inclusion metadata
-/// (`blockHash`, `blockNumber`, `blockTimestamp`, `transactionIndex`, `hash`), the nonce
-/// (identical by definition — a replacement is a same-nonce transaction), `typeHex` (the
-/// hex spelling of `type`), or `chainId` (the chain this client is watching, identical for
-/// both transactions by construction). A reprice may change the fee values and, through
-/// them, the signature and the hash. It may change nothing else.
+/// (`blockHash`, `blockNumber`, `blockTimestamp`, `transactionIndex`, `hash`), the sender
+/// and the nonce (identical by construction — viem locates the replacement by matching
+/// `from` and `nonce`), `typeHex` (the hex spelling of `type`), or `chainId` (the chain
+/// this client is watching, identical for both transactions by construction). A reprice may
+/// change the fee values and, through them, the signature and the hash. It may change
+/// nothing else.
 interface ObservedTransaction {
   hash: Hex;
   to: Address | null;
@@ -273,7 +274,7 @@ interface ObservedTransaction {
 // same-nonce substitute differing in exactly that field, compared on nothing, and
 // reported as an acceptable reprice.
 //
-// So the claim is compiled instead of asserted in prose. The three declarations below
+// So the claim is compiled instead of asserted in prose. The declarations below
 // derive the union of keys across every variant of viem's `Transaction`, subtract an
 // explicit allowlist of keys that are deliberately not compared, and require the
 // remainder to be EXACTLY what `differingSemanticFields` compares. A new field in a
