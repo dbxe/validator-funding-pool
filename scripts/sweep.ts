@@ -53,8 +53,13 @@ async function main() {
   // same-block `claim()` or `refund()` is reconciled rather than accused.
   const blockBefore = { blockNumber: receipt.blockNumber - 1n };
   const blockOfSweep = { blockNumber: receipt.blockNumber };
-  const [forwarderAtSweep, poolBeforeSweep, poolAfterSweep, forwarderBalanceAfter, sameBlockOutflows] =
-    await Promise.all([
+  const [
+    forwarderAtSweep,
+    poolBeforeSweep,
+    poolAfterSweep,
+    forwarderBalanceAfter,
+    sameBlockOutflows,
+  ] = await Promise.all([
       publicClient.getBalance({ address: deployment.feeRecipientForwarder, ...blockBefore }),
       publicClient.getBalance({ address: deployment.pool, ...blockBefore }),
       publicClient.getBalance({ address: deployment.pool, ...blockOfSweep }),

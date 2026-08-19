@@ -1229,8 +1229,9 @@ export async function assertDeploymentIntegrity(
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
   assertExpectedForwarderRecorded(deployment);
-  if (forwarderScope === "authenticate-forwarder" && deployment.feeRecipientForwarder !== undefined) {
-    await assertForwarderAuthenticity(publicClient, deployment.feeRecipientForwarder, deployment.pool);
+  const forwarder = deployment.feeRecipientForwarder;
+  if (forwarderScope === "authenticate-forwarder" && forwarder !== undefined) {
+    await assertForwarderAuthenticity(publicClient, forwarder, deployment.pool);
   }
   return liveConfig;
 }
