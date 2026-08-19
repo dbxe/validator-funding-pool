@@ -716,6 +716,27 @@ describe("pool authenticity", async function () {
           new RegExp(`names fee-recipient forwarder ${forwarder.address}, not the declared EXPECTED_FORWARDER`),
         ),
       );
+
+      // The case the pin could not see: a record with no forwarder at all. The comparison
+      // has nothing to run against, so before this it reported a clean pass with
+      // EXPECTED_FORWARDER set and unevaluated.
+      const { feeRecipientForwarder: _dropped, ...withoutForwarder } = deployment;
+      await silentlyAsync(async () =>
+        assert.rejects(
+          assertDeploymentIntegrity(publicClient, pool, withoutForwarder),
+          new RegExp(
+            `EXPECTED_FORWARDER ${otherForwarder.address} is declared, but the deployment ` +
+              `record .* names no fee-recipient forwarder at all`,
+          ),
+        ),
+      );
+
+      // Unset, the same record passes: the pin is a declaration, not a requirement to have
+      // deployed the optional sidecar.
+      delete process.env.EXPECTED_FORWARDER;
+      await silentlyAsync(async () =>
+        assertDeploymentIntegrity(publicClient, pool, withoutForwarder),
+      );
     } finally {
       if (original === undefined) delete process.env.EXPECTED_FORWARDER;
       else process.env.EXPECTED_FORWARDER = original;

@@ -1174,6 +1174,7 @@ export async function assertDeploymentIntegrity(
   );
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
+  assertExpectedForwarderRecorded(deployment);
   if (deployment.feeRecipientForwarder !== undefined) {
     await assertForwarderAuthenticity(publicClient, deployment.feeRecipientForwarder, deployment.pool);
   }
@@ -1226,18 +1227,56 @@ export async function assertForwarderAuthenticity(
   );
 }
 
+/// The declared forwarder pin, parsed: absent when unset or empty, fatal when it is not an
+/// address. A declaration that cannot be parsed has NOT been made, and silently ignoring it
+/// would report a pass for a check that never ran.
+function declaredExpectedForwarder(): Address | undefined {
+  const expectedForwarder = process.env.EXPECTED_FORWARDER ?? "";
+  if (expectedForwarder === "") return undefined;
+  if (!isAddress(expectedForwarder, { strict: false })) {
+    throw new Error(`EXPECTED_FORWARDER ${expectedForwarder} is not a 0x-prefixed 20-byte address`);
+  }
+  return expectedForwarder;
+}
+
+/// Evaluates the `EXPECTED_FORWARDER` pin against the record, INCLUDING the case where the
+/// record names no forwarder at all.
+///
+/// `assertExpectedForwarder` can only compare a forwarder that exists, so for a record with no
+/// `feeRecipientForwarder` the pin used to be unreachable: `EXPECTED_FORWARDER` was set, the
+/// command reported a clean pass, and nothing had been checked. The declaration is a statement
+/// about which forwarder this run is about, and a record that names none does not satisfy it —
+/// most often because `DEPLOYMENT_FILE` points at the pre-`deploy-forwarder` record, which is
+/// exactly the confusion the pin exists to catch. This runs wherever a record is read, on the
+/// `assertExpectedPool` pattern: it costs one string comparison and depends on no artifact.
+export function assertExpectedForwarderRecorded(
+  deployment: Pick<DeploymentRecord, "feeRecipientForwarder">,
+) {
+  const expectedForwarder = declaredExpectedForwarder();
+  if (expectedForwarder === undefined) return;
+  if (deployment.feeRecipientForwarder === undefined) {
+    throw new Error(
+      `EXPECTED_FORWARDER ${expectedForwarder} is declared, but the deployment record ` +
+        `${deploymentPath()} names no fee-recipient forwarder at all, so the declaration cannot ` +
+        `be checked and nothing about the forwarder has been verified. Nothing has been sent. ` +
+        `Either this record predates "npm run deploy-forwarder" and DEPLOYMENT_FILE should point ` +
+        `at the record that has one, or this pool has no forwarder and EXPECTED_FORWARDER should ` +
+        `not be set for it`,
+    );
+  }
+  assertExpectedForwarder(deployment.feeRecipientForwarder);
+}
+
 /// A declare-and-verify pin on the forwarder the deployment record names.
 ///
 /// The same shape as `assertExpectedPool`, for the same reason: `DEPLOYMENT_FILE` selects the
 /// record, and the record names the forwarder as freely as it names the pool. Unset or empty
 /// declares nothing; a value that is not an address is fatal naming the variable; a mismatch
-/// is fatal before anything is sent.
+/// is fatal before anything is sent. Reach it through `assertExpectedForwarderRecorded` when
+/// the record may name no forwarder, which is the case this one cannot see.
 export function assertExpectedForwarder(forwarderAddress: Address) {
-  const expectedForwarder = process.env.EXPECTED_FORWARDER ?? "";
-  if (expectedForwarder === "") return;
-  if (!isAddress(expectedForwarder, { strict: false })) {
-    throw new Error(`EXPECTED_FORWARDER ${expectedForwarder} is not a 0x-prefixed 20-byte address`);
-  }
+  const expectedForwarder = declaredExpectedForwarder();
+  if (expectedForwarder === undefined) return;
   if (forwarderAddress.toLowerCase() !== expectedForwarder.toLowerCase()) {
     throw new Error(
       `The deployment record ${deploymentPath()} names fee-recipient forwarder ` +

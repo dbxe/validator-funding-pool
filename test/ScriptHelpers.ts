@@ -13,6 +13,7 @@ import {
   assertContractPredepositWei,
   assertDeployedAt,
   assertExpectedForwarder,
+  assertExpectedForwarderRecorded,
   assertExpectedPool,
   assertExpectedPubkey,
   assertFundingWasCredited,
@@ -957,6 +958,73 @@ describe("assertExpectedForwarder", function () {
           new RegExp(`EXPECTED_FORWARDER ${value} is not a 0x-prefixed 20-byte address`),
         );
       }
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+});
+
+describe("assertExpectedForwarderRecorded", function () {
+  const FORWARDER = "0x4444444444444444444444444444444444444444" as Address;
+
+  it("is fatal when the pin is declared and the record names no forwarder", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = FORWARDER;
+      assert.throws(
+        () => assertExpectedForwarderRecorded({}),
+        (error: Error) => {
+          assert.match(
+            error.message,
+            new RegExp(`^EXPECTED_FORWARDER ${FORWARDER} is declared, but the deployment record `),
+          );
+          assert.match(error.message, /deployments\/latest\.json/);
+          assert.match(error.message, /names no fee-recipient forwarder at all/);
+          assert.match(error.message, /Nothing has been sent/);
+          assert.match(error.message, /predates "npm run deploy-forwarder"/);
+          return true;
+        },
+      );
+
+      // The other direction: a record that names the declared forwarder satisfies it.
+      assert.doesNotThrow(() =>
+        assertExpectedForwarderRecorded({ feeRecipientForwarder: FORWARDER }),
+      );
+      assert.throws(
+        () => assertExpectedForwarderRecorded({ feeRecipientForwarder: OTHER_SIGNER }),
+        /not the declared EXPECTED_FORWARDER/,
+      );
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("asserts nothing about a record with no forwarder when nothing is declared", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_FORWARDER", value);
+        assert.doesNotThrow(() => assertExpectedForwarderRecorded({}));
+        assert.doesNotThrow(() =>
+          assertExpectedForwarderRecorded({ feeRecipientForwarder: FORWARDER }),
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("is fatal for a malformed declaration even when the record names no forwarder", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = "0x1234";
+      assert.throws(
+        () => assertExpectedForwarderRecorded({}),
+        /EXPECTED_FORWARDER 0x1234 is not a 0x-prefixed 20-byte address/,
+      );
     } finally {
       restoreEnv("EXPECTED_FORWARDER", original);
     }
