@@ -57,8 +57,10 @@ async function main() {
   console.log(`Top-up deposit data root: ${await pool.read.topUpDepositDataRoot()}`);
 
   await printSuggestedFees(publicClient, "top-up");
-  // Last read before the device is asked to sign. Everything after this line is outside
-  // what any check here can see.
+  // Last read before the transaction is composed. Everything after this line is outside what
+  // any check here can see — hardhat's fee, gas-limit, and nonce round trips, then the
+  // unbounded device approval, which no later check can follow because the plugin signs and
+  // broadcasts in one call. `SECURITY.md` §5 states the whole window.
   await assertBeaconValidatorStillFresh(pubkey, expectedCredentials, "top-up", headBalanceGwei);
   const hash = await pool.write.topUpValidator();
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "top-up");

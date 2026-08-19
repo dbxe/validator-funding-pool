@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 
 import { REPO_ROOT } from "./paths.js";
 
-/// Every SUPPORTED COMMAND is `hardhat run scripts/<name>.ts --network <network>`, which is
+/// Every supported command is `hardhat run scripts/<name>.ts --network <network>`, which is
 /// exactly what `package.json` runs. The tests drive that command line rather than importing
 /// the script, so what they exercise is the wiring — argv, network selection, config
 /// variable resolution, the `main().catch` path, and the text an operator reads — and not

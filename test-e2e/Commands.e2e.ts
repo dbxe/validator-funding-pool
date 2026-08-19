@@ -47,10 +47,10 @@ import {
   type CommandResult,
 } from "./run-command.js";
 
-/// End-to-end coverage of the SUPPORTED COMMANDS.
+/// End-to-end coverage of the SUPPORTED COMMANDS, in their non-`:ledger` form.
 ///
 /// Every case here runs a command the way `package.json` runs it — `hardhat run
-/// scripts/<name>.ts --network <network>` as a real child process, with a controlled
+/// scripts/<name>.ts --network rpc|read` as a real child process, with a controlled
 /// environment — against a real local chain and a deterministic mock beacon node, and
 /// decides on the exit code and on the exact lines the operator reads. The unit suite
 /// exercises the helpers; this exercises the wiring: argv, network selection, config
@@ -59,6 +59,10 @@ import {
 /// The order of the cases is deliberate. They share one chain and one pool, and each one
 /// leaves the pool in the state the next one needs, which is also how a real deployment
 /// runs. Cases that consume a pool irreversibly come last.
+///
+/// The `:ledger` entries are the same scripts against a network that needs a device on the
+/// USB bus, so nothing here executes them; `SECURITY.md` §5 lists that as the first of the
+/// three paths outside this harness.
 ///
 /// Two mainnet system contracts are installed at their real mainnet addresses with their
 /// real code (`local-chain.ts`), and the chain id is left at Hardhat's 31337. That

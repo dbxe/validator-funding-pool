@@ -112,15 +112,17 @@ async function main() {
   );
 
   await printSuggestedFees(publicClient, "fund");
-  // Final race-narrowing re-reads, immediately before signing. They cannot close the
-  // race, only shorten it: see "Plain-Transfer Funding" in the README for the one
-  // window where a plain transfer behaves differently from a reverting fund().
+  // Final race-narrowing re-reads, and the last thing this script does before the
+  // transaction is composed. They cannot close the race, only shorten it: see
+  // "Plain-Transfer Funding" in the README for the one window where a plain transfer
+  // behaves differently from a reverting fund().
   //
   // The beacon leg matters just as much as the on-chain leg here. The full preflight ran
-  // before the funding review printed and before the operator started reading it; on the
-  // Ledger path the device approval is still ahead. Re-reading head state now shrinks the
-  // window in which a third-party deposit, a slashing, or an activation can go unnoticed
-  // from minutes to seconds.
+  // before the funding review printed and before the operator started reading it, so this
+  // removes the largest part of the window. What is left after it is NOT seconds: hardhat's
+  // fee, gas-limit, and nonce round trips, and on the Ledger path the device approval, which
+  // is unbounded and cannot be followed by another check — the plugin signs and broadcasts in
+  // one call. `SECURITY.md` §5 states the whole window.
   await assertBeaconValidatorStillFresh(
     predeposit.pubkey,
     expectedCredentials,

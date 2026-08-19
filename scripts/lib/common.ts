@@ -2314,15 +2314,22 @@ export async function assertBeaconValidatorReadyForFunding(
   );
 }
 
-/// Re-runs the head-state preflight immediately before a transaction is broadcast, and
+/// Re-runs the head-state preflight as the last thing before a transaction is composed, and
 /// requires the balance to be exactly what the full preflight settled on.
 ///
-/// Between that preflight and the broadcast sit the funding review, the final on-chain
-/// re-read, and — on the Ledger path — however long the operator takes to approve on the
-/// device. That is minutes during which anyone may deposit to the committed pubkey, or the
-/// validator may be slashed or activated. This shrinks the window to seconds. It cannot
-/// close it: see the residual-risk entry in `SECURITY.md` §5 for the remainder, which runs
-/// from this check to inclusion and cannot be checked from here at all.
+/// It removes the largest part of the window: the funding review and everything the operator
+/// reads before deciding are behind it. What it does NOT remove is everything after it, and
+/// that is not seconds. Between this check and the signature sit hardhat's own request
+/// handlers filling the fee fields from `eth_feeHistory`, the gas limit from
+/// `eth_estimateGas`, and the nonce from `eth_getTransactionCount` — and, on the Ledger path,
+/// the device confirmation, which is a person pressing buttons and is bounded by nothing.
+///
+/// Nor can anything re-check after that approval. `@nomicfoundation/hardhat-ledger` handles a
+/// single `eth_sendTransaction` by signing on the device and returning an
+/// `eth_sendRawTransaction` for the signed bytes, so signing and broadcasting are two halves
+/// of one call with no seam a script can reach into. See the residual-risk entry in
+/// `SECURITY.md` §5 for the whole window, and for the deferred sign-without-broadcast
+/// pipeline that would close the device half.
 ///
 /// A changed balance is fatal rather than a fresh prompt. An excess balance is resolvable,
 /// but only by a person reading the current number, which is what re-running the command
@@ -3393,9 +3400,16 @@ export interface ObservedLog {
 /// balance moves, and the sender recovers only their pro-rata share. Both plain-transfer
 /// routes into that state (the double-send race and the lying-EL-RPC route, `SECURITY.md`
 /// §5, "The `ToppedUp` plain-transfer race") end in exactly this receipt, and every
-/// pre-broadcast check read the same endpoint that let it happen. The receipt itself is the
-/// one piece of evidence that does not come from a fresh read: it is authoritative about
-/// what the pool did, and immune to an endpoint that would lie about it afterwards.
+/// pre-broadcast check read the same endpoint that let it happen.
+///
+/// What the receipt buys is narrower than it once claimed here, and worth stating exactly. It
+/// is the transaction's OWN record — the pool's events, from the block that included it —
+/// rather than a fresh question about current state, so it catches the honest-endpoint
+/// failures this check exists for: a stale read, a race lost in the mempool, a pool that
+/// reached `ToppedUp` between the last check and inclusion. It is NOT independent of the
+/// endpoint. `eth_getTransactionReceipt` goes to the same place as every other read here, and
+/// an endpoint dishonest enough to fake pool state can fake a receipt. §2's trusted-endpoint
+/// assumption is load-bearing under this check as much as under the ones before it.
 ///
 /// This is detection, not prevention — the ETH has already moved. It converts a silent
 /// donation into a loud, named failure at the moment it happens.
@@ -3629,7 +3643,9 @@ export function assertPayoutReachedRecipient(
 
 /// `FeeRecipientForwarder.sol:13`. `sweep()` emits it with the whole balance it is about to
 /// forward, immediately before the transfer, so a receipt carrying it states the amount the
-/// forwarder actually sent — a fact that does not come from a fresh read of the endpoint.
+/// forwarder actually sent — the transaction's own record, rather than a fresh question about
+/// current state. Not independent of the endpoint, which serves the receipt too; see
+/// `assertFundingWasCredited` for what that distinction does and does not buy.
 const FORWARDER_SWEPT_EVENT_ABI = [
   {
     type: "event",
@@ -3643,6 +3659,12 @@ const FORWARDER_SWEPT_EVENT_ABI = [
 
 export interface SweepBalances {
   /// The forwarder's balance in the block before the sweep: what the sweep had to move.
+  ///
+  /// Pinned to `blockNumber - 1`, NOT the pre-broadcast balance the command printed. Those two
+  /// differ whenever a proposal pays the forwarder between the print and inclusion, and only
+  /// the block-pinned one shares a baseline with `poolBefore` — comparing a Swept amount
+  /// against the earlier read would report a shortfall for a sweep that forwarded everything
+  /// it held at the moment it ran.
   forwarderBefore: bigint;
   /// The pool's balance in the block before the sweep, and in the sweep's own block.
   poolBefore: bigint;
@@ -3758,7 +3780,7 @@ function totalOutflow(outflows: readonly PoolOutflow[]): bigint {
 /// command was for.
 ///
 /// Two independent pieces of evidence are used, and both come from the chain's own record of
-/// the transaction rather than from a later read. The receipt's `Swept` log says what the
+/// the transaction rather than from a later read of current state. The receipt's `Swept` log says what the
 /// forwarder sent. The pool's balance across the sweep's own block says what the pool
 /// received. Comparing the second against the forwarder's pre-sweep balance is what catches a
 /// forwarder whose `sweep()` sends somewhere else, or sends part.
