@@ -22,7 +22,8 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  await assertDeploymentIntegrity(publicClient, pool, deployment);
+  // The permissionless step that makes refunds available; it never touches the forwarder.
+  await assertDeploymentIntegrity(publicClient, pool, deployment, "forwarder-untouched");
 
   console.log(`Closing expired funding attempt for ${deployment.pool}`);
   const hash = await pool.write.closeExpiredFundingAttempt();

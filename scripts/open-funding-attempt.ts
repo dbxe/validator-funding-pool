@@ -27,7 +27,12 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+  const liveConfig = await assertDeploymentIntegrity(
+    publicClient,
+    pool,
+    deployment,
+    "forwarder-untouched",
+  );
 
   if (signer.toLowerCase() !== liveConfig.operator.toLowerCase()) {
     throw new Error(`open-funding-attempt must be signed by the operator ${liveConfig.operator}`);

@@ -24,7 +24,12 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+  const liveConfig = await assertDeploymentIntegrity(
+    publicClient,
+    pool,
+    deployment,
+    "forwarder-untouched",
+  );
   await assertBeaconMatchesExecutionChain(deployment, liveConfig, "top-up");
 
   if (signer.toLowerCase() !== liveConfig.operator.toLowerCase()) {

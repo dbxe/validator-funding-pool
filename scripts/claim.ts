@@ -20,7 +20,9 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  await assertDeploymentIntegrity(publicClient, pool, deployment);
+  // A payout path: it reads and pays from the pool and never touches the forwarder, so the
+  // sidecar's condition must not be able to stop it. See `ForwarderScope`.
+  await assertDeploymentIntegrity(publicClient, pool, deployment, "forwarder-untouched");
 
   const claimable = await pool.read.claimable([signer]);
   console.log(`Claimable for ${signer}: ${formatWei(claimable)}`);

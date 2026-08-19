@@ -302,7 +302,7 @@ describe("ValidatorFundingPool", async function () {
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
     try {
-      await assertDeploymentIntegrity(publicClient, pool, deployment);
+      await assertDeploymentIntegrity(publicClient, pool, deployment, "forwarder-untouched");
     } finally {
       console.warn = originalWarn;
     }

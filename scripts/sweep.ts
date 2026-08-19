@@ -23,7 +23,9 @@ async function main() {
   const [wallet] = await viem.getWalletClients();
   const signer = assertActiveSigner(connection, wallet.account.address, "sweep");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
-  await assertDeploymentIntegrity(publicClient, pool, deployment);
+  // The command whose whole transaction is a call to the forwarder: it is authenticated in
+  // full before that call is made.
+  await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");
   const forwarder = await viem.getContractAt(
     "FeeRecipientForwarder",
     deployment.feeRecipientForwarder,

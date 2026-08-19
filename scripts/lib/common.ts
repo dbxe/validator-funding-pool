@@ -1155,10 +1155,34 @@ export async function assertDeploymentCanonicity(
   );
 }
 
+/// Whether this command's own work touches the fee-recipient forwarder.
+///
+/// Every command states it, because the answer decides whether a broken sidecar can stop the
+/// command. `"authenticate-forwarder"` runs the full authenticity check — code, binding, and
+/// runtime code against the local build; `"forwarder-untouched"` says this command reads and
+/// writes the pool and never the forwarder, so the forwarder's condition is not its business.
+export type ForwarderScope = "authenticate-forwarder" | "forwarder-untouched";
+
+/// Everything the deployment record claims, checked against the chain before a command acts.
+///
+/// The forwarder is scoped rather than always checked, and the reason is the escape-hatch
+/// liveness principle this repository enforces everywhere else (`SECURITY.md` §4, and the
+/// `request-exit` carve-outs): `refund`, `claim`, and `request-exit` are the paths that must
+/// keep working when other things are broken, and they do not touch the forwarder at all. Run
+/// unconditionally, `assertForwarderAuthenticity` handed a missing or stale
+/// `artifacts/FeeRecipientForwarder.sol` build — or a forwarder replaced on chain — the power
+/// to brick all three, over a sidecar whose whole purpose is optional EL rewards. So the full
+/// check runs in the three commands whose work is about the forwarder (`sweep`,
+/// `deploy-forwarder`, `status`) and nowhere else.
+///
+/// The `EXPECTED_FORWARDER` pin is NOT scoped: it runs wherever a record is read. It is a
+/// string comparison against the record, it depends on no artifact and no RPC read, and a pin
+/// the operator set must never be silently unevaluated.
 export async function assertDeploymentIntegrity(
   publicClient: DeploymentPublicClient,
   pool: PoolDeploymentReader,
   deployment: DeploymentRecord,
+  forwarderScope: ForwarderScope,
 ): Promise<PoolDeploymentConfig> {
   // First, before a single RPC read: everything below this line is about the pool this
   // record names, so a record naming the wrong pool has to be caught before any of it runs.
@@ -1175,7 +1199,7 @@ export async function assertDeploymentIntegrity(
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
   assertExpectedForwarderRecorded(deployment);
-  if (deployment.feeRecipientForwarder !== undefined) {
+  if (forwarderScope === "authenticate-forwarder" && deployment.feeRecipientForwarder !== undefined) {
     await assertForwarderAuthenticity(publicClient, deployment.feeRecipientForwarder, deployment.pool);
   }
   return liveConfig;

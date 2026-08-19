@@ -23,7 +23,15 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  const liveConfig = await assertDeploymentIntegrity(publicClient, pool, deployment);
+  // The escape hatch, and it touches only the pool and the EIP-7002 predeploy. A sidecar
+  // this command never reads must not be able to disable it — the same reasoning as the
+  // beacon and deposit-data carve-outs below. See `ForwarderScope`.
+  const liveConfig = await assertDeploymentIntegrity(
+    publicClient,
+    pool,
+    deployment,
+    "forwarder-untouched",
+  );
   await assertBeaconMatchesExecutionChain(deployment, liveConfig, "request-exit", {
     optional: true,
   });

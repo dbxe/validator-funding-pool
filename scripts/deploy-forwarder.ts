@@ -22,7 +22,10 @@ async function main() {
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });
-  await assertDeploymentIntegrity(publicClient, pool, deployment);
+  // The command that deploys and records a forwarder: any forwarder the record ALREADY names
+  // is authenticated before it is replaced, so a record that was already wrong is a finding
+  // here rather than an address quietly overwritten.
+  await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");
 
   // See deploy.ts: sendDeploymentTransaction is used for the transaction hash the
   // post-broadcast sender check needs.
@@ -43,8 +46,8 @@ async function main() {
     feeRecipientForwarder: forwarder.address,
   };
   await assertFeeRecipientForwarderMatchesDeployment(publicClient, forwarder, updatedDeployment);
-  // Every later command reaches this through `assertDeploymentIntegrity`, which runs it
-  // whenever the record names a forwarder. This command is the one that writes that field, so
+  // `sweep` and `status` reach this through `assertDeploymentIntegrity`, which runs it for the
+  // commands that touch the forwarder. This command is the one that writes that field, so
   // it has no such record to run integrity against yet and calls the check directly — exactly
   // as `deploy.ts` does for the pool, and for the same reason: the address is about to be
   // written down and configured as a validator's fee recipient, so a creation transaction

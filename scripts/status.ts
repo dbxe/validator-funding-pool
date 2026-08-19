@@ -19,7 +19,10 @@ async function main() {
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
-  await assertDeploymentIntegrity(publicClient, pool, deployment);
+  // `status` reports the forwarder's balance and is the read-only command an operator runs to
+  // check the sidecar, so it authenticates it. It signs nothing, so a refusal here costs a
+  // read rather than a recovery path.
+  await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");
   const state = Number(await pool.read.state());
   const participantCount = Number(await pool.read.participantCount());
   const balance = await publicClient.getBalance({ address: deployment.pool });

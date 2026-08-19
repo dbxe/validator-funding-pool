@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -1030,6 +1030,59 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
 
     assertReadableFailure(result, "sweep", "Contract error: EmptyBalance()");
     assertOutputLacks(result, "Swept in block");
+  });
+
+  it("a broken forwarder in the record stops sweep and leaves the recovery paths alone", async () => {
+    // The escape-hatch liveness property, driven end to end. A record whose
+    // `feeRecipientForwarder` no longer holds the sidecar — replaced, or simply an address
+    // with no code — used to fail `assertDeploymentIntegrity` for EVERY command, taking
+    // `refund`, `claim`, and `request-exit` down with `sweep` over a sidecar none of them
+    // touches. The three payout and recovery commands now skip the forwarder entirely.
+    const record = JSON.parse(readFileSync(deploymentFile, "utf8")) as DeploymentRecord;
+    const brokenFile = path.join(workdir, "deployment-broken-forwarder.json");
+    writeFileSync(
+      brokenFile,
+      `${JSON.stringify({ ...record, feeRecipientForwarder: outsider.address }, null, 2)}\n`,
+    );
+
+    // `sweep` is about the forwarder, so it still refuses — and it refuses on the forwarder,
+    // before anything is broadcast.
+    const sweeping = expectFailure(
+      await runCommand({ script: "sweep", env: asOperator({ DEPLOYMENT_FILE: brokenFile }) }),
+    );
+    assertReadableFailure(
+      sweeping,
+      "sweep",
+      `feeRecipientForwarder has no code at ${outsider.address}`,
+    );
+    assertOutputLacks(sweeping, "Swept in block");
+
+    // `refund` and `claim` read and pay from the pool and never look at the forwarder.
+    const refunding = expectSuccess(
+      await runCommand({ script: "refund", env: asOperator({ DEPLOYMENT_FILE: brokenFile }) }),
+    );
+    assertOutputContains(refunding, "Nothing to refund; no transaction was sent.");
+    assertOutputLacks(refunding, "FeeRecipientForwarder");
+
+    const claiming = expectSuccess(
+      await runCommand({
+        script: "claim",
+        env: baseEnv({ PRIVATE_KEY: outsider.privateKey, DEPLOYMENT_FILE: brokenFile }),
+      }),
+    );
+    assertOutputContains(claiming, "Nothing to claim; no transaction was sent.");
+    assertOutputLacks(claiming, "FeeRecipientForwarder");
+
+    // And the escape hatch itself, which spends a real EIP-7002 fee against the real predeploy.
+    const exiting = await beacon.withScenario(
+      () => beacon.setValidator(deposits.pubkey, activeValidator(withdrawalCredentials)),
+      () =>
+        runCommand({ script: "request-exit", env: asOperator({ DEPLOYMENT_FILE: brokenFile }) }),
+    );
+    expectSuccess(exiting);
+    assertOutputContains(exiting, "Exit requested in block ");
+    assertOutputLacks(exiting, "FeeRecipientForwarder");
+    assert.equal(await readPool<bigint>("exitRequestAttemptCount"), 3n);
   });
 
   // -------------------------------------------------------------------------

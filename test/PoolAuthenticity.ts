@@ -507,7 +507,7 @@ describe("pool authenticity", async function () {
     console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
     console.warn = () => {};
     try {
-      await assertDeploymentIntegrity(publicClient, poolA, deployment);
+      await assertDeploymentIntegrity(publicClient, poolA, deployment, "forwarder-untouched");
     } finally {
       console.log = originalLog;
       console.warn = originalWarn;
@@ -517,10 +517,12 @@ describe("pool authenticity", async function () {
     // An address with no code fails before any of it: the pool used to be the one address
     // in the record that was never checked for code.
     await assert.rejects(
-      assertDeploymentIntegrity(publicClient, poolA, {
-        ...deployment,
-        pool: "0x1111111111111111111111111111111111111111",
-      }),
+      assertDeploymentIntegrity(
+        publicClient,
+        poolA,
+        { ...deployment, pool: "0x1111111111111111111111111111111111111111" },
+        "forwarder-untouched",
+      ),
       /pool has no code at 0x1111111111111111111111111111111111111111/,
     );
   });
@@ -659,7 +661,7 @@ describe("pool authenticity", async function () {
     assert.equal(maskedBytes, 64);
   });
 
-  it("authenticates the forwarder as part of assertDeploymentIntegrity, when the record names one", async function () {
+  it("authenticates the forwarder for the commands that touch it, and skips it for the rest", async function () {
     const { pool, forwarder, otherForwarder, deposit, withdrawal, first } =
       await networkHelpers.loadFixture(forwarderFixture);
     const depositCode = (await publicClient.getCode({ address: deposit.address })) as Hex;
@@ -683,7 +685,7 @@ describe("pool authenticity", async function () {
     console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
     console.warn = () => {};
     try {
-      await assertDeploymentIntegrity(publicClient, pool, deployment);
+      await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");
     } finally {
       console.log = originalLog;
       console.warn = originalWarn;
@@ -694,28 +696,65 @@ describe("pool authenticity", async function () {
       1,
     );
 
-    // A record naming a forwarder that points at a different pool is fatal for every command
-    // that reads it, not only for the two that hold a forwarder instance.
+    // A record naming a forwarder that points at a different pool is fatal for the commands
+    // whose work is about the forwarder.
     await silentlyAsync(async () =>
       assert.rejects(
-        assertDeploymentIntegrity(publicClient, pool, {
-          ...deployment,
-          feeRecipientForwarder: otherForwarder.address,
-        }),
+        assertDeploymentIntegrity(
+          publicClient,
+          pool,
+          { ...deployment, feeRecipientForwarder: otherForwarder.address },
+          "authenticate-forwarder",
+        ),
         /FeeRecipientForwarder pool .* does not match deployment pool/,
       ),
     );
 
+    // And it is NOT fatal for the commands that never touch the forwarder. This is the
+    // escape-hatch liveness property: `refund`, `claim`, and `request-exit` read and pay from
+    // the pool, so a sidecar that is broken, replaced, or missing from the local build must
+    // not be able to stop them.
+    const noForwarderLines: string[] = [];
+    const savedLog = console.log;
+    const savedWarn = console.warn;
+    console.log = (...args: unknown[]) => noForwarderLines.push(args.map(String).join(" "));
+    console.warn = () => {};
+    try {
+      await assertDeploymentIntegrity(
+        publicClient,
+        pool,
+        { ...deployment, feeRecipientForwarder: otherForwarder.address },
+        "forwarder-untouched",
+      );
+    } finally {
+      console.log = savedLog;
+      console.warn = savedWarn;
+    }
+    // Skipped entirely, not merely passed: the forwarder is never read.
+    assert.equal(
+      noForwarderLines.filter((line) => line.includes("FeeRecipientForwarder runtime code")).length,
+      0,
+      `the forwarder was checked anyway: ${JSON.stringify(noForwarderLines)}`,
+    );
+    assert.equal(
+      noForwarderLines.filter((line) => line.includes("Pool runtime code matches")).length,
+      1,
+    );
+
     // And the declaration that catches a record naming a forwarder the operator did not mean.
+    // Scoped OFF above; the pin is evaluated regardless, because it costs a string comparison
+    // and a pin the operator set must never be silently unevaluated.
     const original = process.env.EXPECTED_FORWARDER;
     try {
       process.env.EXPECTED_FORWARDER = otherForwarder.address;
-      await silentlyAsync(async () =>
-        assert.rejects(
-          assertDeploymentIntegrity(publicClient, pool, deployment),
-          new RegExp(`names fee-recipient forwarder ${forwarder.address}, not the declared EXPECTED_FORWARDER`),
-        ),
-      );
+      for (const scope of ["authenticate-forwarder", "forwarder-untouched"] as const) {
+        await silentlyAsync(async () =>
+          assert.rejects(
+            assertDeploymentIntegrity(publicClient, pool, deployment, scope),
+            new RegExp(`names fee-recipient forwarder ${forwarder.address}, not the declared EXPECTED_FORWARDER`),
+          ),
+        );
+      }
 
       // The case the pin could not see: a record with no forwarder at all. The comparison
       // has nothing to run against, so before this it reported a clean pass with
@@ -723,7 +762,7 @@ describe("pool authenticity", async function () {
       const { feeRecipientForwarder: _dropped, ...withoutForwarder } = deployment;
       await silentlyAsync(async () =>
         assert.rejects(
-          assertDeploymentIntegrity(publicClient, pool, withoutForwarder),
+          assertDeploymentIntegrity(publicClient, pool, withoutForwarder, "forwarder-untouched"),
           new RegExp(
             `EXPECTED_FORWARDER ${otherForwarder.address} is declared, but the deployment ` +
               `record .* names no fee-recipient forwarder at all`,
@@ -735,7 +774,7 @@ describe("pool authenticity", async function () {
       // deployed the optional sidecar.
       delete process.env.EXPECTED_FORWARDER;
       await silentlyAsync(async () =>
-        assertDeploymentIntegrity(publicClient, pool, withoutForwarder),
+        assertDeploymentIntegrity(publicClient, pool, withoutForwarder, "forwarder-untouched"),
       );
     } finally {
       if (original === undefined) delete process.env.EXPECTED_FORWARDER;
