@@ -160,6 +160,27 @@ Ordinary ETH transfers are accepted only during `Funding` and `ToppedUp`. Forced
 
 Forced ETH before top-up becomes pool proceeds after top-up, except that outstanding refund claims remain excluded. There is no sender rescue path for forced ETH.
 
+## Plain-Transfer Funding
+
+A participant can fund by sending a plain ETH transfer to the pool instead of calling `fund()`. `receive()` routes a transfer to the same `_fund(msg.sender, msg.value)` used by `fund()`, so during `Funding` the two paths are indistinguishable: same credit, same `ParticipantFunded` event, same `AccountingSnapshot`, same reverts. Exceeding the caller's remaining allocation reverts `FundingCapExceeded` on both paths; a plain transfer cannot silently over-fund. A non-participant reverts `NotParticipant` on both paths. Before `Funding`, and after an expired attempt is closed, both paths revert `InvalidState`.
+
+The transfer path exists because it clear-signs. A zero-calldata transfer renders the destination and the amount on a hardware wallet; `fund()` calldata does not. `fund.ts` uses it by default on the `ledger` network.
+
+### The One Divergence
+
+The paths differ in exactly one state. Once the pool is `ToppedUp`, `fund()` reverts `InvalidState` and returns the ETH, while `receive()` accepts it as pool proceeds and emits `EthReceivedViaCall`. Accepted proceeds are shared pro rata by final credited weight, so a participant who lands a transfer in that window recovers only their own share of it. At a `12 ETH` weight, a stray `1 ETH` transfer returns `0.375 ETH` through `claim()` and donates the other `0.625 ETH` to the remaining participants.
+
+That window is narrow, and reaching it requires the participant to have sent twice. `topUpValidator()` requires `totalActiveFundedWei` to equal exactly `31 ETH`, which requires every participant's remaining allocation to be zero — including the sender's. `fund.ts` refuses to send when the caller's remaining allocation is zero, and re-reads state, deadline, and remaining allocation together immediately before signing. So the sender's remaining allocation must go from nonzero at that re-read to zero before the transfer is mined, and only another transaction from that same sender can consume it.
+
+The reachable sequence is therefore: the participant has two funding transactions in flight, the first fills their allocation, the operator's `topUpValidator()` lands, and the second arrives against a topped-up pool. The reverse ordering is safe — a second send that arrives while `Funding` is still open reverts `FundingCapExceeded` and the ETH comes back.
+
+Operationally:
+
+- Never run a funding command twice. Check `npm run status` first.
+- If a funding transaction is stuck, replace it at the same nonce. Never send a second transaction at a new nonce.
+- The final re-read narrows the window; it cannot close it. No off-chain check can.
+- If certainty matters more than clear signing, use the calldata path with `FUND_VIA_TRANSFER=0`. A late `fund()` reverts and the ETH stays with the sender. That is the trade: the transfer path buys a readable device screen at the cost of the revert acting as a safety net in this one window.
+
 ## Event Reconciliation
 
 Events are reconciliation aids, not the source of entitlement accounting.
@@ -236,6 +257,94 @@ Future Ethereum staking features may require contract changes or may simply be u
 
 Override any address or path with environment variables when using an unrecognized test chain. The contract itself checks that configured system addresses have code but does not hardcode mainnet-only addresses; the operational scripts enforce the chain-specific mainnet pins and warn rather than applying them to unknown chain IDs.
 
+## Signing And Key Custody
+
+Ranked, for mainnet:
+
+1. **Ledger.** The signing key never reaches this machine. Use the `:ledger` commands.
+2. **Encrypted keystore.** The key lives on this machine but never in a shell history, an env file, or a process listing.
+3. **`PRIVATE_KEY` in the environment.** Development and test networks only. It is plaintext in your shell, your `.env`, and every child process.
+
+### Ledger
+
+Install the Ethereum app on the device, unlock it, and open the app before running a command. Then set `LEDGER_ADDRESS` to the account address the device will sign with, and run the `:ledger` variant of any action:
+
+```bash
+RPC_URL=https://... \
+BEACON_NODE_URL=https://... \
+LEDGER_ADDRESS=0xYourLedgerAccount \
+npm run fund:ledger
+```
+
+Every write action has one: `deploy:ledger`, `deploy-forwarder:ledger`, `commit-predeposit:ledger`, `open-funding-attempt:ledger`, `close-expired-funding-attempt:ledger`, `fund:ledger`, `refund:ledger`, `top-up:ledger`, `claim:ledger`, `request-exit:ledger`, `sweep:ledger`. `status` reads only and needs no signer.
+
+There are separate entries rather than one command with a network flag because Hardhat rejects a repeated `--network` option, so `npm run fund -- --network ledger` cannot work while `npm run fund` pins `--network rpc`. An environment-selected network is worse: the pinned `--network rpc` silently wins over `HARDHAT_NETWORK`, so a Ledger user who set the variable would sign with the plaintext key instead. Two explicit entries cannot be confused for each other.
+
+The `ledger` network configures no `accounts`, so no private key is read for it. `LEDGER_ADDRESS` is a public address, not a secret, and is read from the environment rather than the keystore; the `ledger` network refuses to load without it.
+
+`eth_accounts` on the `ledger` network returns the node's accounts followed by the Ledger account. Every script signs with the first. Point `RPC_URL` at a node that exposes no unlocked accounts — any public provider, or your own node with the `personal`/`accounts` namespace disabled — or the scripts will sign with a node account instead of the device.
+
+### Encrypted Keystore
+
+`hardhat-keystore` ships as a plugin dependency of `@nomicfoundation/hardhat-toolbox-viem`, so it is already available with no config change. The config resolves `RPC_URL` and `PRIVATE_KEY` through `configVariable()`, which reads the keystore before falling back to the environment.
+
+```bash
+npx hardhat keystore set RPC_URL
+npx hardhat keystore set PRIVATE_KEY
+npx hardhat keystore list
+npx hardhat keystore path
+npm run fund
+```
+
+Values are prompted for, encrypted with a password, and stored outside the repository (`npx hardhat keystore path` prints where). Nothing is written to `.env`.
+
+Two behaviours to know:
+
+- The keystore takes precedence over the environment. A stale keystore entry shadows the `RPC_URL` you exported in your shell, with no warning. Use `npx hardhat keystore get RPC_URL` when a run targets the wrong chain.
+- The keystore is skipped entirely under CI, which falls back to environment variables.
+
+A keystore protects a key at rest on a machine you already trust. It does not protect against a compromised machine: once you enter the password the plaintext key is in this process. Only a hardware wallet moves the key out of reach.
+
+### What The Device Actually Shows
+
+A Ledger clear-signs a zero-calldata ETH transfer: destination address, amount, network, and fees all render on screen. Any transaction carrying calldata has to be blind-signed unless a clear-signing descriptor for that contract is loaded — the device shows the destination, the ETH value, and the fees, but not the decoded arguments. Blind signing must be enabled in the Ethereum app's settings for those actions to be possible at all.
+
+| Action | Command | Calldata | On device |
+| --- | --- | --- | --- |
+| Fund via transfer | `npm run fund:ledger` | none | Clear-signed: pool address and amount |
+| Fund via calldata | `FUND_VIA_TRANSFER=0 npm run fund:ledger` | `fund()` | Blind-signed; value is shown |
+| Claim to self | `npm run claim:ledger` | `claim()` | Blind-signed; value `0` |
+| Claim redirected | `RECIPIENT=0x... npm run claim:ledger` | `claimTo(address)` | Blind-signed; value `0`; recipient not shown |
+| Refund to self | `npm run refund:ledger` | `refund()` | Blind-signed; value `0` |
+| Refund redirected | `RECIPIENT=0x... npm run refund:ledger` | `refundTo(address)` | Blind-signed; value `0`; recipient not shown |
+| Request exit | `npm run request-exit:ledger` | `requestExit(uint256)` | Blind-signed; value is the fee |
+| Commit predeposit | `npm run commit-predeposit:ledger` | `commitAndPredeposit(...)` | Blind-signed; value `1 ETH` |
+| Open funding attempt | `npm run open-funding-attempt:ledger` | `openFundingAttempt(address[],uint256[])` | Blind-signed; value `0` |
+| Top up | `npm run top-up:ledger` | `topUpValidator()` | Blind-signed; value `0` |
+| Close expired attempt | `npm run close-expired-funding-attempt:ledger` | `closeExpiredFundingAttempt()` | Blind-signed; value `0` |
+| Sweep forwarder | `npm run sweep:ledger` | `sweep()` | Blind-signed; value `0` |
+
+Funding is the only action with a clear-signed path, and it is the action that moves the most ETH. Everything else is blind-signed today.
+
+### The `claimTo` And `refundTo` Wart
+
+`claimTo(address)` and `refundTo(address)` take the payout address as an ABI argument, not as the transaction destination. On a blind-signed transaction the device shows the destination as the pool and the value as `0`. The address that will actually receive every wei you are owed sits inside calldata the device does not render. A host that has been tampered with can substitute a recipient and the device gives you nothing to compare against. It is the same exposure as any blind-signed argument, but it is the one argument in this contract whose corruption redirects funds outright.
+
+Mitigations, in order:
+
+1. Prefer the no-argument variants. `claim()` and `refund()` both exist and always pay `msg.sender`, which is the device's own account. There is no unverifiable address to corrupt. `claim.ts` and `refund.ts` use them whenever `RECIPIENT` is unset or equals the signing account, so leaving `RECIPIENT` unset is the safe default.
+2. Reach for `claimTo` / `refundTo` only when the signing account genuinely cannot receive ETH.
+3. When you must redirect, derive the recipient independently on a second machine and compare it against the address the script prints before you approve on the device. This detects a tampered env file; it does not detect a tampered signing host.
+4. An ERC-7730 descriptor (see below) lets wallets that support it render the recipient. It does not help the Hardhat Ledger path, which requests no descriptor resolution.
+
+### ERC-7730 Clear-Signing Descriptor
+
+`clear-signing/` holds an ERC-7730 descriptor for the pool's user-facing functions. Submitting it to Ledger's registry is what makes wallets that consult the registry render arguments — the `claimTo` recipient in particular — instead of a data hash.
+
+It does not change what `npm run *:ledger` shows. `@nomicfoundation/hardhat-ledger` calls `ledgerService.resolveTransaction(tx, {}, {})` with an empty resolution config, so it requests no external-plugin, token, or NFT descriptor for any transaction. Hardhat calldata paths stay blind-signed regardless of what is published. The descriptor is for participants who sign the same calls through Ledger Live or another registry-aware wallet.
+
+See `clear-signing/README.md` for the deployment binding and registry submission steps.
+
 ## Commands
 
 Install dependencies and run the local checks:
@@ -295,8 +404,12 @@ RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run request-exit
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
 ```
 
+The `PRIVATE_KEY=0x...` shown above is the development form. On mainnet, drop it and use `npm run <action>:ledger` with `LEDGER_ADDRESS` set, or store `RPC_URL` and `PRIVATE_KEY` in the encrypted keystore. See "Signing And Key Custody".
+
 Environment variables:
 
+- `LEDGER_ADDRESS`: Ledger account address for the `ledger` network; required by every `:ledger` command.
+- `FUND_VIA_TRANSFER`: `1` forces `fund` to send a zero-calldata transfer, `0` forces the `fund()` calldata path. Defaults to the transfer path on the `ledger` network and to calldata elsewhere.
 - `DEPOSIT_CONTRACT`: deposit contract address.
 - `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address.
 - `OPERATOR`: operator address; defaults to the deployer.
