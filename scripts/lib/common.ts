@@ -203,9 +203,33 @@ export interface SignerConnection {
   networkConfig: { ledgerAccounts?: readonly string[] };
 }
 
+/// The receipt fields every post-broadcast check reads. `status` is `"success"` or
+/// `"reverted"`; viem derives it from the receipt's `status` field
+/// (`node_modules/viem/_esm/utils/formatters/transactionReceipt.js` lines 5-8 and 33-35).
 interface SenderVerifiedReceipt {
   from: Address;
   blockNumber: bigint;
+  status: "success" | "reverted";
+}
+
+/// The transaction fields the replacement policy compares. A subset of viem's
+/// `Transaction`, so a real client's `onReplaced` payload satisfies it structurally.
+interface ObservedTransaction {
+  hash: Hex;
+  to: Address | null;
+  value: bigint;
+  input: Hex;
+}
+
+/// The `onReplaced` payload, narrowed to what the policy below decides on.
+/// `transactionReceipt` is deliberately absent: viem resolves the promise with the very
+/// same receipt object it passes here (`waitForTransactionReceipt.js` lines 181-189), so
+/// the resolved value is already the replacement's receipt and a second copy would only
+/// invite the two to be confused.
+interface ObservedReplacement {
+  reason: string;
+  replacedTransaction: ObservedTransaction;
+  transaction: ObservedTransaction;
 }
 
 /// Asserts that the wallet a script is about to sign with is the wallet the operator
@@ -265,13 +289,45 @@ export function assertActiveSigner(
 /// 190-192, cache file `<hardhat config dir>/ledger/accounts.json` per
 /// `internal/cache.js`). A device or seed swapped since the mapping was written signs at
 /// the cached path with a different key, and the plugin reports no error.
+/// It also decides what a mined transaction is allowed to be. Three things are checked, in
+/// this order, and each one is fatal:
+///
+///   1. The sender. See above.
+///   2. Replacement. `waitForTransactionReceipt` does not only wait for `hash`: when a
+///      same-nonce transaction from the same sender lands instead, it resolves with the
+///      REPLACEMENT's receipt and reports the substitution through `onReplaced`
+///      (`node_modules/viem/_esm/actions/public/waitForTransactionReceipt.js` lines
+///      157-189 — the block is found by `from` + `nonce` at line 157, its receipt is
+///      fetched at line 163, `onReplaced` is invoked at line 182 and the promise resolves
+///      with that same receipt at line 188). Without capturing the callback, the resolved
+///      receipt silently describes a different transaction than the one this script
+///      signed. Only a reprice is acceptable: same destination, same value, same calldata,
+///      higher fee. A `cancelled` or `replaced` transaction did something else with the
+///      nonce, and the intended transaction never happened.
+///   3. The status. A reverted transaction has a receipt, a block number, and the right
+///      sender. Nothing below this line may report success for one.
+///
+/// Every success log line in every command is downstream of this function returning, so a
+/// reverted or substituted transaction can never be printed as a success.
 export async function waitForSenderVerifiedReceipt<T extends SenderVerifiedReceipt>(
-  publicClient: { waitForTransactionReceipt: (args: { hash: Hex }) => Promise<T> },
+  publicClient: {
+    waitForTransactionReceipt: (args: {
+      hash: Hex;
+      onReplaced?: (replacement: ObservedReplacement) => void;
+    }) => Promise<T>;
+  },
   hash: Hex,
   intendedSender: Address,
   label: string,
 ): Promise<T> {
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  let replacement: ObservedReplacement | undefined;
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash,
+    onReplaced: (observed) => {
+      replacement = observed;
+    },
+  });
+
   if (receipt.from.toLowerCase() !== intendedSender.toLowerCase()) {
     throw new Error(
       `FATAL SIGNER MISMATCH: ${label} transaction ${hash} was mined with from=${receipt.from}, ` +
@@ -281,7 +337,64 @@ export async function waitForSenderVerifiedReceipt<T extends SenderVerifiedRecei
         `exactly this. Stop, run "npm run status", and reconcile pool state before sending anything else`,
     );
   }
+
+  if (replacement !== undefined) {
+    assertAcceptableReplacement(replacement, hash, label);
+  }
+
+  if (receipt.status !== "success") {
+    throw new Error(
+      `FATAL: ${label} transaction ${replacement?.transaction.hash ?? hash} was mined but ` +
+        `REVERTED (receipt status ${receipt.status}) in block ${receipt.blockNumber}. Nothing it ` +
+        `intended to do happened, and any gas it consumed is spent. Run "npm run status" to read ` +
+        `the pool's actual state before retrying ${label}`,
+    );
+  }
+
   return receipt;
+}
+
+/// A reprice keeps the transaction's meaning and changes only its price, so the receipt
+/// still describes what this script signed for. Anything else does not.
+///
+/// viem classifies the reason itself and only calls a replacement `repriced` when `to`,
+/// `value`, and `input` all match the replaced transaction
+/// (`waitForTransactionReceipt.js` lines 171-176). The content comparison is repeated here
+/// rather than trusted: this is the check that decides whether a success line may be
+/// printed, and it should not depend on a classification made elsewhere.
+function assertAcceptableReplacement(
+  replacement: ObservedReplacement,
+  hash: Hex,
+  label: string,
+) {
+  const { reason, replacedTransaction, transaction } = replacement;
+  const sameContent =
+    sameAddress(transaction.to, replacedTransaction.to) &&
+    transaction.value === replacedTransaction.value &&
+    transaction.input.toLowerCase() === replacedTransaction.input.toLowerCase();
+
+  if (reason === "repriced" && sameContent) {
+    console.log(
+      `${label} transaction ${hash} was repriced and mined as ${transaction.hash} with ` +
+        `identical destination, value, and calldata`,
+    );
+    return;
+  }
+
+  throw new Error(
+    `FATAL REPLACED TRANSACTION: ${label} transaction ${hash} never landed. A different ` +
+      `transaction at the same nonce from the same sender was mined instead ` +
+      `(${transaction.hash}, reason "${reason}"${sameContent ? "" : ", different destination, value, or calldata"}): ` +
+      `to=${transaction.to ?? "<none>"} value=${transaction.value} instead of ` +
+      `to=${replacedTransaction.to ?? "<none>"} value=${replacedTransaction.value}. ` +
+      `What this script intended did NOT happen, and something else did. Run "npm run status", ` +
+      `reconcile pool state against the mined transaction, and only then decide whether to re-run ${label}`,
+  );
+}
+
+function sameAddress(left: Address | null, right: Address | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.toLowerCase() === right.toLowerCase();
 }
 
 /// Confirms the mined deployment receipt created the contract at the address the
