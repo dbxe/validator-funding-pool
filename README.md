@@ -174,6 +174,8 @@ That window is narrow, and reaching it requires the participant to have sent twi
 
 The reachable sequence is therefore: the participant has two funding transactions in flight, the first fills their allocation, the operator's `topUpValidator()` lands, and the second arrives against a topped-up pool. The reverse ordering is safe — a second send that arrives while `Funding` is still open reverts `FundingCapExceeded` and the ETH comes back.
 
+One other path reaches the same window without a double-send, and it is far narrower. If a single transfer stays unmined past the funding deadline, someone closes the expired attempt, the operator opens a fresh attempt that the sender is not part of or is fully funded without them, and that attempt tops up — then the stale transfer lands in `ToppedUp`. The final re-read requires the deadline to still be in the future, so this needs a transaction to sit pending for the rest of the funding window plus an entire second attempt. Underpriced funding transactions are the way to get there, so price them to confirm.
+
 Operationally:
 
 - Never run a funding command twice. Check `npm run status` first.
