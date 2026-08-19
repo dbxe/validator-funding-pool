@@ -9,6 +9,7 @@
     "typecheck": "hardhat compile && tsc --noEmit",
     "test": "hardhat test",
     "test:prod": "hardhat test --build-profile production",
+    "test:e2e": "hardhat test nodejs test-e2e/Commands.e2e.ts",
     "deploy": "hardhat run scripts/deploy.ts --network rpc",
     "deploy-forwarder": "hardhat run scripts/deploy-forwarder.ts --network rpc",
     "commit-predeposit": "hardhat run scripts/commit-predeposit.ts --network rpc",
