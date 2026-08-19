@@ -7,14 +7,15 @@ import {
   assertDeploymentMatchesPool,
   assertDeploymentSystemCodeHashes,
   assertHasCode,
-  assertPoolRuntimeCodeMatchesLocalBuild,
+  assertRuntimeCodeMatchesLocalBuild,
   codeHash,
   defaultDepositContract,
   deploymentPath,
   envAddress,
   envBigInt,
-  readLocalPoolBuildArtifacts,
+  readLocalBuildArtifacts,
   reportFatalError,
+  VERIFIED_POOL,
   waitForSenderVerifiedReceipt,
   writeDeployment,
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
@@ -98,10 +99,11 @@ async function main() {
   // starts from. It reads the chain rather than the artifact it just deployed from, so a
   // creation transaction that landed as something other than what was compiled is caught
   // here, before the address is written down or published.
-  await assertPoolRuntimeCodeMatchesLocalBuild(
+  await assertRuntimeCodeMatchesLocalBuild(
     publicClient,
     pool.address,
-    readLocalPoolBuildArtifacts(),
+    readLocalBuildArtifacts(VERIFIED_POOL),
+    VERIFIED_POOL,
   );
   writeDeployment(deployment);
 }

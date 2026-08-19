@@ -1139,35 +1139,86 @@ export async function assertDeploymentIntegrity(
   const chainId = await assertDeploymentChain(publicClient, deployment);
   await assertHasCode(publicClient, deployment.pool, "pool");
   const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
-  await assertPoolRuntimeCodeMatchesLocalBuild(
+  await assertRuntimeCodeMatchesLocalBuild(
     publicClient,
     deployment.pool,
-    readLocalPoolBuildArtifacts(),
+    readLocalBuildArtifacts(VERIFIED_POOL),
+    VERIFIED_POOL,
   );
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
   if (deployment.feeRecipientForwarder !== undefined) {
-    await assertHasCode(
-      publicClient,
-      deployment.feeRecipientForwarder,
-      "feeRecipientForwarder",
-    );
-    const forwarderPool = await publicClient.readContract({
-      address: deployment.feeRecipientForwarder,
-      abi: [
-        {
-          type: "function",
-          name: "pool",
-          stateMutability: "view",
-          inputs: [],
-          outputs: [{ name: "", type: "address" }],
-        },
-      ] as const,
-      functionName: "pool",
-    }) as Address;
-    assertForwarderPool(forwarderPool, deployment.pool);
+    await assertForwarderAuthenticity(publicClient, deployment.feeRecipientForwarder, deployment.pool);
   }
   return liveConfig;
+}
+
+const FORWARDER_POOL_ABI = [
+  {
+    type: "function",
+    name: "pool",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+] as const;
+
+/// Everything that can be established about a fee-recipient forwarder without trusting it.
+///
+/// The forwarder used to be checked for code and for a `pool()` that answers with this pool,
+/// which is a BINDING check and not an authenticity one: `pool()` is whatever the deployed
+/// code chooses to return, so a contract that reports the right pool and sends its balance
+/// somewhere else passes it. That matters because the forwarder is the address an operator
+/// configures as their validator client's `fee_recipient`: every block that validator
+/// proposes pays its execution-layer rewards there, continuously, with no per-payment
+/// decision to check.
+///
+/// So the same three layers the pool gets are applied here: the operator's optional
+/// `EXPECTED_FORWARDER` declaration, the binding to this pool, and — the one that is not
+/// circular — the deployed runtime code against the participant's own build of
+/// `contracts/FeeRecipientForwarder.sol`, with the single `pool` immutable's byte ranges
+/// masked on both sides.
+export async function assertForwarderAuthenticity(
+  publicClient: DeploymentPublicClient,
+  forwarder: Address,
+  poolAddress: Address,
+): Promise<void> {
+  assertExpectedForwarder(forwarder);
+  await assertHasCode(publicClient, forwarder, VERIFIED_FORWARDER.role);
+  const forwarderPool = (await publicClient.readContract({
+    address: forwarder,
+    abi: FORWARDER_POOL_ABI,
+    functionName: "pool",
+  })) as Address;
+  assertForwarderPool(forwarderPool, poolAddress);
+  await assertRuntimeCodeMatchesLocalBuild(
+    publicClient,
+    forwarder,
+    readLocalBuildArtifacts(VERIFIED_FORWARDER),
+    VERIFIED_FORWARDER,
+  );
+}
+
+/// A declare-and-verify pin on the forwarder the deployment record names.
+///
+/// The same shape as `assertExpectedPool`, for the same reason: `DEPLOYMENT_FILE` selects the
+/// record, and the record names the forwarder as freely as it names the pool. Unset or empty
+/// declares nothing; a value that is not an address is fatal naming the variable; a mismatch
+/// is fatal before anything is sent.
+export function assertExpectedForwarder(forwarderAddress: Address) {
+  const expectedForwarder = process.env.EXPECTED_FORWARDER ?? "";
+  if (expectedForwarder === "") return;
+  if (!isAddress(expectedForwarder, { strict: false })) {
+    throw new Error(`EXPECTED_FORWARDER ${expectedForwarder} is not a 0x-prefixed 20-byte address`);
+  }
+  if (forwarderAddress.toLowerCase() !== expectedForwarder.toLowerCase()) {
+    throw new Error(
+      `The deployment record ${deploymentPath()} names fee-recipient forwarder ` +
+        `${forwarderAddress}, not the declared EXPECTED_FORWARDER ${expectedForwarder}. Nothing ` +
+        `has been sent. DEPLOYMENT_FILE selects that record; point it at the record for the ` +
+        `forwarder you mean and re-run`,
+    );
+  }
 }
 
 export async function assertFeeRecipientForwarderMatchesDeployment(
@@ -1280,7 +1331,7 @@ interface ImmutableRange {
 /// The parts of a Hardhat build artifact this verification reads. `immutableReferences`
 /// maps solc's AST id for each immutable to every byte range in the deployed bytecode
 /// where its value is written at construction time.
-export interface PoolBuildArtifact {
+export interface BuildArtifact {
   deployedBytecode: Hex;
   immutableReferences?: Record<string, readonly ImmutableRange[]>;
   buildInfoId?: string;
@@ -1288,19 +1339,53 @@ export interface PoolBuildArtifact {
 
 /// A local build artifact together with where it came from and which solidity build
 /// profile produced it.
-export interface PoolBuildCandidate {
+export interface BuildCandidate {
   source: string;
   profile: string;
-  artifact: PoolBuildArtifact;
+  artifact: BuildArtifact;
+}
+
+/// A contract this repository deploys and then verifies against the participant's own build.
+///
+/// The masking machinery below is written once and applied to both: the pool, whose runtime
+/// code is the thing capital is sent to, and the fee-recipient forwarder, whose runtime code
+/// decides where a validator's execution-layer rewards actually go. Only the artifact path
+/// and the operator-facing labels differ.
+export interface VerifiedContract {
+  /// The solidity contract name, used in the "no artifact" instruction.
+  name: string;
+  /// What the address is called in output and error messages, matching the label the
+  /// deployment-record checks already use for it.
+  role: string;
+  /// Where hardhat writes this contract's build artifact in this checkout.
+  artifactFile: string;
+  /// How many bytes a real build declares immutable, under either solidity profile. Quoted
+  /// in the plausibility failure so the number the ceiling is sized against is visible.
+  observedImmutableBytes: number;
 }
 
 const ARTIFACTS_ROOT = "artifacts";
-const POOL_ARTIFACT_FILE = path.join(
-  ARTIFACTS_ROOT,
-  "contracts",
-  "ValidatorFundingPool.sol",
-  "ValidatorFundingPool.json",
-);
+
+function artifactFile(contractName: string): string {
+  return path.join(ARTIFACTS_ROOT, "contracts", `${contractName}.sol`, `${contractName}.json`);
+}
+
+/// solc emits one 32-byte range per immutable *reference site*, not one per immutable. The
+/// pool's five immutables are read at 19 sites (608 bytes) and the forwarder's single `pool`
+/// at 2 (64 bytes), identically under both build profiles.
+export const VERIFIED_POOL: VerifiedContract = {
+  name: "ValidatorFundingPool",
+  role: "pool",
+  artifactFile: artifactFile("ValidatorFundingPool"),
+  observedImmutableBytes: 608,
+};
+
+export const VERIFIED_FORWARDER: VerifiedContract = {
+  name: "FeeRecipientForwarder",
+  role: "feeRecipientForwarder",
+  artifactFile: artifactFile("FeeRecipientForwarder"),
+  observedImmutableBytes: 64,
+};
 
 /// The ceiling on how many bytes an artifact may declare immutable.
 ///
@@ -1311,15 +1396,16 @@ const POOL_ARTIFACT_FILE = path.join(
 /// large is not a plausible immutable layout, so it is fatal rather than a match.
 ///
 /// Sized from the real artifact, not from the number of immutables. solc emits one 32-byte
-/// range per *reference site*, and one immutable is read at several sites: this contract's
-/// five immutables produce 19 sites, 608 bytes, identically under both build profiles
+/// range per *reference site*, and one immutable is read at several sites: the pool's five
+/// immutables produce 19 sites, 608 bytes, identically under both build profiles
 /// (`artifacts/contracts/ValidatorFundingPool.sol/ValidatorFundingPool.json`,
 /// `immutableReferences`; 16861 bytes of runtime under `default`, 10002 under
-/// `production`). 2048 is roughly three times the observed total, room for a contract with
-/// materially more immutable reads, and still far below the point where masking could hide
-/// a different contract — every unmasked byte, metadata hash included, must match exactly.
+/// `production`). The forwarder's single `pool` immutable produces 2 sites, 64 bytes, again
+/// under both profiles. 2048 is roughly three times the larger observed total, room for a
+/// contract with materially more immutable reads, and still far below the point where
+/// masking could hide a different contract — every unmasked byte, metadata hash included,
+/// must match exactly.
 const MAX_MASKED_IMMUTABLE_BYTES = 2048;
-const OBSERVED_POOL_IMMUTABLE_BYTES = 608;
 
 /// Masks every immutable's byte range with zeroes.
 ///
@@ -1386,9 +1472,11 @@ export function maskImmutableRanges(
   if (maskedBytes > MAX_MASKED_IMMUTABLE_BYTES) {
     throw new Error(
       `${what}: the immutable ranges cover ${maskedBytes} of the ${bytes.length} bytes of code, ` +
-        `above the ${MAX_MASKED_IMMUTABLE_BYTES}-byte ceiling. A real build of ` +
-        `ValidatorFundingPool declares ${OBSERVED_POOL_IMMUTABLE_BYTES} bytes under either ` +
-        `solidity profile, so this artifact's immutable layout is implausible. The ranges are ` +
+        `above the ${MAX_MASKED_IMMUTABLE_BYTES}-byte ceiling. A real build of this repository's ` +
+        `contracts declares far less — ${VERIFIED_POOL.observedImmutableBytes} bytes for ` +
+        `${VERIFIED_POOL.name} and ${VERIFIED_FORWARDER.observedImmutableBytes} for ` +
+        `${VERIFIED_FORWARDER.name}, under either solidity profile — so this artifact's ` +
+        `immutable layout is implausible. The ranges are ` +
         `masked on the chain's code too: a range set this broad would zero out the very bytes the ` +
         `comparison exists to check and match any contract at all. Delete artifacts/ and run ` +
         `"npm run build"`,
@@ -1400,26 +1488,35 @@ export function maskImmutableRanges(
   return { masked: `0x${bytes.toString("hex")}` as Hex, maskedBytes };
 }
 
-/// Compares the pool's on-chain runtime code against the participant's own local build.
+/// Compares a deployed contract's on-chain runtime code against the participant's own local
+/// build.
 ///
-/// This is the check that is not circular: the deployment record and the live pool are
+/// This is the check that is not circular: the deployment record and the live contract are
 /// both downstream of whoever deployed, but `artifacts/` is downstream of the audited
-/// source in this checkout. A pool that is not this contract fails here even when every
-/// record-to-pool comparison passes.
+/// source in this checkout. A contract that is not this source fails here even when every
+/// record-to-chain comparison passes.
+///
+/// It runs against both contracts this repository deploys. For the pool it decides whether
+/// capital may be sent at all. For the fee-recipient forwarder it decides something narrower
+/// and still worth having: the forwarder is what a validator client is configured to pay its
+/// execution-layer rewards to, and its `pool()` binding proves only what the contract chooses
+/// to report. Code that answers `pool()` honestly and sweeps somewhere else passes the
+/// binding check and fails this one.
 ///
 /// It is not a substitute for source verification. It proves the deployed code is the code
 /// this checkout builds; it says nothing about whether this checkout is the audited one.
-/// Verify the repository's provenance and the pool on Sourcify as well.
-export async function assertPoolRuntimeCodeMatchesLocalBuild(
+/// Verify the repository's provenance and the contracts on Sourcify as well.
+export async function assertRuntimeCodeMatchesLocalBuild(
   publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
-  poolAddress: Address,
-  candidates: readonly PoolBuildCandidate[],
-): Promise<PoolBuildCandidate> {
+  address: Address,
+  candidates: readonly BuildCandidate[],
+  subject: VerifiedContract = VERIFIED_POOL,
+): Promise<BuildCandidate> {
   if (candidates.length === 0) {
-    throw new Error(missingArtifactMessage([]));
+    throw new Error(missingArtifactMessage([], subject));
   }
 
-  const chainCode = await assertHasCode(publicClient, poolAddress, "pool");
+  const chainCode = await assertHasCode(publicClient, address, subject.role);
   const rejections: string[] = [];
 
   for (const candidate of candidates) {
@@ -1439,12 +1536,12 @@ export async function assertPoolRuntimeCodeMatchesLocalBuild(
 
     const references = candidate.artifact.immutableReferences ?? {};
     const artifact = maskImmutableRanges(artifactCode, references, `${candidate.source} deployedBytecode`);
-    const chain = maskImmutableRanges(chainCode, references, `pool ${poolAddress} runtime code`);
+    const chain = maskImmutableRanges(chainCode, references, `${subject.role} ${address} runtime code`);
     if (artifact.masked.toLowerCase() === chain.masked.toLowerCase()) {
       console.log(
-        `Pool runtime code matches the local build ${candidate.source} (solidity profile ` +
-          `${candidate.profile}); ${artifact.maskedBytes} immutable bytes masked, masked code hash ` +
-          keccak256(chain.masked),
+        `${capitalizeFirst(subject.role)} runtime code matches the local build ${candidate.source} ` +
+          `(solidity profile ${candidate.profile}); ${artifact.maskedBytes} immutable bytes masked, ` +
+          `masked code hash ${keccak256(chain.masked)}`,
       );
       return candidate;
     }
@@ -1455,55 +1552,62 @@ export async function assertPoolRuntimeCodeMatchesLocalBuild(
   }
 
   throw new Error(
-    `FATAL: the pool at ${poolAddress} does not run the code this checkout builds. Its runtime ` +
-      `code matches no local build artifact, with all ${candidates.length === 1 ? "its" : "their"} ` +
-      `immutable ranges masked on both sides: ${rejections.join("; ")}. This is the check that the ` +
-      `deployment record cannot make for you — a record and a pool can agree with each other and ` +
-      `still describe a contract nobody audited. Do not send capital to this address. If the pool ` +
-      `was built with the other solidity profile, rebuild locally with "npm run build" (default) or ` +
-      `"npx hardhat compile --build-profile production" and re-run; hardhat keeps only the ` +
-      `last-built profile's artifacts, so verifying against the other one means rebuilding`,
+    `FATAL: the ${subject.role} at ${address} does not run the code this checkout builds. Its ` +
+      `runtime code matches no local build artifact, with all ` +
+      `${candidates.length === 1 ? "its" : "their"} immutable ranges masked on both sides: ` +
+      `${rejections.join("; ")}. This is the check that the deployment record cannot make for ` +
+      `you — a record and a contract can agree with each other and still describe something ` +
+      `nobody audited. Do not send capital to this address. If it was built with the other ` +
+      `solidity profile, re-run this command with "--build-profile production"; hardhat compiles ` +
+      `before it runs a script and keeps only the last-built profile's artifacts, so the profile ` +
+      `has to be chosen on the command itself rather than by a separate compile`,
   );
 }
 
-/// Collects the local build artifacts the pool's runtime code may match.
+/// Collects the local build artifacts a deployed contract's runtime code may match.
 ///
 /// There is exactly one source: the hardhat build output in this checkout. No environment
 /// variable adds a candidate. An added candidate controls both sides of the comparison —
 /// its `deployedBytecode` is what the chain code is compared against AND its
 /// `immutableReferences` decide which bytes are ignored on both sides — so an
 /// externally-supplied artifact can always be made to match, which makes the whole check
-/// decorative. Hardhat 3 writes every build profile to the same `artifacts/` tree, so
-/// verifying against the profile that is not on disk means rebuilding with that profile and
-/// re-running; that is what the mismatch error says.
-export function readLocalPoolBuildArtifacts(
-  buildOutput: string = POOL_ARTIFACT_FILE,
-): PoolBuildCandidate[] {
+/// decorative. Hardhat 3 writes every build profile to the same `artifacts/` tree and
+/// recompiles with the profile of the command being run, so verifying against the other
+/// profile means passing `--build-profile` to the command itself; that is what the mismatch
+/// error says.
+export function readLocalBuildArtifacts(
+  subject: VerifiedContract = VERIFIED_POOL,
+  buildOutput: string = subject.artifactFile,
+): BuildCandidate[] {
   if (!existsSync(buildOutput)) {
-    throw new Error(missingArtifactMessage([buildOutput]));
+    throw new Error(missingArtifactMessage([buildOutput], subject));
   }
-  return [readPoolBuildCandidate(buildOutput)];
+  return [readBuildCandidate(buildOutput)];
 }
 
-function readPoolBuildCandidate(file: string): PoolBuildCandidate {
-  const artifact = JSON.parse(readFileSync(file, "utf8")) as PoolBuildArtifact;
+function readBuildCandidate(file: string): BuildCandidate {
+  const artifact = JSON.parse(readFileSync(file, "utf8")) as BuildArtifact;
   return { source: file, profile: describeBuildProfile(artifact), artifact };
 }
 
-function missingArtifactMessage(files: readonly string[]): string {
+function missingArtifactMessage(files: readonly string[], subject: VerifiedContract): string {
   return (
-    `FATAL: no local build artifact for ValidatorFundingPool was found` +
-    `${files.length === 0 ? "" : ` (looked for ${files.join(", ")})`}. The pool's runtime code is ` +
-    `verified against the contract this checkout builds, and that comparison cannot be skipped: ` +
-    `run "npm run build" and re-run this command`
+    `FATAL: no local build artifact for ${subject.name} was found` +
+    `${files.length === 0 ? "" : ` (looked for ${files.join(", ")})`}. The ${subject.role}'s ` +
+    `runtime code is verified against the contract this checkout builds, and that comparison ` +
+    `cannot be skipped: run "npm run build" and re-run this command`
   );
+}
+
+function capitalizeFirst(value: string): string {
+  return value.length === 0 ? value : `${value[0].toUpperCase()}${value.slice(1)}`;
 }
 
 /// Names the solidity build profile that produced an artifact, by reading the optimizer
 /// settings out of the build-info file the artifact points at. Reported alongside a match
 /// so the participant knows which of `hardhat.config.ts`'s two profiles they just verified
 /// against. Purely descriptive: a wrong or missing label cannot make a mismatch pass.
-function describeBuildProfile(artifact: PoolBuildArtifact): string {
+function describeBuildProfile(artifact: BuildArtifact): string {
   const buildInfoId = artifact.buildInfoId;
   if (buildInfoId === undefined) return "unknown (artifact records no buildInfoId)";
   const file = path.join(ARTIFACTS_ROOT, "build-info", `${buildInfoId}.json`);
@@ -2673,6 +2777,128 @@ export function assertFundingWasCredited(
       `"npm run status" and reconcile the pool's actual state — activeFundedWeiOf, ` +
       `refundableWeiOf, and claimable for ${signer} — before sending anything else`,
   );
+}
+
+/// `FeeRecipientForwarder.sol:13`. `sweep()` emits it with the whole balance it is about to
+/// forward, immediately before the transfer, so a receipt carrying it states the amount the
+/// forwarder actually sent — a fact that does not come from a fresh read of the endpoint.
+const FORWARDER_SWEPT_EVENT_ABI = [
+  {
+    type: "event",
+    name: "Swept",
+    inputs: [
+      { name: "caller", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+export interface SweepBalances {
+  /// The forwarder's balance in the block before the sweep: what the sweep had to move.
+  forwarderBefore: bigint;
+  /// The pool's balance in the block before the sweep, and in the sweep's own block.
+  poolBefore: bigint;
+  poolAfter: bigint;
+}
+
+/// Requires the mined sweep to prove the ETH REACHED THE POOL, not merely that a transaction
+/// succeeded.
+///
+/// `sweep` is the second command that moves ETH into the pool, and until now it was the only
+/// one that took the receipt's success as the end of the story: it printed the forwarder's
+/// balance before, the pool's balance after, and asserted nothing about the relationship
+/// between them. `assertFundingWasCredited` is the pattern this follows — a successful
+/// receipt from the right sender says a transaction executed, not that it did what the
+/// command was for.
+///
+/// Two independent pieces of evidence are used, and both come from the chain's own record of
+/// the transaction rather than from a later read. The receipt's `Swept` log says what the
+/// forwarder sent. The pool's balance across the sweep's own block says what the pool
+/// received. Comparing the second against the forwarder's pre-sweep balance is what catches a
+/// forwarder whose `sweep()` sends somewhere else, or sends part.
+///
+/// A delta ABOVE the pre-sweep balance is not a failure: the forwarder is a validator's
+/// `fee_recipient` and a block it proposed may pay into it between the balance read and the
+/// sweep. That case is reported, with both numbers, rather than passed silently.
+///
+/// This is detection, not prevention — the ETH has already moved.
+export function assertSweepWasCredited(
+  receipt: { logs: readonly ObservedLog[] },
+  forwarderAddress: Address,
+  poolAddress: Address,
+  signer: Address,
+  balances: SweepBalances,
+  label: string,
+): void {
+  const swept = sweptAmounts(receipt, forwarderAddress, signer);
+  if (swept.length !== 1) {
+    throw new Error(
+      `FATAL: ${label} transaction succeeded but the forwarder at ${forwarderAddress} emitted ` +
+        `${swept.length === 0 ? "no Swept event for" : `${swept.length} Swept events for`} ` +
+        `${signer}. sweep() emits exactly one, with the whole balance it forwards, immediately ` +
+        `before the transfer, so this transaction did not do what the command is for. Run ` +
+        `"npm run status" and reconcile the forwarder's and the pool's balances before ` +
+        `re-running ${label}`,
+    );
+  }
+
+  const sweptAmount = swept[0];
+  const delta = balances.poolAfter - balances.poolBefore;
+  if (delta < balances.forwarderBefore) {
+    throw new Error(
+      `FATAL: ${label} transaction succeeded but the pool at ${poolAddress} is only ` +
+        `${formatWei(delta)} richer across the block that included it, against the ` +
+        `${formatWei(balances.forwarderBefore)} the forwarder at ${forwarderAddress} held going ` +
+        `in (its Swept event says it forwarded ${formatWei(sweptAmount)}). The ETH is already ` +
+        `gone from the forwarder: this check DETECTS a sweep that did not land in the pool, it ` +
+        `cannot prevent one. Either the forwarder's code sends somewhere other than the pool it ` +
+        `reports — which is what the runtime-code check exists to catch, so treat a shortfall ` +
+        `here as a finding about this deployment — or something else in the same block moved ETH ` +
+        `out of the pool. Run "npm run status", reconcile the pool's balance and ` +
+        `grossPoolProceeds against the mined transaction, and do not re-run ${label} until you ` +
+        `know which`,
+    );
+  }
+
+  if (delta > balances.forwarderBefore) {
+    console.log(
+      `${label} credited ${formatWei(delta)} to the pool, more than the ` +
+        `${formatWei(balances.forwarderBefore)} the forwarder held when this command read it: ` +
+        `${formatWei(sweptAmount)} was forwarded, so ETH arrived at the forwarder between the ` +
+        `read and the sweep, which is exactly what a fee recipient does`,
+    );
+    return;
+  }
+
+  console.log(
+    `${label} credit confirmed: the forwarder's Swept event reports ${formatWei(sweptAmount)} ` +
+      `forwarded, and the pool's balance rose by exactly the ` +
+      `${formatWei(balances.forwarderBefore)} it was holding`,
+  );
+}
+
+/// Every `Swept` this signer caused at this forwarder, in the receipt's own logs.
+function sweptAmounts(
+  receipt: { logs: readonly ObservedLog[] },
+  forwarderAddress: Address,
+  signer: Address,
+): bigint[] {
+  const amounts: bigint[] = [];
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== forwarderAddress.toLowerCase()) continue;
+    let decoded: ReturnType<typeof decodeEventLog<typeof FORWARDER_SWEPT_EVENT_ABI>>;
+    try {
+      decoded = decodeEventLog({
+        abi: FORWARDER_SWEPT_EVENT_ABI,
+        data: log.data,
+        topics: log.topics as [Hex, ...Hex[]],
+      });
+    } catch {
+      continue;
+    }
+    if (decoded.args.caller.toLowerCase() === signer.toLowerCase()) amounts.push(decoded.args.amount);
+  }
+  return amounts;
 }
 
 const GWEI_WEI = 1_000_000_000n;

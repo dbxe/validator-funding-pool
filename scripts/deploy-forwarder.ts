@@ -5,6 +5,7 @@ import {
   assertDeployedAt,
   assertDeploymentIntegrity,
   assertFeeRecipientForwarderMatchesDeployment,
+  assertForwarderAuthenticity,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -42,6 +43,13 @@ async function main() {
     feeRecipientForwarder: forwarder.address,
   };
   await assertFeeRecipientForwarderMatchesDeployment(publicClient, forwarder, updatedDeployment);
+  // Every later command reaches this through `assertDeploymentIntegrity`, which runs it
+  // whenever the record names a forwarder. This command is the one that writes that field, so
+  // it has no such record to run integrity against yet and calls the check directly — exactly
+  // as `deploy.ts` does for the pool, and for the same reason: the address is about to be
+  // written down and configured as a validator's fee recipient, so a creation transaction
+  // that landed as something other than what was compiled has to be caught here.
+  await assertForwarderAuthenticity(publicClient, forwarder.address, deployment.pool);
   writeDeployment(updatedDeployment);
 
   console.log(`Fee recipient forwarder deployed: ${forwarder.address}`);

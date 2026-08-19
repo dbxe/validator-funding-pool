@@ -6,14 +6,17 @@ import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { keccak256, type Address, type Hex } from "viem";
 
-import type { PoolBuildArtifact, PoolBuildCandidate } from "../scripts/lib/common.js";
+import type { BuildArtifact, BuildCandidate } from "../scripts/lib/common.js";
 import {
   assertDeploymentIntegrity,
   assertDeploymentMatchesPool,
-  assertPoolRuntimeCodeMatchesLocalBuild,
+  assertForwarderAuthenticity,
+  assertRuntimeCodeMatchesLocalBuild,
   deriveWithdrawalCredentials,
   maskImmutableRanges,
-  readLocalPoolBuildArtifacts,
+  readLocalBuildArtifacts,
+  VERIFIED_FORWARDER,
+  VERIFIED_POOL,
 } from "../scripts/lib/common.js";
 
 const EXIT_FEE = 1_234n;
@@ -24,17 +27,17 @@ const POOL_ARTIFACT_FILE = path.join(
   "ValidatorFundingPool.json",
 );
 
-function localArtifact(): PoolBuildArtifact {
-  return JSON.parse(readFileSync(POOL_ARTIFACT_FILE, "utf8")) as PoolBuildArtifact;
+function localArtifact(): BuildArtifact {
+  return JSON.parse(readFileSync(POOL_ARTIFACT_FILE, "utf8")) as BuildArtifact;
 }
 
-function candidateOf(artifact: PoolBuildArtifact, profile = "test"): PoolBuildCandidate[] {
+function candidateOf(artifact: BuildArtifact, profile = "test"): BuildCandidate[] {
   return [{ source: POOL_ARTIFACT_FILE, profile, artifact }];
 }
 
 /// Every byte offset the artifact declares as immutable, i.e. every offset the comparison
 /// is entitled to ignore.
-function immutableOffsets(artifact: PoolBuildArtifact): Set<number> {
+function immutableOffsets(artifact: BuildArtifact): Set<number> {
   const offsets = new Set<number>();
   for (const ranges of Object.values(artifact.immutableReferences ?? {})) {
     for (const { start, length } of ranges) {
@@ -218,7 +221,7 @@ describe("pool authenticity", async function () {
 
     for (const pool of [poolA, poolB]) {
       const matched = await silentlyAsync(() =>
-        assertPoolRuntimeCodeMatchesLocalBuild(publicClient, pool.address, candidateOf(artifact)),
+        assertRuntimeCodeMatchesLocalBuild(publicClient, pool.address, candidateOf(artifact)),
       );
       assert.equal(matched.source, POOL_ARTIFACT_FILE);
     }
@@ -226,13 +229,13 @@ describe("pool authenticity", async function () {
 
   it("reports which local build artifact and solidity profile matched", async function () {
     const { poolA } = await networkHelpers.loadFixture(twoPoolsFixture);
-    const candidates = readLocalPoolBuildArtifacts();
+    const candidates = readLocalBuildArtifacts();
     const lines: string[] = [];
     const originalLog = console.log;
     console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
 
     try {
-      const matched = await assertPoolRuntimeCodeMatchesLocalBuild(
+      const matched = await assertRuntimeCodeMatchesLocalBuild(
         publicClient,
         poolA.address,
         candidates,
@@ -269,7 +272,7 @@ describe("pool authenticity", async function () {
       const tamperedArtifact = { ...artifact, deployedBytecode: toHex(tampered) };
 
       await assert.rejects(
-        assertPoolRuntimeCodeMatchesLocalBuild(
+        assertRuntimeCodeMatchesLocalBuild(
           publicClient,
           poolA.address,
           candidateOf(tamperedArtifact),
@@ -295,7 +298,7 @@ describe("pool authenticity", async function () {
       const altered = Buffer.from(bytes);
       altered[offset] ^= 0xff;
       await silentlyAsync(() =>
-        assertPoolRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, [
+        assertRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, [
           { source: POOL_ARTIFACT_FILE, profile: "test", artifact: { ...artifact, deployedBytecode: toHex(altered) } },
         ]),
       );
@@ -312,7 +315,7 @@ describe("pool authenticity", async function () {
     };
 
     await assert.rejects(
-      assertPoolRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, candidateOf(truncated)),
+      assertRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, candidateOf(truncated)),
       /100 bytes of runtime code, chain has \d+/,
     );
   });
@@ -322,7 +325,7 @@ describe("pool authenticity", async function () {
 
     for (const code of ["0x" as Hex, undefined]) {
       await assert.rejects(
-        assertPoolRuntimeCodeMatchesLocalBuild(
+        assertRuntimeCodeMatchesLocalBuild(
           codeReader(code),
           "0x1111111111111111111111111111111111111111",
           candidateOf(artifact),
@@ -334,7 +337,11 @@ describe("pool authenticity", async function () {
 
   it("is fatal, with a build instruction, when no local artifact exists", function () {
     assert.throws(
-      () => readLocalPoolBuildArtifacts(path.join("artifacts", "nowhere", "ValidatorFundingPool.json")),
+      () =>
+        readLocalBuildArtifacts(
+          VERIFIED_POOL,
+          path.join("artifacts", "nowhere", "ValidatorFundingPool.json"),
+        ),
       (error: Error) => {
         assert.match(error.message, /no local build artifact for ValidatorFundingPool was found/);
         assert.match(error.message, /run "npm run build" and re-run this command/);
@@ -350,12 +357,12 @@ describe("pool authenticity", async function () {
     try {
       // The variable is gone. A named file — existing or not — changes nothing, and the
       // one candidate is still the build output in this checkout.
-      const candidates = readLocalPoolBuildArtifacts();
+      const candidates = readLocalBuildArtifacts();
       assert.equal(candidates.length, 1);
       assert.equal(candidates[0].source, POOL_ARTIFACT_FILE);
 
       assert.throws(
-        () => readLocalPoolBuildArtifacts(path.join("artifacts", "nowhere", "Pool.json")),
+        () => readLocalBuildArtifacts(VERIFIED_POOL, path.join("artifacts", "nowhere", "Pool.json")),
         /no local build artifact for ValidatorFundingPool was found/,
       );
     } finally {
@@ -470,7 +477,7 @@ describe("pool authenticity", async function () {
     };
 
     await assert.rejects(
-      assertPoolRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, candidateOf(impostor)),
+      assertRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, candidateOf(impostor)),
       (error: Error) => {
         assert.match(error.message, /above the 2048-byte ceiling/);
         return true;
@@ -516,5 +523,202 @@ describe("pool authenticity", async function () {
       }),
       /pool has no code at 0x1111111111111111111111111111111111111111/,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // The fee-recipient forwarder, held to the same standard
+  //
+  // Its `pool()` binding proves only what the deployed code chooses to report. The forwarder
+  // is what a validator client pays every proposal's execution-layer rewards to, so the same
+  // runtime-code comparison the pool gets is applied to it.
+  // -------------------------------------------------------------------------
+
+  const FORWARDER_ARTIFACT_FILE = path.join(
+    "artifacts",
+    "contracts",
+    "FeeRecipientForwarder.sol",
+    "FeeRecipientForwarder.json",
+  );
+
+  function forwarderArtifact(): BuildArtifact {
+    return JSON.parse(readFileSync(FORWARDER_ARTIFACT_FILE, "utf8")) as BuildArtifact;
+  }
+
+  function forwarderCandidateOf(artifact: BuildArtifact): BuildCandidate[] {
+    return [{ source: FORWARDER_ARTIFACT_FILE, profile: "test", artifact }];
+  }
+
+  async function forwarderFixture() {
+    const [first] = await viem.getWalletClients();
+    const deposit = await viem.deployContract("MockDepositContract");
+    const withdrawal = await viem.deployContract("MockWithdrawalRequestPredeploy", [EXIT_FEE]);
+    const pool = await viem.deployContract("ValidatorFundingPool", [
+      deposit.address,
+      withdrawal.address,
+      first.account.address,
+      3_600n,
+    ]);
+    const otherPool = await viem.deployContract("ValidatorFundingPool", [
+      deposit.address,
+      withdrawal.address,
+      first.account.address,
+      7_200n,
+    ]);
+    const forwarder = await viem.deployContract("FeeRecipientForwarder", [pool.address]);
+    const otherForwarder = await viem.deployContract("FeeRecipientForwarder", [otherPool.address]);
+    return { pool, otherPool, forwarder, otherForwarder, deposit, withdrawal, first };
+  }
+
+  it("authenticates a deployed forwarder against the local FeeRecipientForwarder build", async function () {
+    const { pool, forwarder } = await networkHelpers.loadFixture(forwarderFixture);
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+
+    try {
+      await assertForwarderAuthenticity(publicClient, forwarder.address, pool.address);
+    } finally {
+      console.log = originalLog;
+    }
+
+    assert.equal(
+      lines.filter((line) =>
+        line.startsWith(`FeeRecipientForwarder runtime code matches the local build ${FORWARDER_ARTIFACT_FILE}`),
+      ).length,
+      1,
+      `no forwarder code-match line in ${JSON.stringify(lines)}`,
+    );
+  });
+
+  it("is fatal when the forwarder's code is not the contract this checkout builds", async function () {
+    const { pool, forwarder } = await networkHelpers.loadFixture(forwarderFixture);
+    const artifact = forwarderArtifact();
+    const masked = immutableOffsets(artifact);
+    const bytes = toBytes(artifact.deployedBytecode);
+
+    // A byte the comparison is not allowed to ignore. The forwarder is small, so this is the
+    // whole difference between the audited sidecar and something that answers `pool()`
+    // correctly and sends the balance elsewhere.
+    let offset = 0;
+    while (masked.has(offset)) offset += 1;
+    const tampered = Buffer.from(bytes);
+    tampered[offset] ^= 0x01;
+
+    await assert.rejects(
+      assertRuntimeCodeMatchesLocalBuild(
+        publicClient,
+        forwarder.address,
+        forwarderCandidateOf({ ...artifact, deployedBytecode: toHex(tampered) }),
+        VERIFIED_FORWARDER,
+      ),
+      (error: Error) => {
+        assert.match(
+          error.message,
+          new RegExp(`the feeRecipientForwarder at ${forwarder.address} does not run the code this checkout builds`),
+        );
+        assert.match(error.message, /masked code hash 0x[0-9a-f]{64} != chain 0x[0-9a-f]{64}/);
+        assert.match(error.message, /Do not send capital to this address/);
+        return true;
+      },
+    );
+
+    // The pool's own artifact is a different contract entirely, and is rejected on length
+    // before a single byte is compared.
+    await assert.rejects(
+      assertRuntimeCodeMatchesLocalBuild(
+        publicClient,
+        forwarder.address,
+        candidateOf(localArtifact()),
+        VERIFIED_FORWARDER,
+      ),
+      /bytes of runtime code, chain has \d+/,
+    );
+
+    // And a forwarder bound to some other pool fails the binding check that precedes it.
+    await assert.rejects(
+      assertForwarderAuthenticity(publicClient, forwarder.address, "0x1111111111111111111111111111111111111111"),
+      /FeeRecipientForwarder pool .* does not match deployment pool 0x1111111111111111111111111111111111111111/,
+    );
+    await assert.rejects(
+      assertForwarderAuthenticity(publicClient, "0x2222222222222222222222222222222222222222", pool.address),
+      /feeRecipientForwarder has no code at 0x2222222222222222222222222222222222222222/,
+    );
+  });
+
+  it("leaves the forwarder's immutable layout comfortably inside both bounds", function () {
+    const artifact = forwarderArtifact();
+    const { maskedBytes } = maskImmutableRanges(
+      artifact.deployedBytecode,
+      artifact.immutableReferences ?? {},
+      "local forwarder artifact",
+    );
+
+    // One immutable, `pool`, read at two sites. The number the masking budget's failure
+    // message quotes, so it is recorded here the way the pool's 608 is.
+    assert.equal(maskedBytes, VERIFIED_FORWARDER.observedImmutableBytes);
+    assert.equal(maskedBytes, 64);
+  });
+
+  it("authenticates the forwarder as part of assertDeploymentIntegrity, when the record names one", async function () {
+    const { pool, forwarder, otherForwarder, deposit, withdrawal, first } =
+      await networkHelpers.loadFixture(forwarderFixture);
+    const depositCode = (await publicClient.getCode({ address: deposit.address })) as Hex;
+    const withdrawalCode = (await publicClient.getCode({ address: withdrawal.address })) as Hex;
+    const deployment = {
+      chainId: await publicClient.getChainId(),
+      pool: pool.address,
+      depositContract: deposit.address,
+      depositContractCodeHash: keccak256(depositCode),
+      withdrawalRequestPredeploy: withdrawal.address,
+      withdrawalRequestPredeployCodeHash: keccak256(withdrawalCode),
+      operator: first.account.address,
+      fundingWindowDuration: "3600",
+      withdrawalCredentials: await pool.read.withdrawalCredentials(),
+      feeRecipientForwarder: forwarder.address,
+    };
+
+    const lines: string[] = [];
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+    console.warn = () => {};
+    try {
+      await assertDeploymentIntegrity(publicClient, pool, deployment);
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+    }
+    assert.equal(lines.filter((line) => line.includes("Pool runtime code matches")).length, 1);
+    assert.equal(
+      lines.filter((line) => line.includes("FeeRecipientForwarder runtime code matches")).length,
+      1,
+    );
+
+    // A record naming a forwarder that points at a different pool is fatal for every command
+    // that reads it, not only for the two that hold a forwarder instance.
+    await silentlyAsync(async () =>
+      assert.rejects(
+        assertDeploymentIntegrity(publicClient, pool, {
+          ...deployment,
+          feeRecipientForwarder: otherForwarder.address,
+        }),
+        /FeeRecipientForwarder pool .* does not match deployment pool/,
+      ),
+    );
+
+    // And the declaration that catches a record naming a forwarder the operator did not mean.
+    const original = process.env.EXPECTED_FORWARDER;
+    try {
+      process.env.EXPECTED_FORWARDER = otherForwarder.address;
+      await silentlyAsync(async () =>
+        assert.rejects(
+          assertDeploymentIntegrity(publicClient, pool, deployment),
+          new RegExp(`names fee-recipient forwarder ${forwarder.address}, not the declared EXPECTED_FORWARDER`),
+        ),
+      );
+    } finally {
+      if (original === undefined) delete process.env.EXPECTED_FORWARDER;
+      else process.env.EXPECTED_FORWARDER = original;
+    }
   });
 });

@@ -866,7 +866,105 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
   });
 
   // -------------------------------------------------------------------------
-  // 13. The ToppedUp plain-transfer race, on a pool of its own
+  // 13. The EL rewards forwarder sidecar, end to end
+  //
+  // Both of its commands, against the pool the earlier cases topped up — `sweep` needs a
+  // `ToppedUp` pool, because that is the only state in which `receive()` accepts the ETH
+  // rather than reverting.
+  // -------------------------------------------------------------------------
+
+  let forwarder: Address;
+
+  it("deploy-forwarder records a forwarder it verified against the local build", async () => {
+    const result = expectSuccess(
+      await runCommand({ script: "deploy-forwarder", env: asOperator() }),
+    );
+
+    assertActiveSignerPrinted(result, "deploy-forwarder", operator.address.toLowerCase());
+    assertOutputContains(result, `Deployment record: ${deploymentFile}`);
+    assertOutputContains(
+      result,
+      "Pool runtime code matches the local build artifacts/contracts/ValidatorFundingPool.sol/" +
+        "ValidatorFundingPool.json",
+    );
+    // The forwarder is the address a validator client is configured to pay its
+    // execution-layer rewards to, so its own code is compared against the local build too —
+    // `pool()` reporting the right pool is what the contract chooses to say, not what it does.
+    assertOutputContains(
+      result,
+      "FeeRecipientForwarder runtime code matches the local build artifacts/contracts/" +
+        "FeeRecipientForwarder.sol/FeeRecipientForwarder.json",
+    );
+    assertOutputContains(result, "Do not configure fee_recipient until the pool is topped up.");
+
+    const record = JSON.parse(readFileSync(deploymentFile, "utf8")) as DeploymentRecord;
+    assert.ok(record.feeRecipientForwarder !== undefined, "the record gained no forwarder");
+    forwarder = record.feeRecipientForwarder;
+    assertOutputContains(result, `Fee recipient forwarder deployed: ${forwarder}`);
+    assertOutputContains(result, `Immutable pool destination: ${pool}`);
+  });
+
+  it("a declared EXPECTED_FORWARDER the record does not name stops the command dead", async () => {
+    const result = expectFailure(
+      await runCommand({
+        script: "sweep",
+        env: asOperator({ EXPECTED_FORWARDER: outsider.address }),
+      }),
+    );
+
+    assertReadableFailure(
+      result,
+      "sweep",
+      `The deployment record ${deploymentFile} names fee-recipient forwarder ${forwarder}, not ` +
+        `the declared EXPECTED_FORWARDER ${outsider.address}`,
+    );
+    assertOutputLacks(result, "Swept in block");
+  });
+
+  it("sweep proves the forwarder's balance reached the pool", async () => {
+    const rewards = parseEther("0.25");
+    const wallet = chain.walletFor(outsider);
+    const funded = await wallet.sendTransaction({
+      to: forwarder,
+      value: rewards,
+      account: outsider.account,
+      chain: chain.chain,
+    });
+    await chain.publicClient.waitForTransactionReceipt({ hash: funded });
+    const poolBefore = await chain.publicClient.getBalance({ address: pool });
+
+    const result = expectSuccess(await runCommand({ script: "sweep", env: asOperator() }));
+
+    assertActiveSignerPrinted(result, "sweep", operator.address.toLowerCase());
+    assertOutputContains(
+      result,
+      "FeeRecipientForwarder runtime code matches the local build artifacts/contracts/" +
+        "FeeRecipientForwarder.sol/FeeRecipientForwarder.json",
+    );
+    assertOutputContains(result, `Forwarder pending balance: ${formatWei(rewards)}`);
+    assertOutputContains(result, "Swept in block ");
+    // The receipt's own Swept log and the pool's balance across the sweep's own block, not
+    // the transaction's success: a sweep that succeeds and lands elsewhere looks identical
+    // until these two are compared.
+    assertOutputContains(
+      result,
+      `sweep credit confirmed: the forwarder's Swept event reports ${formatWei(rewards)} ` +
+        `forwarded, and the pool's balance rose by exactly the ${formatWei(rewards)} it was holding`,
+    );
+
+    assert.equal(await chain.publicClient.getBalance({ address: forwarder }), 0n);
+    assert.equal(await chain.publicClient.getBalance({ address: pool }), poolBefore + rewards);
+  });
+
+  it("sweep refuses an empty forwarder before anything is broadcast", async () => {
+    const result = expectFailure(await runCommand({ script: "sweep", env: asOperator() }));
+
+    assertReadableFailure(result, "sweep", "Contract error: EmptyBalance()");
+    assertOutputLacks(result, "Swept in block");
+  });
+
+  // -------------------------------------------------------------------------
+  // 14. The ToppedUp plain-transfer race, on a pool of its own
   // -------------------------------------------------------------------------
 
   it("a plain transfer that lands after the pool tops up is reported as uncredited", async () => {

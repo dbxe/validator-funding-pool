@@ -8,10 +8,12 @@ import {
   assertCommittedPubkeyMatchesLocal,
   assertContractPredepositWei,
   assertDeployedAt,
+  assertExpectedForwarder,
   assertExpectedPool,
   assertExpectedPubkey,
   assertFundingWasCredited,
   assertStillFundable,
+  assertSweepWasCredited,
   beaconApiUrl,
   describeFatalError,
   envBigInt,
@@ -725,6 +727,188 @@ describe("assertFundingWasCredited", function () {
         () => assertFundingWasCredited({ logs }, POOL, SIGNER, AMOUNT, "fund"),
         /emitted no ParticipantFunded for .* at all/,
       );
+    }
+  });
+});
+
+describe("assertSweepWasCredited", function () {
+  // Encoded independently of the implementation, from `contracts/FeeRecipientForwarder.sol:13`.
+  const FORWARDER_EVENTS = [
+    {
+      type: "event",
+      name: "Swept",
+      inputs: [
+        { name: "caller", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+  ] as const;
+
+  const FORWARDER = "0x4444444444444444444444444444444444444444" as Address;
+  const AMOUNT = 250_000_000_000_000_000n;
+
+  function swept(caller: Address, amount: bigint, address: Address = FORWARDER) {
+    return {
+      address,
+      topics: encodeEventTopics({ abi: FORWARDER_EVENTS, eventName: "Swept", args: { caller } }) as Hex[],
+      data: encodeAbiParameters([{ type: "uint256" }], [amount]),
+    };
+  }
+
+  function balances(forwarderBefore: bigint, poolBefore: bigint, poolAfter: bigint) {
+    return { forwarderBefore, poolBefore, poolAfter };
+  }
+
+  it("confirms a sweep whose whole balance shows up in the pool", function () {
+    const log = captureLog();
+    try {
+      assertSweepWasCredited(
+        { logs: [swept(SIGNER, AMOUNT)] },
+        FORWARDER,
+        POOL,
+        SIGNER,
+        balances(AMOUNT, 7n, 7n + AMOUNT),
+        "sweep",
+      );
+      assert.equal(log.lines.length, 1);
+      assert.match(log.lines[0], /^sweep credit confirmed: the forwarder's Swept event reports /);
+      assert.match(log.lines[0], /rose by exactly the 250000000000000000 wei \(0\.25 ETH\)/);
+    } finally {
+      log.restore();
+    }
+
+    // Case differences on either address are not differences.
+    assert.doesNotThrow(() =>
+      silently(() =>
+        assertSweepWasCredited(
+          { logs: [swept(SIGNER.toUpperCase().replace("0X", "0x") as Address, AMOUNT)] },
+          FORWARDER.toUpperCase().replace("0X", "0x") as Address,
+          POOL,
+          SIGNER,
+          balances(AMOUNT, 0n, AMOUNT),
+          "sweep",
+        ),
+      ),
+    );
+  });
+
+  it("accepts a delta above the balance it read, and says what happened", function () {
+    // The forwarder IS a fee recipient: a block the validator proposed can pay into it
+    // between the balance read and the sweep. That is not a shortfall.
+    const log = captureLog();
+    try {
+      assertSweepWasCredited(
+        { logs: [swept(SIGNER, AMOUNT + 5n)] },
+        FORWARDER,
+        POOL,
+        SIGNER,
+        balances(AMOUNT, 0n, AMOUNT + 5n),
+        "sweep",
+      );
+      assert.equal(log.lines.length, 1);
+      assert.match(log.lines[0], /more than the 250000000000000000 wei/);
+      assert.match(log.lines[0], /ETH arrived at the forwarder between the read and the sweep/);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("is fatal when the pool is not richer by what the forwarder was holding", function () {
+    for (const poolAfter of [0n, AMOUNT - 1n]) {
+      assert.throws(
+        () =>
+          assertSweepWasCredited(
+            { logs: [swept(SIGNER, AMOUNT)] },
+            FORWARDER,
+            POOL,
+            SIGNER,
+            balances(AMOUNT, 0n, poolAfter),
+            "sweep",
+          ),
+        (error: Error) => {
+          assert.match(error.message, /^FATAL: sweep transaction succeeded but the pool at /);
+          assert.match(error.message, new RegExp(`${poolAfter} wei`));
+          assert.match(error.message, /its Swept event says it forwarded 250000000000000000 wei/);
+          assert.match(error.message, /DETECTS a sweep that did not land in the pool/);
+          assert.match(error.message, /npm run status/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("is fatal when the receipt carries no Swept for this signer at this forwarder", function () {
+    for (const logs of [
+      [],
+      // The right event for somebody else's sweep.
+      [swept(OTHER_SIGNER, AMOUNT)],
+      // The right event, from a contract that is not the forwarder the record names.
+      [swept(SIGNER, AMOUNT, OTHER_SIGNER)],
+    ]) {
+      assert.throws(
+        () =>
+          assertSweepWasCredited({ logs }, FORWARDER, POOL, SIGNER, balances(AMOUNT, 0n, AMOUNT), "sweep"),
+        (error: Error) => {
+          assert.match(error.message, /emitted no Swept event for /);
+          assert.match(error.message, /did not do what the command is for/);
+          return true;
+        },
+      );
+    }
+  });
+});
+
+describe("assertExpectedForwarder", function () {
+  const FORWARDER = "0x4444444444444444444444444444444444444444" as Address;
+
+  it("asserts nothing when the pin is unset or empty", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_FORWARDER", value);
+        assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER));
+        assert.doesNotThrow(() => assertExpectedForwarder(OTHER_SIGNER));
+      }
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("accepts the declared forwarder, case differences aside, and refuses any other", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = FORWARDER.toUpperCase().replace("0X", "0x");
+      assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER));
+      assert.throws(
+        () => assertExpectedForwarder(OTHER_SIGNER),
+        (error: Error) => {
+          assert.match(error.message, new RegExp(`names fee-recipient forwarder ${OTHER_SIGNER}`));
+          assert.match(error.message, /declared EXPECTED_FORWARDER/);
+          assert.match(error.message, /Nothing has been sent/);
+          assert.match(error.message, /DEPLOYMENT_FILE selects that record/);
+          return true;
+        },
+      );
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("is fatal for a malformed declaration rather than ignoring it", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      for (const value of ["not-an-address", "0x1234", FORWARDER.slice(0, -1), "0"]) {
+        process.env.EXPECTED_FORWARDER = value;
+        assert.throws(
+          () => assertExpectedForwarder(FORWARDER),
+          new RegExp(`EXPECTED_FORWARDER ${value} is not a 0x-prefixed 20-byte address`),
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
     }
   });
 });
