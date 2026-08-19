@@ -33,13 +33,19 @@ The descriptor targets `specs/erc7730-v2.schema.json`, and `$schema` is the rela
 
 6. Open the pull request against the registry.
 
+## Validation Status
+
+The file validates against `specs/erc7730-v2.schema.json` from the registry, checked with a JSON Schema 2020-12 validator.
+
+The schema does not constrain `path`: it is declared as a plain string. Structural validation therefore proves the format names, `params` keys, `addressName` type values, and signature-key pattern are correct, and proves nothing about whether any path resolves to the argument its label claims. Those were written against the ERC-7730 path rules (`#.` for decoded arguments, `@.` for container values such as `@.value`, `$.` for values inside this document) and against the shape of live registry files. They need eyes, not a linter.
+
 ## Field Mappings To Review
 
 These are the judgement calls. A reviewer should check each one against the ABI and the contract.
 
 - **`claimTo` / `refundTo` recipient.** `#.recipient` is the payout address and the only argument in the contract whose corruption redirects funds. Labelled "Proceeds paid to" / "Refund paid to". `params.types` is `["eoa", "wallet", "contract"]` because `_validateRecipient` rejects only the zero address and the pool itself, so any other contract is a legal recipient. Narrowing to `["eoa"]` would be a lie.
 - **`requestExit` two amounts.** `#.maxFee` is a cap the caller sets, not a payment; `@.value` is what is actually sent, and anything above the live fee is refunded in the same transaction. Both are labelled to say which is which. Format `amount` is applied to `#.maxFee`, a plain `uint256` denominated in wei rather than the container value — confirm that renders as native currency and not as a bare integer.
-- **`openFundingAttempt` parallel arrays.** `#.participants.[]` and `#.fundingTargets.[]` are two separate lists rendered one after the other. Nothing on the device ties the Nth participant to the Nth target; the operator has to pair them by position and count. If the wallet renders long arrays poorly this is close to useless, and the operator should keep verifying against the script output instead.
+- **`openFundingAttempt` parallel arrays.** `#.participants.[]` and `#.fundingTargets.[]` are two separate lists rendered one after the other. Nothing on the device ties the Nth participant to the Nth target; the operator has to pair them by position and count. If the wallet renders long arrays poorly this is close to useless, and the operator should keep verifying against the script output instead. The `.[]` whole-array path form is the least-exercised part of this file: it comes from the ERC-7730 path rules rather than from a registry file, and no registry example consulted here uses it. Check it against a real wallet before relying on it, and drop these two fields rather than ship a mis-rendered list.
 - **`commitAndPredeposit` hidden signatures.** The two 96-byte BLS signatures are `visible: "never"` because they cannot be read off a device screen. The pubkey and both deposit-data roots stay visible, since those are what the operator cross-checks against the deposit-data file. Hiding a field means the device does not show it; it is still signed.
 - **Empty `fields` on no-argument functions.** `claim()`, `refund()`, `topUpValidator()`, and `closeExpiredFundingAttempt()` take no arguments, so only the intent string is shown. The value is that "Claim pool proceeds to your own address" beats a data hash.
 - **`fund()` value.** `@.value` is the funded amount. The credited participant is always `msg.sender`, which the wallet already shows as the sending account, so there is nothing else to render.
