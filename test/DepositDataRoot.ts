@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { SecretKey } from "@chainsafe/blst";
 import type { Hex } from "viem";
 
+import type { ExcessBalanceConfirmationReader } from "../scripts/lib/common.js";
 import {
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorAbsent,
@@ -368,8 +369,8 @@ describe("beacon preflight checks", function () {
         message: RegExp;
       }> = [
         {
-          response: { balance: "1000000001" },
-          message: /balance 1000000001 is not exactly 1000000000 Gwei/,
+          response: { balance: "999999999" },
+          message: /balance 999999999 is below the 1000000000 Gwei predeposit/,
         },
         { validator: { slashed: true }, message: /validator is slashed/ },
         {
@@ -399,7 +400,7 @@ describe("beacon preflight checks", function () {
           });
           try {
             await assert.rejects(
-              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label),
+              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
               testCase.message,
             );
           } finally {
@@ -423,7 +424,12 @@ describe("beacon preflight checks", function () {
     delete process.env.BEACON_CONFIRMATION_STATE_ID;
 
     try {
-      await assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test");
+      await assertBeaconValidatorReadyForTopUp(
+        PUBKEY,
+        WITHDRAWAL_CREDENTIALS,
+        "top-up-test",
+        refusingReader(),
+      );
       assert(calls.includes(`/eth/v1/beacon/states/finalized/validators/${PUBKEY}`));
       assert(calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
     } finally {
@@ -447,7 +453,12 @@ describe("beacon preflight checks", function () {
 
     try {
       await assert.rejects(
-        assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test"),
+        assertBeaconValidatorReadyForTopUp(
+          PUBKEY,
+          WITHDRAWAL_CREDENTIALS,
+          "top-up-test",
+          refusingReader(),
+        ),
         /head beacon withdrawal_credentials .* != pool/,
       );
     } finally {
@@ -480,8 +491,8 @@ describe("beacon preflight checks", function () {
         });
         try {
           await assert.rejects(
-            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label),
-            /balance 32000000000 is not exactly 1000000000 Gwei/,
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+            /validator is slashed/,
           );
         } finally {
           restoreFetch();
@@ -489,11 +500,15 @@ describe("beacon preflight checks", function () {
 
         installBeaconMock({
           finalizedValidator: beaconValidator("pending_initialized"),
-          headValidator: beaconValidator("pending_initialized", { withdrawable_epoch: "15" }),
+          headValidator: beaconValidator(
+            "pending_initialized",
+            { withdrawable_epoch: "15" },
+            { balance: "1000000000" },
+          ),
         });
         try {
           await assert.rejects(
-            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label),
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
             /withdrawable_epoch 15 is not FAR_FUTURE_EPOCH/,
           );
         } finally {
@@ -513,14 +528,119 @@ describe("beacon preflight checks", function () {
     try {
       for (const leg of freshPredepositLegs) {
         installBeaconMock({});
+        const log = captureLog();
         try {
-          await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label);
+          await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader());
+        } finally {
+          log.restore();
+          restoreFetch();
+        }
+        assert(
+          log.lines.includes(`${leg.label} head beacon fresh-predeposit preflight passed`),
+          `missing plain pass line for ${leg.label}`,
+        );
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("requires an interactive typed confirmation for an excess head balance", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    const restore = setDeletedOverrideVars();
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    const excessBalance = "1500000000";
+    const excessHead = () =>
+      installBeaconMock({
+        finalizedValidator: beaconValidator("pending_initialized"),
+        headValidator: beaconValidator("pending_initialized", {}, { balance: excessBalance }),
+      });
+
+    try {
+      for (const leg of freshPredepositLegs) {
+        excessHead();
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, typedReader(excessBalance, false)),
+            new RegExp(
+              `${leg.label} excess head beacon balance ${excessBalance} Gwei requires an interactive ` +
+                `typed confirmation, but stdin is not a TTY`,
+            ),
+          );
+        } finally {
+          restoreFetch();
+        }
+
+        excessHead();
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, typedReader("1500000001")),
+            /excess-balance confirmation failed: expected the exact observed balance 1500000000/,
+          );
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, typedReader("yes")),
+            /excess-balance confirmation failed: expected the exact observed balance 1500000000/,
+          );
+        } finally {
+          restoreFetch();
+        }
+
+        excessHead();
+        const reader = typedReader(` ${excessBalance}\n`);
+        const log = captureLog();
+        try {
+          await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, reader);
+        } finally {
+          log.restore();
+          restoreFetch();
+        }
+        assert.equal(reader.prompts.length, 1);
+        assert(
+          log.lines.some((line) =>
+            line.includes(
+              `${leg.label} head beacon fresh-predeposit preflight passed WITH an ` +
+                `operator-confirmed excess balance of ${excessBalance} Gwei`,
+            ),
+          ),
+          `missing operator-confirmed pass line for ${leg.label}`,
+        );
+        assert(
+          !log.lines.includes(`${leg.label} head beacon fresh-predeposit preflight passed`),
+          `plain pass line must not appear for ${leg.label}`,
+        );
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+      restore();
+    }
+  });
+
+  it("keeps every other anomaly fatal without prompting when the balance is also excessive", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      for (const leg of freshPredepositLegs) {
+        installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: beaconValidator(
+            "pending_initialized",
+            { exit_epoch: "14" },
+            { balance: "32000000000" },
+          ),
+        });
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+            /exit_epoch 14 is not FAR_FUTURE_EPOCH/,
+          );
         } finally {
           restoreFetch();
         }
       }
     } finally {
-      restoreFetch();
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
     }
   });
@@ -625,6 +745,44 @@ function setDeletedOverrideVars(): () => void {
   for (const name of DELETED_OVERRIDE_VARS) process.env[name] = "1";
   return () => {
     for (const [name, value] of originals) restoreEnv(name, value);
+  };
+}
+
+// Any preflight that reaches this reader has decided to ask for a confirmation it should not need.
+function refusingReader(): ExcessBalanceConfirmationReader {
+  const refuse = (): never => {
+    throw new Error("unexpected excess-balance confirmation attempt");
+  };
+  return { isTty: refuse, readLine: refuse };
+}
+
+function typedReader(answer: string, isTty = true) {
+  const prompts: string[] = [];
+  return {
+    prompts,
+    isTty: () => isTty,
+    readLine: async (prompt: string) => {
+      prompts.push(prompt);
+      return answer;
+    },
+  };
+}
+
+function captureLog(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const capture = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  console.log = capture;
+  console.warn = capture;
+  return {
+    lines,
+    restore: () => {
+      console.log = originalLog;
+      console.warn = originalWarn;
+    },
   };
 }
 

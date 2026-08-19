@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
 
 import { PublicKey, Signature, verify } from "@chainsafe/blst";
 import { DOMAIN_DEPOSIT } from "@lodestar/params";
@@ -595,22 +596,35 @@ export async function assertBeaconValidatorReadyForTopUp(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
+  confirmationReader?: ExcessBalanceConfirmationReader,
 ) {
-  return assertBeaconValidatorIsFreshPredeposit(pubkey, expectedWithdrawalCredentials, label);
+  return assertBeaconValidatorIsFreshPredeposit(
+    pubkey,
+    expectedWithdrawalCredentials,
+    label,
+    confirmationReader,
+  );
 }
 
 export async function assertBeaconValidatorReadyForFunding(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
+  confirmationReader?: ExcessBalanceConfirmationReader,
 ) {
-  return assertBeaconValidatorIsFreshPredeposit(pubkey, expectedWithdrawalCredentials, label);
+  return assertBeaconValidatorIsFreshPredeposit(
+    pubkey,
+    expectedWithdrawalCredentials,
+    label,
+    confirmationReader,
+  );
 }
 
 async function assertBeaconValidatorIsFreshPredeposit(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
+  confirmationReader: ExcessBalanceConfirmationReader = stdinConfirmationReader(),
 ) {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
@@ -628,17 +642,37 @@ async function assertBeaconValidatorIsFreshPredeposit(
   );
   assertBeaconValidatorWithdrawalCredentials(headPreflight, expectedWithdrawalCredentials, `${label} head`);
 
-  assertFreshPredepositMutableState(headPreflight, label);
+  const balanceGwei = assertFreshPredepositMutableState(headPreflight, label);
 
   printBeaconPreflight(`${label} head`, headPreflight);
+  if (balanceGwei > PREDEPOSIT_GWEI) {
+    await confirmExcessBalance(balanceGwei, label, confirmationReader);
+    console.log(
+      `${label} head beacon fresh-predeposit preflight passed WITH an operator-confirmed excess ` +
+        `balance of ${balanceGwei} Gwei`,
+    );
+    return;
+  }
   console.log(`${label} head beacon fresh-predeposit preflight passed`);
 }
 
-function assertFreshPredepositMutableState(preflight: BeaconValidatorPreflight, label: string) {
+// Returns the head-state balance in Gwei. A balance above the 1 ETH predeposit is not returned as
+// an anomaly: it is the one condition the caller may resolve with an interactive typed
+// confirmation, and only once every other assertion here has passed.
+function assertFreshPredepositMutableState(
+  preflight: BeaconValidatorPreflight,
+  label: string,
+): bigint {
   const { balance, validator } = preflight.validator;
-  if (balance !== PREDEPOSIT_GWEI.toString()) {
+  let balanceGwei: bigint;
+  try {
+    balanceGwei = BigInt(balance);
+  } catch {
+    throw new Error(`${label} head beacon validator balance ${balance} is not a Gwei integer`);
+  }
+  if (balanceGwei < PREDEPOSIT_GWEI) {
     throw new Error(
-      `${label} head beacon validator balance ${balance} is not exactly ${PREDEPOSIT_GWEI} Gwei`,
+      `${label} head beacon validator balance ${balance} is below the ${PREDEPOSIT_GWEI} Gwei predeposit`,
     );
   }
   if (validator.slashed) {
@@ -664,6 +698,66 @@ function assertFreshPredepositMutableState(preflight: BeaconValidatorPreflight, 
     throw new Error(
       `${label} head beacon validator withdrawable_epoch ${validator.withdrawable_epoch} ` +
         `is not FAR_FUTURE_EPOCH`,
+    );
+  }
+  return balanceGwei;
+}
+
+export interface ExcessBalanceConfirmationReader {
+  isTty: () => boolean;
+  readLine: (prompt: string) => Promise<string>;
+}
+
+function stdinConfirmationReader(): ExcessBalanceConfirmationReader {
+  return {
+    isTty: () => process.stdin.isTTY === true,
+    readLine: async (prompt: string) => {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        return await rl.question(prompt);
+      } finally {
+        rl.close();
+      }
+    },
+  };
+}
+
+// The excess-balance confirmation is deliberately not scriptable. There is no environment
+// variable, flag, or acknowledgement string that stands in for it: an operator must read the
+// observed balance and type it back on a terminal.
+async function confirmExcessBalance(
+  balanceGwei: bigint,
+  label: string,
+  reader: ExcessBalanceConfirmationReader,
+) {
+  console.warn(
+    `\n${label}: HEAD BEACON VALIDATOR HAS AN EXCESS BALANCE OF ${balanceGwei} Gwei ` +
+      `(expected the ${PREDEPOSIT_GWEI} Gwei predeposit).\n` +
+      `  Cause: anyone may deposit to a committed pubkey permissionlessly, so a third party can ` +
+      `raise this balance at will.\n` +
+      `  Custody impact: none. Withdrawal credentials are fixed at validator creation and every ` +
+      `later deposit for an existing pubkey only increases balance, so all of this ETH is ` +
+      `withdrawable solely to the pool.\n` +
+      `  Remaining impact: activation timing and economics only. An excess balance is uncredited ` +
+      `external capital that this pool never distributes to the depositor.\n` +
+      `  Every other assertion passed: credentials match at both states, the validator is ` +
+      `unslashed, and all four epochs are FAR_FUTURE_EPOCH.\n`,
+  );
+
+  if (!reader.isTty()) {
+    throw new Error(
+      `${label} excess head beacon balance ${balanceGwei} Gwei requires an interactive typed ` +
+        `confirmation, but stdin is not a TTY; re-run this command on a terminal`,
+    );
+  }
+
+  const answer = (
+    await reader.readLine(`${label}: type the exact balance in Gwei to continue: `)
+  ).trim();
+  if (answer !== balanceGwei.toString()) {
+    throw new Error(
+      `${label} excess-balance confirmation failed: expected the exact observed balance ` +
+        `${balanceGwei}, got "${answer}"`,
     );
   }
 }
