@@ -4,6 +4,7 @@ import {
   assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForExit,
+  assertCommittedPubkeyMatchesLocalIfReadable,
   assertDeploymentIntegrity,
   envBigInt,
   formatWei,
@@ -28,7 +29,13 @@ async function main() {
   });
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
-  const pubkey = await pool.read.committedPubkey();
+  // `committedPubkey()` is an RPC-supplied value and it is the SUBJECT of the exit preflight
+  // below, so the local deposit-data file is compared against it exactly as `top-up` does.
+  // An unreadable file warns and the RPC's value is used: this command is the recovery path
+  // and must not gain a hard file dependency. See
+  // `assertCommittedPubkeyMatchesLocalIfReadable`.
+  const committedPubkey = await pool.read.committedPubkey();
+  const pubkey = assertCommittedPubkeyMatchesLocalIfReadable(committedPubkey, "request-exit");
   await assertBeaconValidatorReadyForExit(pubkey, expectedCredentials, "request-exit");
 
   // The EIP-7002 fee is read here and charged at inclusion, and it rises with demand for

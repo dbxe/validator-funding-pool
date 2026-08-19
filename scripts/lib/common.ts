@@ -2498,6 +2498,45 @@ function parseExpectedPubkey(declared: string): Hex {
   return pubkey.toLowerCase() as Hex;
 }
 
+/// The same comparison as `assertCommittedPubkeyMatchesLocal`, made only when there is a
+/// local file to make it against.
+///
+/// `request-exit` reads `committedPubkey()` from the EL RPC and hands it to the beacon exit
+/// preflight, so the endpoint chooses that preflight's SUBJECT exactly as it did on `top-up`
+/// before that command gained the comparison. The deposit-data file is the local value to
+/// check it against, and where the file is there this makes the identical check.
+///
+/// It does not become a hard dependency. `request-exit` is the recovery path — the one
+/// command deliberately carved out of §4's "a live beacon endpoint is available" assumption,
+/// because refusing there lets an unavailable dependency disable the escape hatch — and a
+/// deposit-data file that is missing, unreadable, or malformed is the same class of
+/// unavailability. So an unreadable file is a warning naming the reason, and the command
+/// continues with the RPC's value. A file that IS readable and names a different validator is
+/// fatal: that is not unavailability, it is two inputs that do not describe the same thing.
+export function assertCommittedPubkeyMatchesLocalIfReadable(
+  committedPubkey: Hex,
+  label: string,
+): Hex {
+  let predeposit: DepositData;
+  try {
+    predeposit = readPredepositAndTopUpDepositData().predeposit;
+  } catch (error) {
+    console.warn(
+      `WARNING: ${label} could not read the deposit-data file ${depositDataPath()} ` +
+        `(${error instanceof Error ? error.message : String(error)}).\n` +
+        `  Continuing with the committedPubkey() the EL RPC reported, unchecked. That value ` +
+        `chooses which validator the exit preflight is about, so a wrong or dishonest endpoint ` +
+        `chooses it here.\n` +
+        `  This is a warning and not a refusal because ${label} is the recovery path: a missing ` +
+        `local file must not be able to disable it. The EIP-7002 fee is spent either way.\n` +
+        `  Point DEPOSIT_DATA_FILE at this validator's file and re-run to have the comparison ` +
+        `made.\n`,
+    );
+    return committedPubkey;
+  }
+  return assertCommittedPubkeyMatchesLocal(committedPubkey, predeposit, label);
+}
+
 export function validateDepositData(
   deposit: DepositData,
   expectedWithdrawalCredentials: Hex,

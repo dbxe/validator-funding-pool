@@ -865,6 +865,45 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(await readPool<bigint>("lastExitRequestFeePaid"), fee);
   });
 
+  it("request-exit checks its subject against the local file, but is not stopped by a missing one", async () => {
+    // `committedPubkey()` comes from the EL RPC and is the subject of the exit preflight, so
+    // the same comparison `top-up` makes is made here.
+    const otherValidatorFile = path.join(workdir, "deposit-data-not-this-validator.json");
+    const otherValidator = buildDepositData(13, withdrawalCredentials, GENESIS_FORK_VERSION as Hex);
+    writeDepositDataFile(otherValidatorFile, otherValidator);
+
+    const mismatch = expectFailure(
+      await runCommand({
+        script: "request-exit",
+        env: asOperator({ DEPOSIT_DATA_FILE: otherValidatorFile }),
+      }),
+    );
+    assertReadableFailure(
+      mismatch,
+      "request-exit",
+      `request-exit: the pool reports committedPubkey ${deposits.pubkey}, but the local ` +
+        `deposit-data file's 1 ETH predeposit entry is for ${otherValidator.pubkey}`,
+    );
+    assertOutputLacks(mismatch, "request-exit beacon exit preflight passed");
+    assertOutputLacks(mismatch, "Exit requested in block");
+
+    // ... and an absent file is a warning, not a refusal. This is the recovery path: a
+    // missing local file must not be able to disable it.
+    const missing = await beacon.withScenario(
+      () => beacon.setValidator(deposits.pubkey, activeValidator(withdrawalCredentials)),
+      () =>
+        runCommand({
+          script: "request-exit",
+          env: asOperator({ DEPOSIT_DATA_FILE: path.join(workdir, "no-such-file.json") }),
+        }),
+    );
+    expectSuccess(missing);
+    assertOutputContains(missing, "WARNING: request-exit could not read the deposit-data file");
+    assertOutputContains(missing, "must not be able to disable it");
+    assertOutputContains(missing, "Exit requested in block ");
+    assert.equal(await readPool<bigint>("exitRequestAttemptCount"), 2n);
+  });
+
   // -------------------------------------------------------------------------
   // 13. The EL rewards forwarder sidecar, end to end
   //

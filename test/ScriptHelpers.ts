@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "viem";
@@ -6,6 +9,7 @@ import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "
 import {
   assertActiveSigner,
   assertCommittedPubkeyMatchesLocal,
+  assertCommittedPubkeyMatchesLocalIfReadable,
   assertContractPredepositWei,
   assertDeployedAt,
   assertExpectedForwarder,
@@ -1179,6 +1183,82 @@ describe("assertCommittedPubkeyMatchesLocal", function () {
         /deposit-data predeposit pubkey (is not hex|must be 48 bytes)/,
       );
     }
+  });
+
+  describe("the request-exit form, which must not gain a hard file dependency", function () {
+    const workdir = mkdtempSync(path.join(tmpdir(), "validator-funding-pool-exit-"));
+
+    function depositDataFile(name: string, contents: string): string {
+      const file = path.join(workdir, name);
+      writeFileSync(file, contents);
+      return file;
+    }
+
+    function withDepositDataFile<T>(file: string, run: () => T): T {
+      const original = process.env.DEPOSIT_DATA_FILE;
+      process.env.DEPOSIT_DATA_FILE = file;
+      try {
+        return run();
+      } finally {
+        restoreEnv("DEPOSIT_DATA_FILE", original);
+      }
+    }
+
+    function entriesFor(pubkey: string): string {
+      return JSON.stringify([
+        { ...predepositEntry(pubkey) },
+        { ...predepositEntry(pubkey), amount: "31000000000" },
+      ]);
+    }
+
+    it("makes the same comparison when the file is there", function () {
+      const file = depositDataFile("matching.json", entriesFor(PUBKEY));
+
+      assert.equal(
+        withDepositDataFile(file, () =>
+          silently(() => assertCommittedPubkeyMatchesLocalIfReadable(PUBKEY, "request-exit")),
+        ),
+        PUBKEY,
+      );
+
+      const wrong = depositDataFile("other-validator.json", entriesFor(OTHER_PUBKEY));
+      assert.throws(
+        () =>
+          withDepositDataFile(wrong, () =>
+            silently(() => assertCommittedPubkeyMatchesLocalIfReadable(PUBKEY, "request-exit")),
+          ),
+        /request-exit: the pool reports committedPubkey /,
+      );
+    });
+
+    it("warns and proceeds on the RPC's value when the file is missing or malformed", function () {
+      const cases = [
+        path.join(workdir, "does-not-exist.json"),
+        depositDataFile("not-json.json", "{"),
+        // Readable JSON with no 1 ETH entry: unusable for the comparison, same as absent.
+        depositDataFile("no-predeposit.json", "[]"),
+      ];
+
+      for (const file of cases) {
+        const log = captureLog();
+        const warn = captureWarn();
+        let result: Hex;
+        try {
+          result = withDepositDataFile(file, () =>
+            assertCommittedPubkeyMatchesLocalIfReadable(PUBKEY, "request-exit"),
+          );
+        } finally {
+          warn.restore();
+          log.restore();
+        }
+
+        assert.equal(result, PUBKEY);
+        assert.equal(warn.lines.length, 1);
+        assert.match(warn.lines[0], /could not read the deposit-data file /);
+        assert.match(warn.lines[0], /Continuing with the committedPubkey\(\) the EL RPC reported/);
+        assert.match(warn.lines[0], /must not be able to disable it/);
+      }
+    });
   });
 });
 
