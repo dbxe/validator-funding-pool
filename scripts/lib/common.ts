@@ -998,6 +998,74 @@ export function assertFundingWindowNotDeclared(label: string) {
   );
 }
 
+/// The single-participant form, spelled out in every error this pair raises. An operator who
+/// genuinely means "just me, the whole validator" has to type it, and typing it is the
+/// difference between a decision and a default.
+const SINGLE_PARTICIPANT_FORM =
+  `PARTICIPANTS=<operator address> FUNDING_TARGETS_GWEI=${VALIDATOR_DEPOSIT_GWEI}`;
+
+/// Reads the two variables that decide who may fund this attempt and for how much. Both are
+/// REQUIRED: unset or empty is fatal, naming the variable.
+///
+/// They used to default — an unset `PARTICIPANTS` became `[operator]` and an unset
+/// `FUNDING_TARGETS_GWEI` became `[32000000000]` — and that is the same defect
+/// `assertFundingWindowNotDeclared` refuses next door: a security-relevant input silently
+/// substituted is a pass reported for a decision that was never made. Here the decision is
+/// the allocation itself. `openFundingAttempt` writes the participant list and the per-
+/// participant targets into the pool and starts the window, and nothing reopens it until the
+/// deadline passes and `close-expired-funding-attempt` runs — so an operator who meant to
+/// list four participants, forgot the variable, and got a silent solo attempt at the full 32
+/// ETH has locked the pool out of the attempt they meant for the whole window, and the only
+/// evidence was a printed line that looked exactly like a successful run.
+///
+/// The deliberate solo case is not taken away, only made explicit: it is
+/// `PARTICIPANTS=<operator> FUNDING_TARGETS_GWEI=32000000000`, and the errors below say so.
+export function requireFundingAllocation(label: string): {
+  participants: Address[];
+  fundingTargetsGwei: bigint[];
+} {
+  const declaredParticipants = process.env.PARTICIPANTS ?? "";
+  if (declaredParticipants === "") {
+    throw new Error(
+      `${label}: PARTICIPANTS is unset or empty, and this command will not guess who the ` +
+        `funding attempt is for. It used to default to the operator alone at the full ` +
+        `${VALIDATOR_DEPOSIT_GWEI} Gwei, which is indistinguishable — in the output and on ` +
+        `chain — from an attempt that was meant that way. Opening an attempt writes the ` +
+        `participant list into the pool and starts the funding window; nobody can be added ` +
+        `until that window expires and "npm run close-expired-funding-attempt" runs. Nothing ` +
+        `has been sent. Set PARTICIPANTS to the comma-separated participant addresses, in the ` +
+        `same order as FUNDING_TARGETS_GWEI. For a deliberate single-participant attempt, say ` +
+        `so: ${SINGLE_PARTICIPANT_FORM}`,
+    );
+  }
+
+  const declaredTargets = process.env.FUNDING_TARGETS_GWEI ?? "";
+  if (declaredTargets === "") {
+    throw new Error(
+      `${label}: FUNDING_TARGETS_GWEI is unset or empty, and this command will not guess how ` +
+        `much each participant is expected to fund. It used to default to a single ` +
+        `${VALIDATOR_DEPOSIT_GWEI} Gwei target, which is the whole validator and silently ` +
+        `contradicts any PARTICIPANTS list longer than one. Nothing has been sent. Set ` +
+        `FUNDING_TARGETS_GWEI to the comma-separated per-participant targets in Gwei, in the ` +
+        `same order as PARTICIPANTS and summing to ${VALIDATOR_DEPOSIT_GWEI}. For a deliberate ` +
+        `single-participant attempt, say so: ${SINGLE_PARTICIPANT_FORM}`,
+    );
+  }
+
+  const participants = parseAddressList(declaredParticipants);
+  const fundingTargetsGwei = parseBigIntList(declaredTargets, "FUNDING_TARGETS_GWEI");
+  if (participants.length !== fundingTargetsGwei.length) {
+    throw new Error(
+      `${label}: PARTICIPANTS lists ${participants.length} address` +
+        `${participants.length === 1 ? "" : "es"} and FUNDING_TARGETS_GWEI lists ` +
+        `${fundingTargetsGwei.length} target${fundingTargetsGwei.length === 1 ? "" : "s"}. The ` +
+        `two are positional — target i belongs to participant i — so a length mismatch has no ` +
+        `reading. Nothing has been sent`,
+    );
+  }
+  return { participants, fundingTargetsGwei };
+}
+
 export function parseAddressList(value: string): Address[] {
   return value.split(",").map((entry) => asAddress(entry.trim()));
 }

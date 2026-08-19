@@ -29,6 +29,7 @@ import {
   fundViaPlainTransfer,
   optionalEnvBigInt,
   parseBigIntList,
+  requireFundingAllocation,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
   warnOnPlaintextEndpoints,
@@ -1117,6 +1118,99 @@ describe("assertSweepWasCredited", function () {
         },
       );
     }
+  });
+});
+
+describe("requireFundingAllocation", function () {
+  function withAllocationEnv<T>(
+    participants: string | undefined,
+    targets: string | undefined,
+    run: () => T,
+  ): T {
+    const originalParticipants = process.env.PARTICIPANTS;
+    const originalTargets = process.env.FUNDING_TARGETS_GWEI;
+    restoreEnv("PARTICIPANTS", participants);
+    restoreEnv("FUNDING_TARGETS_GWEI", targets);
+    try {
+      return run();
+    } finally {
+      restoreEnv("PARTICIPANTS", originalParticipants);
+      restoreEnv("FUNDING_TARGETS_GWEI", originalTargets);
+    }
+  }
+
+  it("is fatal when PARTICIPANTS is unset or empty, and spells out the solo form", function () {
+    for (const declared of [undefined, ""]) {
+      withAllocationEnv(declared, "32000000000", () => {
+        assert.throws(
+          () => requireFundingAllocation("open-funding-attempt"),
+          (error: Error) => {
+            assert.match(error.message, /^open-funding-attempt: PARTICIPANTS is unset or empty/);
+            // The default it replaces is named, so the error explains what would otherwise
+            // have happened silently.
+            assert.match(error.message, /used to default to the operator alone/);
+            assert.match(error.message, /Nothing has been sent/);
+            assert.match(
+              error.message,
+              /PARTICIPANTS=<operator address> FUNDING_TARGETS_GWEI=32000000000$/,
+            );
+            return true;
+          },
+        );
+      });
+    }
+  });
+
+  it("is fatal when FUNDING_TARGETS_GWEI is unset or empty, even with PARTICIPANTS set", function () {
+    for (const declared of [undefined, ""]) {
+      withAllocationEnv(SIGNER, declared, () => {
+        assert.throws(
+          () => requireFundingAllocation("open-funding-attempt"),
+          (error: Error) => {
+            assert.match(
+              error.message,
+              /^open-funding-attempt: FUNDING_TARGETS_GWEI is unset or empty/,
+            );
+            assert.match(error.message, /Nothing has been sent/);
+            assert.match(
+              error.message,
+              /PARTICIPANTS=<operator address> FUNDING_TARGETS_GWEI=32000000000$/,
+            );
+            return true;
+          },
+        );
+      });
+    }
+  });
+
+  it("returns the declared allocation, including the deliberate single-participant one", function () {
+    withAllocationEnv(SIGNER, "32000000000", () => {
+      assert.deepEqual(requireFundingAllocation("open-funding-attempt"), {
+        participants: [SIGNER],
+        fundingTargetsGwei: [32_000_000_000n],
+      });
+    });
+    withAllocationEnv(`${SIGNER}, ${OTHER_SIGNER}`, "16000000000, 16000000000", () => {
+      assert.deepEqual(requireFundingAllocation("open-funding-attempt"), {
+        participants: [SIGNER, OTHER_SIGNER],
+        fundingTargetsGwei: [16_000_000_000n, 16_000_000_000n],
+      });
+    });
+  });
+
+  it("is fatal for a length mismatch, and for a non-canonical target", function () {
+    withAllocationEnv(`${SIGNER},${OTHER_SIGNER}`, "32000000000", () => {
+      assert.throws(
+        () => requireFundingAllocation("open-funding-attempt"),
+        /PARTICIPANTS lists 2 addresses and FUNDING_TARGETS_GWEI lists 1 target/,
+      );
+    });
+    withAllocationEnv(SIGNER, "0x20", () => {
+      assert.throws(
+        () => requireFundingAllocation("open-funding-attempt"),
+        /FUNDING_TARGETS_GWEI entry 0 "0x20" is not a canonical unsigned decimal integer/,
+      );
+    });
   });
 });
 

@@ -4,11 +4,9 @@ import {
   assertActiveSigner,
   assertDeploymentIntegrity,
   assertFundingWindowNotDeclared,
-  parseAddressList,
-  parseBigIntList,
   readDeployment,
   reportFatalError,
-  VALIDATOR_DEPOSIT_GWEI,
+  requireFundingAllocation,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -18,6 +16,10 @@ async function main() {
   // Before the record is even opened: this is an input the operator supplied for THIS command,
   // and this command cannot act on it.
   assertFundingWindowNotDeclared("open-funding-attempt");
+  // Read for the same reason and at the same moment: both variables are inputs the operator
+  // supplied for THIS command, and neither has a defensible default. A missing one is fatal
+  // before a single JSON-RPC request goes out.
+  const { participants, fundingTargetsGwei } = requireFundingAllocation("open-funding-attempt");
   const deployment = readDeployment();
   const connection = await network.create();
   const { viem } = connection;
@@ -36,16 +38,6 @@ async function main() {
 
   if (signer.toLowerCase() !== liveConfig.operator.toLowerCase()) {
     throw new Error(`open-funding-attempt must be signed by the operator ${liveConfig.operator}`);
-  }
-
-  const participants = process.env.PARTICIPANTS
-    ? parseAddressList(process.env.PARTICIPANTS)
-    : [liveConfig.operator];
-  const fundingTargetsGwei = process.env.FUNDING_TARGETS_GWEI
-    ? parseBigIntList(process.env.FUNDING_TARGETS_GWEI, "FUNDING_TARGETS_GWEI")
-    : [VALIDATOR_DEPOSIT_GWEI];
-  if (participants.length !== fundingTargetsGwei.length) {
-    throw new Error("PARTICIPANTS and FUNDING_TARGETS_GWEI length mismatch");
   }
 
   const fundingTargetsWei = fundingTargetsGwei.map((value) => value * GWEI);

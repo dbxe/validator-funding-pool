@@ -11,6 +11,7 @@ import {
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
   deriveWithdrawalCredentials,
   formatWei,
+  VALIDATOR_DEPOSIT_GWEI,
   type DeploymentRecord,
 } from "../scripts/lib/common.js";
 import { buildDepositData, writeDepositDataFile, type GeneratedDepositData } from "./deposit-data.js";
@@ -392,6 +393,37 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputLacks(result, `Deployment record: ${deploymentFile}`);
     assertOutputLacks(result, "Opened in block");
     assert.equal(await readPool<number>("state"), 1);
+  });
+
+  it("open-funding-attempt refuses to invent a participant set nobody declared", async () => {
+    // The silent default this replaces was the operator alone at the full 32 ETH target, and
+    // on chain that is indistinguishable from an attempt meant that way. Opening it would
+    // have locked the pool out of the attempt the operator meant for the whole window.
+    for (const [missing, present] of [
+      ["PARTICIPANTS", { FUNDING_TARGETS_GWEI: `${TARGET_GWEI},${TARGET_GWEI}` }],
+      ["FUNDING_TARGETS_GWEI", { PARTICIPANTS: `${operator.address},${participant.address}` }],
+    ] as const) {
+      const result = expectFailure(
+        await runCommand({ script: "open-funding-attempt", env: asOperator(present) }),
+      );
+
+      assertReadableFailure(
+        result,
+        "open-funding-attempt",
+        `open-funding-attempt: ${missing} is unset or empty`,
+      );
+      assertOutputContains(
+        result,
+        "PARTICIPANTS=<operator address> FUNDING_TARGETS_GWEI=32000000000",
+      );
+      // Refused before the record is opened, exactly like the window check next to it.
+      assertOutputLacks(result, `Deployment record: ${deploymentFile}`);
+      assertOutputLacks(result, "Opened in block");
+      // Still Predeposited: no attempt was opened, so nothing is locked and the operator can
+      // re-run with the list they meant.
+      assert.equal(await readPool<number>("state"), 1);
+      assert.equal(await readPool<bigint>("fundingAttempt"), 0n);
+    }
   });
 
   it("open-funding-attempt opens the declared participant set", async () => {
@@ -1163,10 +1195,17 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputLacks(committed, "WARNING: EXPECTED_PUBKEY is not set");
     beacon.setValidator(raceDeposits.pubkey, freshPredepositValidator(raceCredentials));
 
-    // No PARTICIPANTS and no FUNDING_TARGETS_GWEI: the default single-participant attempt,
-    // operator at the full 32 ETH target.
+    // The deliberate single-participant attempt — operator alone at the full 32 ETH target —
+    // spelled out. There is no default: both variables are required, and this is the form the
+    // error for a missing one prints.
     const opened = expectSuccess(
-      await runCommand({ script: "open-funding-attempt", env: raceEnv() }),
+      await runCommand({
+        script: "open-funding-attempt",
+        env: raceEnv({
+          PARTICIPANTS: operator.address,
+          FUNDING_TARGETS_GWEI: `${VALIDATOR_DEPOSIT_GWEI}`,
+        }),
+      }),
     );
     assertOutputContains(opened, `Participant 0: ${operator.address} target=32000000000 Gwei`);
 
