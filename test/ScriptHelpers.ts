@@ -9,6 +9,7 @@ import {
   assertContractPredepositWei,
   assertDeployedAt,
   assertExpectedPool,
+  assertExpectedPubkey,
   assertFundingWasCredited,
   assertStillFundable,
   beaconApiUrl,
@@ -114,6 +115,20 @@ function captureLog(): { lines: string[]; restore: () => void } {
     lines,
     restore: () => {
       console.log = originalLog;
+    },
+  };
+}
+
+function captureWarn(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  return {
+    lines,
+    restore: () => {
+      console.warn = originalWarn;
     },
   };
 }
@@ -979,6 +994,128 @@ describe("assertCommittedPubkeyMatchesLocal", function () {
         () => assertCommittedPubkeyMatchesLocal(PUBKEY, predepositEntry(pubkey), "top-up"),
         /deposit-data predeposit pubkey (is not hex|must be 48 bytes)/,
       );
+    }
+  });
+});
+
+describe("assertExpectedPubkey", function () {
+  const PUBKEY = `0x${"aa".repeat(48)}` as Hex;
+  const OTHER_PUBKEY = `0x${"bb".repeat(48)}` as Hex;
+
+  /// Runs the announcement with both channels captured, so a test can decide on what the
+  /// operator reads as well as on whether it threw.
+  function announce(pubkey: string): { lines: string[]; warnings: string[]; pubkey: Hex } {
+    const log = captureLog();
+    const warn = captureWarn();
+    try {
+      return {
+        pubkey: assertExpectedPubkey(pubkey, "commit-predeposit"),
+        lines: log.lines,
+        warnings: warn.lines,
+      };
+    } finally {
+      warn.restore();
+      log.restore();
+    }
+  }
+
+  it("warns loudly, and does not refuse, when no pubkey is declared", function () {
+    const original = process.env.EXPECTED_PUBKEY;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_PUBKEY", value);
+        const { pubkey, lines, warnings } = announce(PUBKEY);
+
+        assert.equal(pubkey, PUBKEY);
+        // The pubkey is printed either way: it is what the command is about to bind the pool
+        // to, permanently.
+        assert.ok(lines.some((line) => line.includes(`WILL COMMIT VALIDATOR ${PUBKEY}`)));
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0], /WARNING: EXPECTED_PUBKEY is not set/);
+        assert.match(warnings[0], /IRREVERSIBLE/);
+        assert.match(warnings[0], /DEPOSIT_DATA_FILE chose that file/);
+      }
+    } finally {
+      restoreEnv("EXPECTED_PUBKEY", original);
+    }
+  });
+
+  it("accepts the declared pubkey, prefix and case differences aside, and does not warn", function () {
+    const original = process.env.EXPECTED_PUBKEY;
+
+    try {
+      // Deposit-data files are written both with and without the 0x prefix, and the operator
+      // copies the value out of theirs.
+      for (const declared of [PUBKEY, PUBKEY.slice(2), PUBKEY.toUpperCase().replace("0X", "0x")]) {
+        process.env.EXPECTED_PUBKEY = declared;
+        const { pubkey, lines, warnings } = announce(PUBKEY.slice(2));
+
+        assert.equal(pubkey, PUBKEY);
+        assert.deepEqual(warnings, []);
+        assert.ok(
+          lines.some((line) => line.includes("equals the declared EXPECTED_PUBKEY")),
+          `no confirmation line in ${JSON.stringify(lines)}`,
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_PUBKEY", original);
+    }
+  });
+
+  it("is fatal when the file would commit a different validator, naming both and the file", function () {
+    const original = process.env.EXPECTED_PUBKEY;
+    const originalFile = process.env.DEPOSIT_DATA_FILE;
+
+    try {
+      process.env.EXPECTED_PUBKEY = PUBKEY;
+      process.env.DEPOSIT_DATA_FILE = "/tmp/some-other-validator.json";
+      assert.throws(
+        () => announce(OTHER_PUBKEY),
+        (error: Error) => {
+          assert.match(error.message, /^commit-predeposit: the deposit-data file /);
+          assert.match(error.message, new RegExp(`/tmp/some-other-validator.json would commit validator ${OTHER_PUBKEY}`));
+          assert.match(error.message, new RegExp(`declared EXPECTED_PUBKEY ${PUBKEY}`));
+          assert.match(error.message, /Nothing has been sent/);
+          assert.match(error.message, /DEPOSIT_DATA_FILE selects/);
+          return true;
+        },
+      );
+    } finally {
+      restoreEnv("EXPECTED_PUBKEY", original);
+      restoreEnv("DEPOSIT_DATA_FILE", originalFile);
+    }
+  });
+
+  it("is fatal for a malformed declaration rather than ignoring it", function () {
+    const original = process.env.EXPECTED_PUBKEY;
+
+    try {
+      for (const value of ["not-hex", "0x1234", PUBKEY.slice(0, -2), `${PUBKEY}aa`, "0"]) {
+        process.env.EXPECTED_PUBKEY = value;
+        assert.throws(
+          () => announce(PUBKEY),
+          new RegExp(`EXPECTED_PUBKEY ${value} is not a 48-byte BLS public key`),
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_PUBKEY", original);
+    }
+  });
+
+  it("is fatal for a local entry that is not a 48-byte pubkey at all", function () {
+    const original = process.env.EXPECTED_PUBKEY;
+
+    try {
+      delete process.env.EXPECTED_PUBKEY;
+      for (const pubkey of ["", "0xnothex", `0x${"aa".repeat(47)}`]) {
+        assert.throws(
+          () => announce(pubkey),
+          /deposit-data predeposit pubkey (is not hex|must be 48 bytes)/,
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_PUBKEY", original);
     }
   });
 });

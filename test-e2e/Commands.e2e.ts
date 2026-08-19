@@ -266,6 +266,45 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(await readPool<number>("state"), 0);
   });
 
+  it("commit-predeposit refuses a deposit-data file that is not the declared validator", async () => {
+    // The command that CREATES the commitment has nothing on chain to compare the file
+    // against — `committedPubkey()` is still zero — so `EXPECTED_PUBKEY` is the only
+    // independent check that the file `DEPOSIT_DATA_FILE` chose is the validator meant.
+    const declared = `0x${"cd".repeat(48)}`;
+    const result = expectFailure(
+      await runCommand({
+        script: "commit-predeposit",
+        env: asOperator({ EXPECTED_PUBKEY: declared }),
+      }),
+    );
+
+    assertReadableFailure(
+      result,
+      "commit-predeposit",
+      `commit-predeposit: the deposit-data file ${depositDataFile} would commit validator ` +
+        `${deposits.pubkey}, not the declared EXPECTED_PUBKEY ${declared}`,
+    );
+    // It refuses before a single RPC read, so nothing about the pool was even looked at.
+    assertOutputLacks(result, "commit-predeposit beacon");
+    assertOutputLacks(result, "Predeposited in block");
+    assert.equal(await readPool<number>("state"), 0);
+
+    // A declaration that is not a public key is fatal naming the variable, never ignored:
+    // ignoring it would report a pass for a check that never ran.
+    const malformed = expectFailure(
+      await runCommand({
+        script: "commit-predeposit",
+        env: asOperator({ EXPECTED_PUBKEY: "0x1234" }),
+      }),
+    );
+    assertReadableFailure(
+      malformed,
+      "commit-predeposit",
+      "EXPECTED_PUBKEY 0x1234 is not a 48-byte BLS public key",
+    );
+    assert.equal(await readPool<number>("state"), 0);
+  });
+
   it("commit-predeposit submits the 1 ETH predeposit once absence is proven", async () => {
     const result = expectSuccess(
       await runCommand({ script: "commit-predeposit", env: asOperator() }),
@@ -276,6 +315,10 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     // The other variable that selects a subject rather than waiving a check. This command
     // commits whatever pubkey that file names, forever, so the file is named in the output.
     assertOutputContains(result, `Deposit data file: ${depositDataFile}`);
+    // No EXPECTED_PUBKEY here, which is the unpinned case: the pubkey is printed prominently
+    // and the irreversibility of committing it is a loud warning rather than a refusal.
+    assertOutputContains(result, `commit-predeposit WILL COMMIT VALIDATOR ${deposits.pubkey}`);
+    assertOutputContains(result, "WARNING: EXPECTED_PUBKEY is not set");
     assertOutputContains(
       result,
       "commit-predeposit beacon preflight passed: the head state validator list is empty for this pubkey",
@@ -863,7 +906,16 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     writeDepositDataFile(raceDepositDataFile, raceDeposits);
     beacon.setValidator(raceDeposits.pubkey, absentValidator());
 
-    expectSuccess(await runCommand({ script: "commit-predeposit", env: raceEnv() }));
+    // The pinned branch of the commitment check, which the first pool's run leaves uncovered:
+    // declared and matching, so the confirmation line is printed and the warning is not.
+    const committed = expectSuccess(
+      await runCommand({
+        script: "commit-predeposit",
+        env: raceEnv({ EXPECTED_PUBKEY: raceDeposits.pubkey }),
+      }),
+    );
+    assertOutputContains(committed, "commit-predeposit: the pubkey above equals the declared EXPECTED_PUBKEY");
+    assertOutputLacks(committed, "WARNING: EXPECTED_PUBKEY is not set");
     beacon.setValidator(raceDeposits.pubkey, freshPredepositValidator(raceCredentials));
 
     // No PARTICIPANTS and no FUNDING_TARGETS_GWEI: the default single-participant attempt,

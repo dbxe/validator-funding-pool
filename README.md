@@ -511,7 +511,7 @@ Use `https://` for `RPC_URL` and `BEACON_NODE_URL` unless the node is on loopbac
 - `PARTICIPANTS`: comma-separated addresses for `open-funding-attempt`; must include the operator.
 - `FUNDING_TARGETS_GWEI`: comma-separated final economic weights matching `PARTICIPANTS`; must sum to `32000000000`.
 - `AMOUNT_WEI`: optional partial funding amount for `fund`; defaults to the caller's entire remaining allocation and may not exceed it.
-- `EXPECTED_PUBKEY`: optional pubkey check for `commit-predeposit`.
+- `EXPECTED_PUBKEY`: optional declared validator pubkey for `commit-predeposit`. This is the pin for `DEPOSIT_DATA_FILE`, and it is what `EXPECTED_POOL` is for `DEPLOYMENT_FILE`. `fund` and `top-up` need no declaration because they compare the file against a commitment that already exists on chain; `commit-predeposit` *creates* that commitment, so nothing on chain can check it and the pubkey the file names becomes this pool's validator permanently. Set it and the command requires the file's 1 ETH predeposit entry to name exactly that pubkey, before any RPC read; a value that is not 48 bytes of hex is fatal naming the variable. Leave it unset and the command prints the pubkey it is about to commit and warns loudly that nothing independent of the file has checked it.
 - `EXPECTED_FUNDING_ATTEMPT`: optional `fund` check for the active attempt number.
 - `EXPECTED_MY_TARGET_GWEI`: optional `fund` check for the caller's current-attempt target.
 - `EXPECTED_OPERATOR_TARGET_GWEI`: optional `fund` check for the operator's current-attempt target.

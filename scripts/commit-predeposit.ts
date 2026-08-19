@@ -6,7 +6,7 @@ import {
   assertBeaconValidatorAbsent,
   assertContractPredepositWei,
   assertDeploymentIntegrity,
-  asHex,
+  assertExpectedPubkey,
   PREDEPOSIT_GWEI,
   PREDEPOSIT_WEI,
   readBeaconGenesisForkVersion,
@@ -21,6 +21,10 @@ import {
 async function main() {
   const deployment = readDeployment();
   const deposits = readPredepositAndTopUpDepositData();
+  // Before a single RPC read, exactly like `assertExpectedPool`: this command binds the pool
+  // to whatever validator the deposit-data file names, permanently, and the declaration is
+  // the only check on that file that does not come from the file itself.
+  const expectedPubkey = assertExpectedPubkey(deposits.predeposit.pubkey, "commit-predeposit");
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
@@ -41,7 +45,6 @@ async function main() {
   assertContractPredepositWei(await pool.read.PREDEPOSIT_WEI(), "commit-predeposit");
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
-  const expectedPubkey = process.env.EXPECTED_PUBKEY ? asHex(process.env.EXPECTED_PUBKEY) : undefined;
   const chainForkVersion = await readBeaconGenesisForkVersion("commit-predeposit");
 
   const predeposit = validateDepositData(

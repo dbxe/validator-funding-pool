@@ -2318,6 +2318,82 @@ export function assertCommittedPubkeyMatchesLocal(
   return localPubkey;
 }
 
+/// Announces the validator `commit-predeposit` is about to bind this pool to, and evaluates
+/// the one declaration that can independently check it.
+///
+/// `EXPECTED_PUBKEY` is to `DEPOSIT_DATA_FILE` exactly what `EXPECTED_POOL` is to
+/// `DEPLOYMENT_FILE`, and for the same reason: the variable selects the SUBJECT of every
+/// later check, silently, from the environment. On `fund` and `top-up` the file is pinned by
+/// comparison instead — `assertCommittedPubkeyMatchesLocal` and `fund.ts`'s commitment
+/// comparison require it to equal what the pool already committed. `commit-predeposit` is the
+/// command that CREATES that commitment, so it has nothing on chain to compare against:
+/// `committedPubkey()` is zero until this transaction lands, and whichever pubkey the file
+/// names becomes the validator this pool funds for the rest of its life. A declaration is the
+/// only independent check that exists here.
+///
+/// Unset it warns rather than refuses. The command is irreversible and it is the one an
+/// operator runs immediately after generating keys, with the file in front of them; a
+/// mandatory variable there buys a habit of setting it to whatever the file says, which
+/// checks nothing. A malformed declaration is fatal naming the variable, because a pin that
+/// cannot be parsed has not been declared and silently ignoring it reports a pass for a check
+/// that never ran.
+///
+/// Returns the local file's pubkey, normalized — the value the caller commits.
+export function assertExpectedPubkey(localPredepositPubkey: string, label: string): Hex {
+  const pubkey = normalizeHexLength(
+    localPredepositPubkey,
+    48,
+    "deposit-data predeposit pubkey",
+  ).toLowerCase() as Hex;
+  const file = depositDataPath();
+
+  console.log(
+    `\n${label} WILL COMMIT VALIDATOR ${pubkey}\n` +
+      `  read from ${file}. The pool commits one pubkey and no path rewrites it.\n`,
+  );
+
+  const declared = process.env.EXPECTED_PUBKEY ?? "";
+  if (declared === "") {
+    console.warn(
+      `WARNING: EXPECTED_PUBKEY is not set, so nothing independent of ${file} says that is the ` +
+        `right validator.\n` +
+        `  This command is IRREVERSIBLE: it creates the commitment, so unlike fund and top-up ` +
+        `there is no on-chain value to compare the file against — committedPubkey() does not ` +
+        `exist yet.\n` +
+        `  DEPOSIT_DATA_FILE chose that file from the environment, and the pubkey in it selects ` +
+        `this pool's validator forever. A stale or swapped file binds the pool to a validator ` +
+        `whose keys you may not hold, and the operator's 1 ETH predeposit is not recoverable.\n` +
+        `  Set EXPECTED_PUBKEY to the pubkey you generated and re-run to have it checked.\n`,
+    );
+    return pubkey;
+  }
+
+  const expected = parseExpectedPubkey(declared);
+  if (pubkey !== expected) {
+    throw new Error(
+      `${label}: the deposit-data file ${file} would commit validator ${pubkey}, not the ` +
+        `declared EXPECTED_PUBKEY ${expected}. Nothing has been sent. DEPOSIT_DATA_FILE selects ` +
+        `which validator this pool is bound to for the rest of its life; point it at the file ` +
+        `for the validator you mean and re-run`,
+    );
+  }
+  console.log(`${label}: the pubkey above equals the declared EXPECTED_PUBKEY`);
+  return pubkey;
+}
+
+/// The declaration itself: 48 bytes of hex, `0x` prefix optional because deposit-data files
+/// are routinely written without one and the operator copies the value out of theirs.
+function parseExpectedPubkey(declared: string): Hex {
+  const pubkey = asHex(declared);
+  if (!/^0x[0-9a-fA-F]{96}$/.test(pubkey)) {
+    throw new Error(
+      `EXPECTED_PUBKEY ${declared} is not a 48-byte BLS public key: 96 hex characters, with the ` +
+        `0x prefix optional`,
+    );
+  }
+  return pubkey.toLowerCase() as Hex;
+}
+
 export function validateDepositData(
   deposit: DepositData,
   expectedWithdrawalCredentials: Hex,
