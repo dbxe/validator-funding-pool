@@ -14,7 +14,6 @@ import {
   assertBeaconValidatorReadyForExit,
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorReadyForTopUp,
-  assertBeaconValidatorHasWithdrawalCredentials,
   assertDeploymentMatchesPool,
   computeDepositDataRoot,
   computeDepositSigningRoot,
@@ -160,14 +159,6 @@ describe("deposit data validation", function () {
       await assert.rejects(
         assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit"),
         /commit-predeposit requires BEACON_NODE_URL/,
-      );
-      await assert.rejects(
-        assertBeaconValidatorHasWithdrawalCredentials(
-          PUBKEY,
-          WITHDRAWAL_CREDENTIALS,
-          "credential-confirmation",
-        ),
-        /credential-confirmation requires BEACON_NODE_URL/,
       );
       await assert.rejects(
         assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund"),
@@ -358,54 +349,71 @@ describe("beacon preflight checks", function () {
     }
   });
 
+  // The matrix runs twice: once with the deleted override variables explicitly cleared and
+  // once with both set to "1". The deleted-variable test below only exercises a combined
+  // fixture plus withdrawable_epoch, so a regression that waived a single anomaly under those
+  // variables would otherwise slip through.
   it("refuses funding and top-up for every fresh-predeposit mutable-state anomaly", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
     process.env.BEACON_NODE_URL = "http://beacon.example";
 
-    try {
-      const cases: Array<{
-        validator?: Parameters<typeof beaconValidator>[1];
-        response?: Parameters<typeof beaconValidator>[2];
-        message: RegExp;
-      }> = [
-        {
-          response: { balance: "999999999" },
-          message: /balance 999999999 is below the 1000000000 Gwei predeposit/,
-        },
-        { validator: { slashed: true }, message: /validator is slashed/ },
-        {
-          validator: { activation_epoch: "12" },
-          message: /activation_epoch 12 is not FAR_FUTURE_EPOCH/,
-        },
-        {
-          validator: { activation_eligibility_epoch: "13" },
-          message: /activation_eligibility_epoch 13 is not FAR_FUTURE_EPOCH/,
-        },
-        { validator: { exit_epoch: "14" }, message: /exit_epoch 14 is not FAR_FUTURE_EPOCH/ },
-        {
-          validator: { withdrawable_epoch: "15" },
-          message: /withdrawable_epoch 15 is not FAR_FUTURE_EPOCH/,
-        },
-      ];
+    const cases: Array<{
+      validator?: Record<string, unknown>;
+      response?: Record<string, unknown>;
+      message: RegExp;
+    }> = [
+      {
+        response: { balance: "999999999" },
+        message: /balance 999999999 is below the 1000000000 Gwei predeposit/,
+      },
+      { validator: { slashed: true }, message: /validator is slashed/ },
+      {
+        validator: { activation_epoch: "12" },
+        message: /activation_epoch 12 is not FAR_FUTURE_EPOCH/,
+      },
+      {
+        validator: { activation_eligibility_epoch: "13" },
+        message: /activation_eligibility_epoch 13 is not FAR_FUTURE_EPOCH/,
+      },
+      { validator: { exit_epoch: "14" }, message: /exit_epoch 14 is not FAR_FUTURE_EPOCH/ },
+      {
+        validator: { withdrawable_epoch: "15" },
+        message: /withdrawable_epoch 15 is not FAR_FUTURE_EPOCH/,
+      },
+    ];
 
-      for (const testCase of cases) {
-        for (const leg of freshPredepositLegs) {
-          installBeaconMock({
-            finalizedValidator: beaconValidator("pending_initialized"),
-            headValidator: beaconValidator(
-              "pending_initialized",
-              testCase.validator,
-              testCase.response,
-            ),
-          });
-          try {
-            await assert.rejects(
-              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
-              testCase.message,
-            );
-          } finally {
-            restoreFetch();
+    const overrideModes = [
+      { name: "deleted override variables cleared", enter: clearDeletedOverrideVars },
+      { name: "deleted override variables set", enter: setDeletedOverrideVars },
+    ];
+
+    try {
+      for (const mode of overrideModes) {
+        const restoreVars = mode.enter();
+        try {
+          for (const testCase of cases) {
+            for (const leg of freshPredepositLegs) {
+              installBeaconMock({
+                finalizedValidator: beaconValidator("pending_initialized"),
+                headValidator: beaconValidator(
+                  "pending_initialized",
+                  testCase.validator,
+                  testCase.response,
+                ),
+              });
+              try {
+                await assert.rejects(
+                  leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+                  testCase.message,
+                  `${leg.label} accepted an anomaly with ${mode.name}`,
+                );
+              } finally {
+                restoreFetch();
+              }
+            }
           }
+        } finally {
+          restoreVars();
         }
       }
     } finally {
@@ -600,10 +608,10 @@ describe("beacon preflight checks", function () {
           log.lines.some((line) =>
             line.includes(
               `${leg.label} head beacon fresh-predeposit preflight passed WITH an ` +
-                `operator-confirmed excess balance of ${excessBalance} Gwei`,
+                `interactively confirmed excess balance of ${excessBalance} Gwei`,
             ),
           ),
-          `missing operator-confirmed pass line for ${leg.label}`,
+          `missing interactively confirmed pass line for ${leg.label}`,
         );
         assert(
           !log.lines.includes(`${leg.label} head beacon fresh-predeposit preflight passed`),
@@ -614,6 +622,229 @@ describe("beacon preflight checks", function () {
       restoreFetch();
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
       restore();
+    }
+  });
+
+  it("rejects every non-canonical head balance shape on both legs", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    // BigInt() accepts each of the first four on its own; none is a shape a conforming beacon
+    // node emits, and each compares unequal to the canonical decimal the checks assume.
+    const cases: Array<{ balance: unknown; message: RegExp }> = [
+      { balance: "0x3b9aca00", message: /balance "0x3b9aca00" is not a canonical unsigned decimal string/ },
+      { balance: "+1000000000", message: /balance "\+1000000000" is not a canonical unsigned decimal string/ },
+      { balance: " 1000000000 ", message: /balance " 1000000000 " is not a canonical unsigned decimal string/ },
+      { balance: "", message: /balance "" is not a canonical unsigned decimal string/ },
+      { balance: "01000000000", message: /balance "01000000000" is not a canonical unsigned decimal string/ },
+      { balance: 1_000_000_000, message: /balance 1000000000 is not a canonical unsigned decimal string/ },
+      { balance: null, message: /balance null is not a canonical unsigned decimal string/ },
+      { balance: undefined, message: /balance <missing> is not a canonical unsigned decimal string/ },
+      {
+        balance: "18446744073709551616",
+        message: /balance 18446744073709551616 exceeds the uint64 maximum 18446744073709551615/,
+      },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        for (const leg of freshPredepositLegs) {
+          installBeaconMock({
+            finalizedValidator: beaconValidator("pending_initialized"),
+            headValidator: beaconValidator("pending_initialized", {}, { balance: testCase.balance }),
+          });
+          try {
+            await assert.rejects(
+              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+              testCase.message,
+              `${leg.label} accepted balance ${String(testCase.balance)}`,
+            );
+          } finally {
+            restoreFetch();
+          }
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("treats a missing, null, or non-boolean slashed flag as fatal on both legs", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    const cases: Array<{ slashed: unknown; described: string }> = [
+      { slashed: undefined, described: "<missing>" },
+      { slashed: null, described: "null" },
+      { slashed: "false", described: '"false"' },
+      { slashed: 0, described: "0" },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        for (const leg of freshPredepositLegs) {
+          installBeaconMock({
+            finalizedValidator: beaconValidator("pending_initialized"),
+            headValidator: beaconValidator("pending_initialized", { slashed: testCase.slashed }),
+          });
+          try {
+            await assert.rejects(
+              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+              new RegExp(
+                `validator slashed ${escapeRegExp(testCase.described)} is not the boolean true or false`,
+              ),
+              `${leg.label} accepted slashed=${testCase.described}`,
+            );
+          } finally {
+            restoreFetch();
+          }
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("fails closed on malformed node health fields", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    const cases: Array<{ overrides: Record<string, unknown>; message: RegExp }> = [
+      { overrides: { is_optimistic: undefined }, message: /node is_optimistic <missing> is not the boolean/ },
+      { overrides: { el_offline: undefined }, message: /node el_offline <missing> is not the boolean/ },
+      { overrides: { is_syncing: null }, message: /node is_syncing null is not the boolean/ },
+      { overrides: { head_slot: "0x2000" }, message: /node head_slot "0x2000" is not a canonical unsigned decimal string/ },
+      { overrides: { sync_distance: -1 }, message: /node sync_distance -1 is not a canonical unsigned decimal string/ },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        installBeaconMock({ syncingOverrides: testCase.overrides });
+        try {
+          await assert.rejects(
+            assertBeaconValidatorReadyForFunding(
+              PUBKEY,
+              WITHDRAWAL_CREDENTIALS,
+              "fund-test",
+              refusingReader(),
+            ),
+            testCase.message,
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("re-runs the head preflight after an excess-balance confirmation and refuses divergence", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    const confirmed = "1500000000";
+
+    try {
+      for (const leg of freshPredepositLegs) {
+        // Balance moved between the prompt and the re-read.
+        let calls = installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: [
+            beaconValidator("pending_initialized", {}, { balance: confirmed }),
+            beaconValidator("pending_initialized", {}, { balance: "2000000000" }),
+          ],
+        });
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, typedReader(confirmed)),
+            new RegExp(
+              `${leg.label} head beacon validator balance changed from the confirmed ${confirmed} ` +
+                `Gwei to 2000000000 Gwei between the confirmation and the re-read`,
+            ),
+          );
+          assert.equal(
+            calls.filter((pathname) => pathname === `/eth/v1/beacon/states/head/validators/${PUBKEY}`)
+              .length,
+            2,
+            `${leg.label} did not re-read head state after the confirmation`,
+          );
+        } finally {
+          restoreFetch();
+        }
+
+        // A different head-state anomaly appearing after the confirmation is equally fatal.
+        calls = installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: [
+            beaconValidator("pending_initialized", {}, { balance: confirmed }),
+            beaconValidator("pending_initialized", { slashed: true }, { balance: confirmed }),
+          ],
+        });
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, typedReader(confirmed)),
+            new RegExp(`${leg.label} head re-read beacon validator is slashed`),
+          );
+        } finally {
+          restoreFetch();
+        }
+
+        // An unchanged balance passes, and the re-read still happened.
+        calls = installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: beaconValidator("pending_initialized", {}, { balance: confirmed }),
+        });
+        const log = captureLog();
+        try {
+          await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, typedReader(confirmed));
+        } finally {
+          log.restore();
+          restoreFetch();
+        }
+        assert.equal(
+          calls.filter((pathname) => pathname === `/eth/v1/beacon/states/head/validators/${PUBKEY}`)
+            .length,
+          2,
+          `${leg.label} did not re-read head state on the passing path`,
+        );
+        assert(
+          log.lines.some((line) => line.includes(`${leg.label} head re-read beacon state id: head`)),
+          `missing head re-read preflight print for ${leg.label}`,
+        );
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("still confirms credentials at the settled state through the surviving entry points", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      for (const leg of freshPredepositLegs) {
+        const calls = installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized", {
+            withdrawal_credentials: OTHER_WITHDRAWAL_CREDENTIALS,
+          }),
+          headValidator: beaconValidator("pending_initialized"),
+        });
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+            new RegExp(
+              `${leg.label} beacon withdrawal_credentials ${OTHER_WITHDRAWAL_CREDENTIALS} != pool ` +
+                WITHDRAWAL_CREDENTIALS,
+            ),
+          );
+          // The settled-state read is what failed: head was never consulted.
+          assert(!calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
+        } finally {
+          restoreFetch();
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
     }
   });
 
@@ -784,6 +1015,10 @@ describe("beacon preflight checks", function () {
   });
 });
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) {
     delete process.env[name];
@@ -795,6 +1030,14 @@ function restoreEnv(name: string, value: string | undefined) {
 function setDeletedOverrideVars(): () => void {
   const originals = DELETED_OVERRIDE_VARS.map((name) => [name, process.env[name]] as const);
   for (const name of DELETED_OVERRIDE_VARS) process.env[name] = "1";
+  return () => {
+    for (const [name, value] of originals) restoreEnv(name, value);
+  };
+}
+
+function clearDeletedOverrideVars(): () => void {
+  const originals = DELETED_OVERRIDE_VARS.map((name) => [name, process.env[name]] as const);
+  for (const name of DELETED_OVERRIDE_VARS) delete process.env[name];
   return () => {
     for (const [name, value] of originals) restoreEnv(name, value);
   };
@@ -840,6 +1083,8 @@ function captureLog(): { lines: string[]; restore: () => void } {
 
 let originalFetch: typeof fetch | undefined;
 
+type BeaconValidatorBody = ReturnType<typeof beaconValidator>;
+
 function installBeaconMock({
   finalizedValidator = beaconValidator("pending_initialized"),
   headValidator = beaconValidator("pending_initialized"),
@@ -848,16 +1093,23 @@ function installBeaconMock({
   beaconChainId = "31337",
   depositContractAddress = "0x1111111111111111111111111111111111111111",
   validatorStatus = 200,
+  syncingOverrides = {},
 }: {
-  finalizedValidator?: ReturnType<typeof beaconValidator>;
-  headValidator?: ReturnType<typeof beaconValidator>;
+  finalizedValidator?: BeaconValidatorBody;
+  /// A single body, or one body per successive head-state validator fetch. The last entry is
+  /// reused once the list runs out, so a two-entry list models a validator whose head state
+  /// changes between the first read and the post-confirmation re-read.
+  headValidator?: BeaconValidatorBody | BeaconValidatorBody[];
   headSlot?: string;
   genesisForkVersion?: string;
   beaconChainId?: string;
   depositContractAddress?: string;
   validatorStatus?: number;
+  syncingOverrides?: Record<string, unknown>;
 }): string[] {
   const calls: string[] = [];
+  const headValidators = Array.isArray(headValidator) ? headValidator : [headValidator];
+  let headValidatorReads = 0;
   originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request) => {
@@ -865,7 +1117,16 @@ function installBeaconMock({
     calls.push(url.pathname);
 
     if (url.pathname === "/eth/v1/node/syncing") {
-      return jsonResponse({ data: { head_slot: headSlot, sync_distance: "0", is_syncing: false } });
+      return jsonResponse({
+        data: {
+          head_slot: headSlot,
+          sync_distance: "0",
+          is_syncing: false,
+          is_optimistic: false,
+          el_offline: false,
+          ...syncingOverrides,
+        },
+      });
     }
     if (url.pathname === "/eth/v1/beacon/genesis") {
       return jsonResponse({
@@ -897,7 +1158,12 @@ function installBeaconMock({
       if (validatorStatus !== 200) {
         return new Response("validator not found", { status: validatorStatus });
       }
-      return jsonResponse(validatorMatch[1] === "head" ? headValidator : finalizedValidator);
+      if (validatorMatch[1] !== "head") {
+        return jsonResponse(finalizedValidator);
+      }
+      const body = headValidators[Math.min(headValidatorReads, headValidators.length - 1)];
+      headValidatorReads += 1;
+      return jsonResponse(body);
     }
 
     return new Response("not found", { status: 404 });
@@ -919,18 +1185,13 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+/// Overrides are deliberately untyped: several tests need to reproduce responses a
+/// conforming beacon node would never send. A key set to `undefined` is dropped by
+/// `JSON.stringify`, so `{ slashed: undefined }` models an omitted field.
 function beaconValidator(
   status: string,
-  validatorOverrides: Partial<{
-    withdrawal_credentials: string;
-    effective_balance: string;
-    slashed: boolean;
-    activation_eligibility_epoch: string;
-    activation_epoch: string;
-    exit_epoch: string;
-    withdrawable_epoch: string;
-  }> = {},
-  responseOverrides: Partial<{ balance: string }> = {},
+  validatorOverrides: Record<string, unknown> = {},
+  responseOverrides: Record<string, unknown> = {},
 ) {
   return {
     data: {

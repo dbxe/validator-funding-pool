@@ -26,7 +26,15 @@ const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
 const ALLOWED_CONFIRMATION_STATE_IDS = ["finalized", "justified"];
 const HEAD_STATE_ID = "head";
-const FAR_FUTURE_EPOCH = (2n ** 64n - 1n).toString();
+const UINT64_MAX = 2n ** 64n - 1n;
+const FAR_FUTURE_EPOCH = UINT64_MAX.toString();
+const CANONICAL_UNSIGNED_DECIMAL = /^(0|[1-9][0-9]*)$/;
+const BEACON_EPOCH_FIELDS = [
+  "activation_eligibility_epoch",
+  "activation_epoch",
+  "exit_epoch",
+  "withdrawable_epoch",
+] as const;
 
 export interface DepositData {
   pubkey: string;
@@ -77,13 +85,16 @@ interface BeaconValidatorResponse {
   };
 }
 
+/// `is_optimistic` and `el_offline` are required, not optional. The preflight refuses to
+/// rely on an optimistic head or on a node whose execution client is offline, so a
+/// response that simply omits either field must be fatal rather than read as healthy.
 interface BeaconSyncingResponse {
   data: {
     head_slot: string;
     sync_distance: string;
     is_syncing: boolean;
-    is_optimistic?: boolean;
-    el_offline?: boolean;
+    is_optimistic: boolean;
+    el_offline: boolean;
   };
 }
 
@@ -666,20 +677,6 @@ export async function readBeaconGenesisForkVersion(label: string): Promise<Hex> 
   return normalizeHexLength(genesis.data.genesis_fork_version, 4, "genesis_fork_version").toLowerCase() as Hex;
 }
 
-export async function assertBeaconValidatorHasWithdrawalCredentials(
-  pubkey: Hex,
-  expectedWithdrawalCredentials: Hex,
-  label: string,
-): Promise<BeaconValidatorPreflight> {
-  const beaconNodeUrl = requireBeaconNodeUrl(label);
-  return assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
-    beaconNodeUrl,
-    pubkey,
-    expectedWithdrawalCredentials,
-    label,
-  );
-}
-
 async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
   beaconNodeUrl: string,
   pubkey: Hex,
@@ -700,17 +697,22 @@ async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
 
 // The fund and top-up legs run the identical preflight. Both names are kept so call sites stay
 // labeled with the operation the operator actually ran.
+//
+// `testOnlyConfirmationReader` exists so the tests can drive the interactive excess-balance
+// confirmation without a terminal. It is not an authority boundary and grants a caller nothing:
+// any importer of this module could skip the preflight altogether. The supported commands never
+// pass it, so a real run always reads a real TTY.
 export async function assertBeaconValidatorReadyForTopUp(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
-  confirmationReader?: ExcessBalanceConfirmationReader,
+  testOnlyConfirmationReader?: ExcessBalanceConfirmationReader,
 ) {
   return assertBeaconValidatorIsFreshPredeposit(
     pubkey,
     expectedWithdrawalCredentials,
     label,
-    confirmationReader,
+    testOnlyConfirmationReader,
   );
 }
 
@@ -718,13 +720,13 @@ export async function assertBeaconValidatorReadyForFunding(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
-  confirmationReader?: ExcessBalanceConfirmationReader,
+  testOnlyConfirmationReader?: ExcessBalanceConfirmationReader,
 ) {
   return assertBeaconValidatorIsFreshPredeposit(
     pubkey,
     expectedWithdrawalCredentials,
     label,
-    confirmationReader,
+    testOnlyConfirmationReader,
   );
 }
 
@@ -732,7 +734,7 @@ async function assertBeaconValidatorIsFreshPredeposit(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
-  confirmationReader: ExcessBalanceConfirmationReader = stdinConfirmationReader(),
+  testOnlyConfirmationReader: ExcessBalanceConfirmationReader = stdinConfirmationReader(),
 ) {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
@@ -742,26 +744,57 @@ async function assertBeaconValidatorIsFreshPredeposit(
     label,
   );
 
-  const headPreflight = await readBeaconValidatorPreflight(
+  const balanceGwei = await assertFreshPredepositHeadState(
     beaconNodeUrl,
     pubkey,
-    HEAD_STATE_ID,
+    expectedWithdrawalCredentials,
     `${label} head`,
   );
-  assertBeaconValidatorWithdrawalCredentials(headPreflight, expectedWithdrawalCredentials, `${label} head`);
-
-  const balanceGwei = assertFreshPredepositMutableState(headPreflight, label);
-
-  printBeaconPreflight(`${label} head`, headPreflight);
-  if (balanceGwei > PREDEPOSIT_GWEI) {
-    await confirmExcessBalance(balanceGwei, label, confirmationReader);
-    console.log(
-      `${label} head beacon fresh-predeposit preflight passed WITH an operator-confirmed excess ` +
-        `balance of ${balanceGwei} Gwei`,
-    );
+  if (balanceGwei <= PREDEPOSIT_GWEI) {
+    console.log(`${label} head beacon fresh-predeposit preflight passed`);
     return;
   }
-  console.log(`${label} head beacon fresh-predeposit preflight passed`);
+
+  await confirmExcessBalance(balanceGwei, label, testOnlyConfirmationReader);
+
+  // The operator can sit at that prompt for minutes, and the validator's consensus state
+  // does not hold still while they do. Re-run the entire head-state preflight against a
+  // fresh fetch — node health, credentials, slashing, all four epochs, balance — and then
+  // require the balance to be exactly the value that was confirmed. Anything else means the
+  // confirmation was about a state that no longer exists.
+  const reReadBalanceGwei = await assertFreshPredepositHeadState(
+    beaconNodeUrl,
+    pubkey,
+    expectedWithdrawalCredentials,
+    `${label} head re-read`,
+  );
+  if (reReadBalanceGwei !== balanceGwei) {
+    throw new Error(
+      `${label} head beacon validator balance changed from the confirmed ${balanceGwei} Gwei to ` +
+        `${reReadBalanceGwei} Gwei between the confirmation and the re-read; nothing was sent. ` +
+        `Re-run this command and confirm the balance it observes then`,
+    );
+  }
+
+  console.log(
+    `${label} head beacon fresh-predeposit preflight passed WITH an interactively confirmed ` +
+      `excess balance of ${balanceGwei} Gwei`,
+  );
+}
+
+/// Fetches head state fresh and runs the whole fresh-predeposit preflight over it, returning
+/// the head-state balance in Gwei.
+async function assertFreshPredepositHeadState(
+  beaconNodeUrl: string,
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+): Promise<bigint> {
+  const preflight = await readBeaconValidatorPreflight(beaconNodeUrl, pubkey, HEAD_STATE_ID, label);
+  assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
+  const balanceGwei = assertFreshPredepositMutableState(preflight, label);
+  printBeaconPreflight(label, preflight);
+  return balanceGwei;
 }
 
 // Returns the head-state balance in Gwei. A balance above the 1 ETH predeposit is not returned as
@@ -772,45 +805,27 @@ function assertFreshPredepositMutableState(
   label: string,
 ): bigint {
   const { balance, validator } = preflight.validator;
-  let balanceGwei: bigint;
-  try {
-    balanceGwei = BigInt(balance);
-  } catch {
-    throw new Error(`${label} head beacon validator balance ${balance} is not a Gwei integer`);
-  }
+  const balanceGwei = parseBeaconUint64(balance, "validator balance", label);
   if (balanceGwei < PREDEPOSIT_GWEI) {
     throw new Error(
-      `${label} head beacon validator balance ${balance} is below the ${PREDEPOSIT_GWEI} Gwei predeposit`,
+      `${label} beacon validator balance ${balance} is below the ${PREDEPOSIT_GWEI} Gwei predeposit`,
     );
   }
-  if (validator.slashed) {
-    throw new Error(`${label} head beacon validator is slashed`);
+  if (requireBeaconBoolean(validator.slashed, "validator slashed", label)) {
+    throw new Error(`${label} beacon validator is slashed`);
   }
-  if (validator.activation_epoch !== FAR_FUTURE_EPOCH) {
-    throw new Error(
-      `${label} head beacon validator activation_epoch ${validator.activation_epoch} is not FAR_FUTURE_EPOCH`,
-    );
-  }
-  if (validator.activation_eligibility_epoch !== FAR_FUTURE_EPOCH) {
-    throw new Error(
-      `${label} head beacon validator activation_eligibility_epoch ` +
-        `${validator.activation_eligibility_epoch} is not FAR_FUTURE_EPOCH`,
-    );
-  }
-  if (validator.exit_epoch !== FAR_FUTURE_EPOCH) {
-    throw new Error(
-      `${label} head beacon validator exit_epoch ${validator.exit_epoch} is not FAR_FUTURE_EPOCH`,
-    );
-  }
-  if (validator.withdrawable_epoch !== FAR_FUTURE_EPOCH) {
-    throw new Error(
-      `${label} head beacon validator withdrawable_epoch ${validator.withdrawable_epoch} ` +
-        `is not FAR_FUTURE_EPOCH`,
-    );
+  for (const field of BEACON_EPOCH_FIELDS) {
+    const value = validator[field];
+    parseBeaconUint64(value, `validator ${field}`, label);
+    if (value !== FAR_FUTURE_EPOCH) {
+      throw new Error(`${label} beacon validator ${field} ${value} is not FAR_FUTURE_EPOCH`);
+    }
   }
   return balanceGwei;
 }
 
+/// Terminal interface behind the excess-balance confirmation. Injectable for tests only; see
+/// `assertBeaconValidatorReadyForTopUp`.
 export interface ExcessBalanceConfirmationReader {
   isTty: () => boolean;
   readLine: (prompt: string) => Promise<string>;
@@ -830,9 +845,12 @@ function stdinConfirmationReader(): ExcessBalanceConfirmationReader {
   };
 }
 
-// The excess-balance confirmation is deliberately not scriptable. There is no environment
-// variable, flag, or acknowledgement string that stands in for it: an operator must read the
-// observed balance and type it back on a terminal.
+// The excess-balance confirmation has no non-interactive form. There is no environment
+// variable, flag, or acknowledgement string that stands in for it: a human must read the
+// observed balance and type it back on a terminal. Ordinary non-TTY execution — a pipe, cron,
+// CI — is rejected outright. It is not proof against the machine's owner: a deliberate PTY
+// wrapper (expect, script) can drive any interactive program. The check stops accidents and
+// ambient automation, which is what it is for.
 async function confirmExcessBalance(
   balanceGwei: bigint,
   label: string,
@@ -962,22 +980,122 @@ async function readBeaconValidatorPreflight(
     genesis: genesis.data,
     syncing,
     finality: finality.data,
-    validator: validator.data,
+    validator: assertBeaconValidatorResponseShape(validator.data, label),
   };
 }
 
 async function assertBeaconNodeHealthy(beaconNodeUrl: string, label: string): Promise<BeaconSyncingResponse["data"]> {
-  const syncing = await fetchBeaconJson<BeaconSyncingResponse>(beaconNodeUrl, "/eth/v1/node/syncing", label);
-  if (syncing.data.is_syncing) {
-    throw new Error(`${label} beacon node is syncing: distance ${syncing.data.sync_distance}`);
+  const response = await fetchBeaconJson<BeaconSyncingResponse>(beaconNodeUrl, "/eth/v1/node/syncing", label);
+  const syncing = assertBeaconSyncingResponseShape(response.data, label);
+  if (syncing.is_syncing) {
+    throw new Error(`${label} beacon node is syncing: distance ${syncing.sync_distance}`);
   }
-  if (syncing.data.is_optimistic) {
+  if (syncing.is_optimistic) {
     throw new Error(`${label} beacon node is optimistic; refusing to rely on beacon confirmation`);
   }
-  if (syncing.data.el_offline) {
+  if (syncing.el_offline) {
     throw new Error(`${label} beacon node reports execution layer offline`);
   }
-  return syncing.data;
+  return syncing;
+}
+
+// ---------------------------------------------------------------------------
+// Beacon response shape validation
+//
+// The declared TypeScript interfaces above describe what a conforming beacon node
+// returns; they are erased at runtime and assert nothing about what an endpoint
+// actually sends. Every beacon field a preflight makes a decision on is therefore
+// validated here, at the parse boundary, and any violation is fatal and names the
+// field. Fail closed: a missing, null, or wrongly typed value is never read as the
+// safe value.
+// ---------------------------------------------------------------------------
+
+function describeBeaconValue(value: unknown): string {
+  if (value === undefined) return "<missing>";
+  const described = JSON.stringify(value);
+  return described ?? String(value);
+}
+
+function asBeaconObject(value: unknown, what: string, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} beacon ${what} ${describeBeaconValue(value)} is not an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/// Beacon API integers arrive as JSON strings. Only a canonical unsigned decimal string
+/// within uint64 is accepted. `BigInt` on its own also accepts `"0x3b9aca00"`,
+/// `"+1000000000"` and `" 1000000000 "`; no conforming beacon node emits those, and each
+/// compares unequal to the canonical form that the FAR_FUTURE_EPOCH and typed-confirmation
+/// comparisons rely on.
+function parseBeaconUint64(value: unknown, field: string, label: string): bigint {
+  if (typeof value !== "string" || !CANONICAL_UNSIGNED_DECIMAL.test(value)) {
+    throw new Error(
+      `${label} beacon ${field} ${describeBeaconValue(value)} is not a canonical unsigned ` +
+        `decimal string`,
+    );
+  }
+  const parsed = BigInt(value);
+  if (parsed > UINT64_MAX) {
+    throw new Error(`${label} beacon ${field} ${value} exceeds the uint64 maximum ${UINT64_MAX}`);
+  }
+  return parsed;
+}
+
+function requireBeaconBoolean(value: unknown, field: string, label: string): boolean {
+  if (value !== true && value !== false) {
+    throw new Error(
+      `${label} beacon ${field} ${describeBeaconValue(value)} is not the boolean true or false`,
+    );
+  }
+  return value;
+}
+
+function requireBeaconString(value: unknown, field: string, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${label} beacon ${field} ${describeBeaconValue(value)} is not a string`);
+  }
+  return value;
+}
+
+function requireBeaconHex(value: unknown, bytes: number, field: string, label: string): string {
+  const hex = requireBeaconString(value, field, label);
+  if (!new RegExp(`^0x[0-9a-fA-F]{${bytes * 2}}$`).test(hex)) {
+    throw new Error(`${label} beacon ${field} ${hex} is not a ${bytes}-byte 0x-prefixed hex string`);
+  }
+  return hex;
+}
+
+function assertBeaconValidatorResponseShape(
+  data: unknown,
+  label: string,
+): BeaconValidatorResponse["data"] {
+  const response = asBeaconObject(data, "validator response", label);
+  const validator = asBeaconObject(response.validator, "validator response validator", label);
+
+  requireBeaconString(response.index, "validator index", label);
+  requireBeaconString(response.status, "validator status", label);
+  parseBeaconUint64(response.balance, "validator balance", label);
+  requireBeaconHex(validator.withdrawal_credentials, 32, "validator withdrawal_credentials", label);
+  requireBeaconBoolean(validator.slashed, "validator slashed", label);
+  parseBeaconUint64(validator.effective_balance, "validator effective_balance", label);
+  for (const field of BEACON_EPOCH_FIELDS) {
+    parseBeaconUint64(validator[field], `validator ${field}`, label);
+  }
+  return data as BeaconValidatorResponse["data"];
+}
+
+function assertBeaconSyncingResponseShape(
+  data: unknown,
+  label: string,
+): BeaconSyncingResponse["data"] {
+  const syncing = asBeaconObject(data, "node syncing response", label);
+  parseBeaconUint64(syncing.head_slot, "node head_slot", label);
+  parseBeaconUint64(syncing.sync_distance, "node sync_distance", label);
+  requireBeaconBoolean(syncing.is_syncing, "node is_syncing", label);
+  requireBeaconBoolean(syncing.is_optimistic, "node is_optimistic", label);
+  requireBeaconBoolean(syncing.el_offline, "node el_offline", label);
+  return data as BeaconSyncingResponse["data"];
 }
 
 async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label: string): Promise<T> {
