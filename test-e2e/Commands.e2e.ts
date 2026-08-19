@@ -716,6 +716,12 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
     assertOutputContains(result, "fund head beacon fresh-predeposit preflight passed");
     assertOutputContains(result, "fund pre-broadcast head recheck passed");
+    // Nothing here chooses a fee: hardhat fills them from the endpoint. On the keystore path
+    // nothing renders them either, so they are printed — before the transaction, which is the
+    // only side of it where a number is any use.
+    assertOutputContains(result, "fund fees, as this endpoint suggests them and hardhat will fill them:");
+    assertOutputContains(result, "gas limit:                filled from eth_estimateGas");
+    assertOutputOrder(result, "max fee per gas:", "Funded in block ");
     assertOutputContains(
       result,
       `fund credit confirmed from the receipt: the pool emitted ParticipantFunded for ` +

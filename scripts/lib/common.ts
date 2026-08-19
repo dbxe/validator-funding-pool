@@ -8,6 +8,7 @@ import { ssz } from "@lodestar/types";
 import {
   decodeEventLog,
   formatEther,
+  formatGwei,
   isAddress,
   keccak256,
   type AccessList,
@@ -3109,6 +3110,119 @@ function gweiToNumber(value: bigint): number {
 
 export function formatWei(value: bigint): string {
   return `${value} wei (${formatEther(value)} ETH)`;
+}
+
+/// Gas prices are read in gwei by everyone who reads them, and `formatWei`'s ETH form turns
+/// an ordinary priority fee into a row of leading zeroes.
+export function formatGasPrice(value: bigint): string {
+  return `${value} wei (${formatGwei(value)} gwei)`;
+}
+
+// ---------------------------------------------------------------------------
+// Transaction fees
+//
+// Nothing in this repository chooses a fee. Hardhat's `AutomaticGasPriceHandler`
+// fills `maxFeePerGas` and `maxPriorityFeePerGas` from the connected endpoint's
+// `eth_feeHistory`, and `AutomaticGasHandler` fills the gas limit from
+// `eth_estimateGas`, on the way past — so the numbers a transaction is signed
+// with come from the same endpoint as every other read, and are covered by the
+// same trusted-endpoint assumption (`SECURITY.md` §2).
+//
+// On the mainnet path that assumption has a second layer under it: a Ledger
+// renders the fee for approval, so a fee an endpoint inflated is a fee a person
+// is shown before it is signed. The keystore path has no such gate — it signs
+// whatever came back. What follows is not a gate either. It prints the numbers,
+// so that path at least sees them.
+// ---------------------------------------------------------------------------
+
+/// The public actions the fee preview needs. Structural, so the tests can drive it.
+export type FeeSuggestionClient = Pick<
+  PublicClient,
+  "getFeeHistory" | "estimateMaxPriorityFeePerGas"
+>;
+
+/// Hardhat's own constants, from
+/// `hardhat/dist/src/internal/builtin-plugins/network-manager/request-handlers/handlers/gas/automatic-gas-price-handler.js`
+/// (`EIP1559_BASE_FEE_MAX_FULL_BLOCKS_PREFERENCE = 3`, `EIP1559_REWARD_PERCENTILE = 50`). The
+/// cap is the next block's base fee grown by 1/8 per block for the two blocks after it, which
+/// is the most it can rise if every one of them is full.
+const FEE_REWARD_PERCENTILE = 50;
+const FEE_BASE_FEE_FULL_BLOCKS = 2n;
+
+/// The fee fields hardhat is about to fill in, computed the way hardhat computes them.
+///
+/// This deliberately reproduces `AutomaticGasPriceHandler`'s arithmetic rather than viem's
+/// `estimateFeesPerGas`, which uses a different formula: a printed number that is not the
+/// number the device will render would be worse than printing nothing, because the operator's
+/// job at the device is to compare.
+///
+/// It is a PREVIEW and says so. Hardhat makes its own `eth_feeHistory` request when it
+/// composes the transaction, moments later and against a chain that has moved, so the signed
+/// values may differ by a block's worth of base fee. What the preview establishes is the order
+/// of magnitude and the endpoint's answer, which is what an inflated fee shows up in.
+export async function resolveSuggestedFees(
+  publicClient: FeeSuggestionClient,
+): Promise<{ baseFeePerGas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+  const history = await publicClient.getFeeHistory({
+    blockCount: 1,
+    rewardPercentiles: [FEE_REWARD_PERCENTILE],
+  });
+  const baseFeePerGas = history.baseFeePerGas[history.baseFeePerGas.length - 1];
+  if (baseFeePerGas === undefined) {
+    throw new Error("eth_feeHistory returned no baseFeePerGas");
+  }
+
+  let maxPriorityFeePerGas = history.reward?.[0]?.[0] ?? 0n;
+  if (maxPriorityFeePerGas === 0n) {
+    // Hardhat's fallback chain, in order: the node's own suggestion, then 1 wei. An empty
+    // chain reports a zero reward at every percentile, which is the local-devnet case.
+    try {
+      maxPriorityFeePerGas = await publicClient.estimateMaxPriorityFeePerGas();
+    } catch {
+      maxPriorityFeePerGas = 1n;
+    }
+    if (maxPriorityFeePerGas === 0n) maxPriorityFeePerGas = 1n;
+  }
+
+  let maxFeePerGas = (baseFeePerGas * 9n ** FEE_BASE_FEE_FULL_BLOCKS) / 8n ** FEE_BASE_FEE_FULL_BLOCKS;
+  if (maxFeePerGas < maxPriorityFeePerGas) maxFeePerGas += maxPriorityFeePerGas;
+  return { baseFeePerGas, maxFeePerGas, maxPriorityFeePerGas };
+}
+
+/// Prints the fee fields the endpoint is about to supply, immediately before a write.
+///
+/// The reason it exists is narrow and worth stating exactly. A dishonest EL RPC can choose an
+/// extreme priority fee, and the keystore path signs it with no human in the loop — the
+/// Ledger path shows it on the device, which is the gate. This is not a second gate: there is
+/// no ceiling and nothing is refused. It is the number, on the screen, before the signature,
+/// for the path that would otherwise never see it. An endpoint willing to inflate your fees is
+/// an endpoint §2 already tells you not to use.
+///
+/// A failure here is swallowed and reported as a line rather than raised. A preview must never
+/// be the thing that ends a capital operation.
+export async function printSuggestedFees(publicClient: FeeSuggestionClient, label: string) {
+  let fees: Awaited<ReturnType<typeof resolveSuggestedFees>>;
+  try {
+    fees = await resolveSuggestedFees(publicClient);
+  } catch (error) {
+    console.log(
+      `${label} fees: could not be previewed ` +
+        `(${error instanceof Error ? error.message : String(error)}). Hardhat will still fill ` +
+        `them from this endpoint; on the Ledger path the device renders what it filled`,
+    );
+    return;
+  }
+  console.log(
+    `${label} fees, as this endpoint suggests them and hardhat will fill them:\n` +
+      `  base fee per gas:         ${formatGasPrice(fees.baseFeePerGas)}\n` +
+      `  max priority fee per gas: ${formatGasPrice(fees.maxPriorityFeePerGas)}\n` +
+      `  max fee per gas:          ${formatGasPrice(fees.maxFeePerGas)}\n` +
+      `  gas limit:                filled from eth_estimateGas when the transaction is ` +
+      `composed, so it is not previewed here\n` +
+      `  These come from the connected endpoint, and hardhat re-reads them a moment from now, ` +
+      `so the signed values may differ by a block. On the Ledger path the device renders the ` +
+      `fee it was actually given; compare it against the line above.`,
+  );
 }
 
 // ---------------------------------------------------------------------------

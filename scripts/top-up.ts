@@ -8,6 +8,7 @@ import {
   assertCommittedPubkeyMatchesLocal,
   assertCompilationNotSkipped,
   assertDeploymentIntegrity,
+  printSuggestedFees,
   readDeployment,
   readPredepositAndTopUpDepositData,
   reportFatalError,
@@ -55,6 +56,7 @@ async function main() {
   console.log(`Validator pubkey: ${pubkey}`);
   console.log(`Top-up deposit data root: ${await pool.read.topUpDepositDataRoot()}`);
 
+  await printSuggestedFees(publicClient, "top-up");
   // Last read before the device is asked to sign. Everything after this line is outside
   // what any check here can see.
   await assertBeaconValidatorStillFresh(pubkey, expectedCredentials, "top-up", headBalanceGwei);

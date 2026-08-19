@@ -14,6 +14,7 @@ import {
   defaultDepositContract,
   deploymentPath,
   envAddress,
+  printSuggestedFees,
   readLocalBuildArtifacts,
   reportFatalError,
   requireFundingWindowSeconds,
@@ -68,6 +69,7 @@ async function main() {
   // printed by `status` and by `open-funding-attempt`, both read back from the pool.
   console.log(`Funding window (immutable): ${fundingWindowDuration}s`);
 
+  await printSuggestedFees(publicClient, "deploy");
   // sendDeploymentTransaction rather than deployContract: it surfaces the deployment
   // transaction hash, which is what the post-broadcast sender check needs. The address
   // it returns is derived from the sender and nonce before mining, so the receipt is

@@ -33,7 +33,9 @@ import {
   optionalEnvBigInt,
   parseBigIntList,
   printPayoutRecipient,
+  printSuggestedFees,
   requireFundingAllocation,
+  resolveSuggestedFees,
   requireFundingWindowSeconds,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
@@ -1514,6 +1516,101 @@ describe("assertFundingWindowNotDeclared", function () {
       }
     } finally {
       restoreEnv("FUNDING_WINDOW_SECONDS", original);
+    }
+  });
+});
+
+describe("the fee preview printed before signing", function () {
+  /// Reproduces what hardhat's `AutomaticGasPriceHandler` would compute from the same
+  /// responses, independently of the implementation:
+  /// `maxFeePerGas = baseFeePerGas * 9^2 / 8^2` (three full blocks' worth of 1/8 growth),
+  /// `maxPriorityFeePerGas` = the 50th-percentile reward.
+  function feeClient(
+    baseFeePerGas: bigint,
+    reward: bigint | undefined,
+    suggestedPriorityFee?: bigint,
+  ) {
+    const calls: { blockCount: number; rewardPercentiles: readonly number[] }[] = [];
+    return {
+      calls,
+      getFeeHistory: async (args: { blockCount: number; rewardPercentiles: readonly number[] }) => {
+        calls.push(args);
+        return {
+          baseFeePerGas: [baseFeePerGas - 1n, baseFeePerGas],
+          gasUsedRatio: [0.5],
+          oldestBlock: 1n,
+          reward: reward === undefined ? undefined : [[reward]],
+        };
+      },
+      estimateMaxPriorityFeePerGas: async () => {
+        if (suggestedPriorityFee === undefined) throw new Error("eth_maxPriorityFeePerGas");
+        return suggestedPriorityFee;
+      },
+    };
+  }
+
+  it("computes the fields hardhat will fill, from the next block's base fee", async function () {
+    const client = feeClient(8_000_000_000n, 1_500_000_000n);
+
+    const fees = await resolveSuggestedFees(client);
+
+    assert.deepEqual(client.calls, [{ blockCount: 1, rewardPercentiles: [50] }]);
+    assert.equal(fees.baseFeePerGas, 8_000_000_000n);
+    assert.equal(fees.maxPriorityFeePerGas, 1_500_000_000n);
+    // 8 gwei * 81 / 64.
+    assert.equal(fees.maxFeePerGas, (8_000_000_000n * 81n) / 64n);
+  });
+
+  it("falls back the way hardhat does when the reward percentile reports zero", async function () {
+    // The empty-chain case: every percentile is zero, so the node's own suggestion is asked
+    // for next, and 1 wei is the floor when there is not one.
+    assert.equal(
+      (await resolveSuggestedFees(feeClient(1_000n, 0n, 7n))).maxPriorityFeePerGas,
+      7n,
+    );
+    assert.equal((await resolveSuggestedFees(feeClient(1_000n, 0n))).maxPriorityFeePerGas, 1n);
+    assert.equal((await resolveSuggestedFees(feeClient(1_000n, undefined))).maxPriorityFeePerGas, 1n);
+  });
+
+  it("keeps maxFeePerGas at or above the priority fee, as hardhat does", async function () {
+    // A base fee far below an extreme priority fee. hardhat adds them rather than signing an
+    // impossible pair, and the preview must print the same number the device will show.
+    const fees = await resolveSuggestedFees(feeClient(1n, 500_000_000_000n));
+    assert.equal(fees.maxFeePerGas, 500_000_000_000n + (1n * 81n) / 64n);
+    assert.ok(fees.maxFeePerGas >= fees.maxPriorityFeePerGas);
+  });
+
+  it("prints all three fields, in gwei, and says the gas limit is not previewed", async function () {
+    const log = captureLog();
+    try {
+      await printSuggestedFees(feeClient(8_000_000_000n, 1_500_000_000n), "fund");
+      assert.equal(log.lines.length, 1);
+      assert.match(log.lines[0], /fund fees, as this endpoint suggests them/);
+      assert.match(log.lines[0], /base fee per gas: +8000000000 wei \(8 gwei\)/);
+      assert.match(log.lines[0], /max priority fee per gas: +1500000000 wei \(1\.5 gwei\)/);
+      assert.match(log.lines[0], /max fee per gas: +10125000000 wei \(10\.125 gwei\)/);
+      assert.match(log.lines[0], /gas limit: +filled from eth_estimateGas/);
+      // It is a preview, and says so: hardhat re-reads when it composes the transaction.
+      assert.match(log.lines[0], /the signed values may differ by a block/);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("never ends a run: an endpoint that cannot answer costs a line, not the command", async function () {
+    const broken = {
+      getFeeHistory: async () => {
+        throw new Error("eth_feeHistory unsupported");
+      },
+      estimateMaxPriorityFeePerGas: async () => 1n,
+    };
+    const log = captureLog();
+    try {
+      await assert.doesNotReject(() => printSuggestedFees(broken, "sweep"));
+      assert.match(log.lines[0], /sweep fees: could not be previewed \(eth_feeHistory unsupported\)/);
+      assert.match(log.lines[0], /Hardhat will still fill them from this endpoint/);
+    } finally {
+      log.restore();
     }
   });
 });

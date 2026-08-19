@@ -5,6 +5,7 @@ import {
   assertCompilationNotSkipped,
   assertDeploymentIntegrity,
   assertFundingWindowNotDeclared,
+  printSuggestedFees,
   readDeployment,
   reportFatalError,
   requireFundingAllocation,
@@ -49,6 +50,7 @@ async function main() {
   for (let i = 0; i < participants.length; ++i) {
     console.log(`Participant ${i}: ${participants[i]} target=${fundingTargetsGwei[i]} Gwei`);
   }
+  await printSuggestedFees(publicClient, "open-funding-attempt");
   const hash = await pool.write.openFundingAttempt([participants, fundingTargetsWei]);
   const receipt = await waitForSenderVerifiedReceipt(
     publicClient,

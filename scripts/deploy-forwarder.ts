@@ -8,6 +8,7 @@ import {
   assertFeeRecipientForwarderMatchesDeployment,
   assertForwarderAuthenticity,
   assertFreshForwarderMatchesExpectedForwarder,
+  printSuggestedFees,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -36,6 +37,7 @@ async function main() {
   // here rather than an address quietly overwritten.
   await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");
 
+  await printSuggestedFees(publicClient, "deploy-forwarder");
   // See deploy.ts: sendDeploymentTransaction is used for the transaction hash the
   // post-broadcast sender check needs.
   const { contract: forwarder, deploymentTransaction } = await viem.sendDeploymentTransaction(

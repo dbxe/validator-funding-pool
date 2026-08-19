@@ -17,6 +17,7 @@ import {
   formatWei,
   fundViaPlainTransfer,
   PREDEPOSIT_GWEI,
+  printSuggestedFees,
   readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
@@ -110,6 +111,7 @@ async function main() {
       `via ${viaTransfer ? "plain transfer (zero calldata)" : "fund() calldata"}`,
   );
 
+  await printSuggestedFees(publicClient, "fund");
   // Final race-narrowing re-reads, immediately before signing. They cannot close the
   // race, only shorten it: see "Plain-Transfer Funding" in the README for the one
   // window where a plain transfer behaves differently from a reverting fund().

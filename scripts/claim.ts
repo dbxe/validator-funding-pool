@@ -8,6 +8,7 @@ import {
   assertPayoutReachedRecipient,
   formatWei,
   printPayoutRecipient,
+  printSuggestedFees,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -46,6 +47,7 @@ async function main() {
   // it against an independently derived one right here.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   printPayoutRecipient("claim", deployment.pool, signer, recipient, claimable);
+  await printSuggestedFees(publicClient, "claim");
   const hash = recipient.toLowerCase() === signer.toLowerCase()
     ? await pool.write.claim()
     : await pool.write.claimTo([recipient]);

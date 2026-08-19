@@ -399,6 +399,18 @@ A Ledger clear-signs a zero-calldata ETH transfer: destination address, amount, 
 
 Funding is the only action with a clear-signed path, and it is the action that moves the most ETH. Everything else is blind-signed today.
 
+Fees are filled in by hardhat from whatever the connected endpoint answers — `eth_feeHistory` for the two EIP-1559 fields, `eth_estimateGas` for the gas limit — and nothing in this repository picks or bounds them. On the device that is fine: a Ledger renders the fee on every screen above, so an endpoint that suggested an absurd priority fee is showing it to a person before the signature. Off the device there is no such gate, so every command that transacts prints the fields first:
+
+```
+fund fees, as this endpoint suggests them and hardhat will fill them:
+  base fee per gas:         8000000000 wei (8 gwei)
+  max priority fee per gas: 1500000000 wei (1.5 gwei)
+  max fee per gas:          10125000000 wei (10.125 gwei)
+  gas limit:                filled from eth_estimateGas when the transaction is composed, so it is not previewed here
+```
+
+It is a preview, computed with hardhat's own arithmetic so the max fee is the number the device will show — compare the two. Hardhat re-reads when it composes the transaction, so the signed values may differ by a block's worth of base fee. There is no ceiling and nothing is refused: an endpoint willing to inflate your fees is an endpoint [`SECURITY.md`](SECURITY.md) §2 already tells you not to use.
+
 The `request-exit` value deserves the extra words in the table. `MAX_FEE_WEI` is a ceiling the caller sets, not a payment: `requestExit(uint256)` reads the live EIP-7002 fee, reverts if it exceeds the cap, forwards exactly the live fee to the predeploy, and refunds the difference to the caller in the same transaction (`ValidatorFundingPool.requestExit`). The device shows what is sent, which is the ceiling. It defaults to twice the fee the script just read, so expect the device to show roughly double the fee you were quoted. What comes back is `MAX_FEE_WEI` minus whatever the fee is at the moment of inclusion: if the fee has not moved, that is half; if it rose in between, less; if it rose above the cap, the request reverts `ExitFeeTooHigh` and nothing is charged.
 
 The two deployment rows are the weakest position on this list. A creation transaction gives the device nothing checkable: no destination, no decodable arguments, just a bytecode blob. You cannot verify a deployment on the device, so verify it after. Before publishing the pool address to anyone, independently confirm that the deployed runtime bytecode and the immutables baked into it match the build you intended — read `depositContract`, `withdrawalRequestPredeploy`, `operator`, `fundingWindowDuration`, and `withdrawalCredentials` back from the chain, compare the runtime code hash against a local build, and verify the source on Sourcify (`clear-signing/README.md` requires Sourcify verification anyway for registry submission). `npm run deploy` writes all five immutables into the deployment record, and every later script re-reads them from the live pool and refuses on a mismatch. That comparison only detects a deployment record that drifted from the pool, not a pool that was wrong from the first block — which is why every script also derives the withdrawal credentials from the pool's own address and compares the pool's runtime code against your local build. The bytecode comparison is automatic now; Sourcify verification and the repository's own provenance are still yours to check.

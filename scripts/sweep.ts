@@ -7,6 +7,7 @@ import {
   assertFeeRecipientForwarderMatchesDeployment,
   assertSweepWasCredited,
   formatWei,
+  printSuggestedFees,
   readDeployment,
   readPoolOutflowsInBlock,
   reportFatalError,
@@ -45,6 +46,7 @@ async function main() {
   console.log(`Forwarder pending balance: ${formatWei(forwarderBalanceBefore)}`);
   console.log(`Pool balance before: ${formatWei(poolBalanceBefore)}`);
 
+  await printSuggestedFees(publicClient, "sweep");
   const hash = await forwarder.write.sweep();
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "sweep");
 

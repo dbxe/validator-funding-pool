@@ -10,6 +10,7 @@ import {
   assertExpectedPubkey,
   PREDEPOSIT_GWEI,
   PREDEPOSIT_WEI,
+  printSuggestedFees,
   readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
@@ -75,6 +76,7 @@ async function main() {
 
   console.log(`Committing validator ${predeposit.pubkey} to ${deployment.pool}`);
   console.log(`Submitting operator-funded predeposit: 1 ETH`);
+  await printSuggestedFees(publicClient, "commit-predeposit");
   const hash = await pool.write.commitAndPredeposit(
     [predeposit.pubkey, predeposit.signature, predeposit.depositDataRoot, topUp.signature, topUp.depositDataRoot],
     { value: PREDEPOSIT_WEI },

@@ -4,6 +4,7 @@ import {
   assertActiveSigner,
   assertCompilationNotSkipped,
   assertDeploymentIntegrity,
+  printSuggestedFees,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -30,6 +31,7 @@ async function main() {
   await assertDeploymentIntegrity(publicClient, pool, deployment, "forwarder-untouched");
 
   console.log(`Closing expired funding attempt for ${deployment.pool}`);
+  await printSuggestedFees(publicClient, "close-expired-funding-attempt");
   const hash = await pool.write.closeExpiredFundingAttempt();
   const receipt = await waitForSenderVerifiedReceipt(
     publicClient,

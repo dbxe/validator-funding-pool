@@ -8,6 +8,7 @@ import {
   assertPayoutReachedRecipient,
   formatWei,
   printPayoutRecipient,
+  printSuggestedFees,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -42,6 +43,7 @@ async function main() {
   // mining against the pool's own event.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   printPayoutRecipient("refund", deployment.pool, signer, recipient, refundable);
+  await printSuggestedFees(publicClient, "refund");
   const hash = recipient.toLowerCase() === signer.toLowerCase()
     ? await pool.write.refund()
     : await pool.write.refundTo([recipient]);
