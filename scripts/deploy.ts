@@ -2,6 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertActiveSigner,
+  assertCompilationNotSkipped,
   assertDeployedAt,
   assertDeploymentCanonicity,
   assertDeploymentMatchesPool,
@@ -23,6 +24,9 @@ import {
 } from "./lib/common.js";
 
 async function main() {
+  // An argv check, so it costs nothing and runs before every other line: a stale artifact
+  // would make the runtime-code check print a pass it did not earn.
+  assertCompilationNotSkipped("deploy");
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();

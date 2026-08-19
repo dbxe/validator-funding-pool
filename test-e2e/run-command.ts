@@ -17,6 +17,10 @@ export interface CommandRun {
   /// Environment for the child. Only these variables plus the small inherited base below
   /// reach it; the parent's own secrets never do.
   env: Record<string, string | undefined>;
+  /// Extra arguments appended after `--network <name>`, exactly where `npm run <script> --
+  /// <args>` puts them. This is how the flag cases are driven in the form an operator would
+  /// actually type.
+  args?: readonly string[];
 }
 
 export interface CommandResult {
@@ -36,7 +40,14 @@ const INHERITED = ["PATH", "HOME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "USER"] 
 
 export async function runCommand(run: CommandRun): Promise<CommandResult> {
   const network = run.network ?? "rpc";
-  const args = ["hardhat", "run", `scripts/${run.script}.ts`, "--network", network];
+  const args = [
+    "hardhat",
+    "run",
+    `scripts/${run.script}.ts`,
+    "--network",
+    network,
+    ...(run.args ?? []),
+  ];
   const env: Record<string, string> = {
     // Colour control codes would land in the middle of the exact lines these tests assert
     // on, so both conventions are set.

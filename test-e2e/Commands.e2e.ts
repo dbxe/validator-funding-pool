@@ -903,6 +903,30 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputLacks(result, "active signer:");
   });
 
+  it("refuses --no-compile, in the exact form npm passes it through", async () => {
+    // `npm run status -- --no-compile` is how an operator would type it, and npm forwards
+    // everything after `--` to the underlying `hardhat run ... --network read`. The flag
+    // would leave `artifacts/` untouched, so the runtime-code comparison would still print a
+    // pass — against whatever was last built rather than against this checkout's source.
+    const result = expectFailure(
+      await runCommand({
+        script: "status",
+        network: "read",
+        args: ["--no-compile"],
+        env: { RPC_URL: chain.url, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
+      }),
+    );
+
+    assertReadableFailure(
+      result,
+      "status",
+      "status: --no-compile was passed, and this command will not run with it.",
+    );
+    // It refuses from argv, before the record is read or a single request goes out.
+    assertOutputLacks(result, `Deployment record: ${deploymentFile}`);
+    assertOutputLacks(result, `Pool: ${pool}`);
+  });
+
   it("claim after top-up reports nothing claimable while the pool holds no proceeds", async () => {
     const result = expectSuccess(await runCommand({ script: "claim", env: asOperator() }));
     assertOutputContains(result, `Claimable for ${operator.address.toLowerCase()}: 0 wei (0 ETH)`);

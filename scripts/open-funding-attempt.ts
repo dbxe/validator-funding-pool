@@ -2,6 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertActiveSigner,
+  assertCompilationNotSkipped,
   assertDeploymentIntegrity,
   assertFundingWindowNotDeclared,
   readDeployment,
@@ -13,6 +14,9 @@ import {
 const GWEI = 1_000_000_000n;
 
 async function main() {
+  // An argv check, so it costs nothing and runs before every other line: a stale artifact
+  // would make the runtime-code check print a pass it did not earn.
+  assertCompilationNotSkipped("open-funding-attempt");
   // Before the record is even opened: this is an input the operator supplied for THIS command,
   // and this command cannot act on it.
   assertFundingWindowNotDeclared("open-funding-attempt");

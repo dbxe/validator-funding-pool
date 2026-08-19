@@ -4,6 +4,7 @@ import {
   assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorAbsent,
+  assertCompilationNotSkipped,
   assertContractPredepositWei,
   assertDeploymentIntegrity,
   assertExpectedPubkey,
@@ -19,6 +20,9 @@ import {
 } from "./lib/common.js";
 
 async function main() {
+  // An argv check, so it costs nothing and runs before every other line: a stale artifact
+  // would make the runtime-code check print a pass it did not earn.
+  assertCompilationNotSkipped("commit-predeposit");
   const deployment = readDeployment();
   const deposits = readPredepositAndTopUpDepositData();
   // Before a single RPC read, exactly like `assertExpectedPool`: this command binds the pool

@@ -476,6 +476,47 @@ export async function warnOnPlaintextEndpoints(connection: SignerConnection) {
   }
 }
 
+/// The hardhat global option that skips compilation before a task runs.
+const NO_COMPILE_FLAG = "--no-compile";
+
+/// Refuses any command invoked with `--no-compile`.
+///
+/// `assertRuntimeCodeMatchesLocalBuild` is the one check in this repository that is not
+/// circular: it compares the deployed runtime code against `artifacts/`, the participant's
+/// OWN build of the audited source. What makes that evidence rather than ceremony is that
+/// `hardhat run` recompiles the project immediately before running the script, so the
+/// artifact is a fresh product of the source in this checkout.
+///
+/// `--no-compile` removes exactly that. The comparison still runs, still prints that it
+/// passed, and still names the artifact file — but the artifact is whatever was last left in
+/// `artifacts/`, which may have been built from edited, stale, or entirely different sources,
+/// or under the other solidity profile. A pass reported against an unknown artifact is worse
+/// than no check at all, because the output is indistinguishable from the real thing.
+///
+/// So it is fatal on every command rather than a warning, and it is checked from argv at the
+/// top of `main()` — the same technique and the same reasoning as `selectedNetwork()` in
+/// `hardhat.config.ts`: the flag reaches the process as an argument, and a script cannot see
+/// hardhat's own parse of it. Both spellings are matched, because hardhat's argv
+/// preprocessing splits `--option=value` into two arguments before any option is matched
+/// (`hardhat/dist/src/internal/cli/parser.js` `parseRawArguments`, lines 137-147).
+export function assertCompilationNotSkipped(label: string) {
+  const skipped = process.argv.some(
+    (argument) => argument === NO_COMPILE_FLAG || argument.startsWith(`${NO_COMPILE_FLAG}=`),
+  );
+  if (!skipped) return;
+  throw new Error(
+    `${label}: ${NO_COMPILE_FLAG} was passed, and this command will not run with it. Nothing ` +
+      `has been sent. The runtime-code check that decides whether capital may be sent — the ` +
+      `only check here that is not circular — compares the deployed code against ` +
+      `artifacts/, and it means "this is the audited source" only because "hardhat run" ` +
+      `rebuilds that artifact from this checkout immediately before the script runs. With ` +
+      `${NO_COMPILE_FLAG} the comparison still runs and still prints a pass, against whatever ` +
+      `artifact happened to be left on disk — possibly from edited sources, or from the other ` +
+      `solidity profile. Re-run without ${NO_COMPILE_FLAG}. To verify against the production ` +
+      `profile, pass "--build-profile production" instead, which recompiles`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Command failure presentation
 //

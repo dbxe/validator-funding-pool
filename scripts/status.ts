@@ -1,6 +1,7 @@
 import { network } from "hardhat";
 
 import {
+  assertCompilationNotSkipped,
   assertDeploymentIntegrity,
   formatPoolState,
   formatWei,
@@ -11,6 +12,9 @@ import {
 } from "./lib/common.js";
 
 async function main() {
+  // An argv check, so it costs nothing and runs before every other line: a stale artifact
+  // would make the runtime-code check print a pass it did not earn.
+  assertCompilationNotSkipped("status");
   // Every other command reaches this through `assertActiveSigner`. `status` signs nothing,
   // so it calls it directly — a status read is exactly where an operator would notice that
   // the endpoint everything else trusts is plaintext.

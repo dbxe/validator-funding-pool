@@ -2,6 +2,7 @@ import { network } from "hardhat";
 
 import {
   assertActiveSigner,
+  assertCompilationNotSkipped,
   assertDeploymentIntegrity,
   assertFeeRecipientForwarderMatchesDeployment,
   assertSweepWasCredited,
@@ -13,6 +14,9 @@ import {
 } from "./lib/common.js";
 
 async function main() {
+  // An argv check, so it costs nothing and runs before every other line: a stale artifact
+  // would make the runtime-code check print a pass it did not earn.
+  assertCompilationNotSkipped("sweep");
   const deployment = readDeployment();
   if (deployment.feeRecipientForwarder === undefined) {
     throw new Error("Deployment record has no feeRecipientForwarder; run deploy-forwarder first");

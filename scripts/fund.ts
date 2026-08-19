@@ -7,6 +7,7 @@ import {
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorStillFresh,
+  assertCompilationNotSkipped,
   assertDeploymentIntegrity,
   assertFundingPins,
   assertFundingWasCredited,
@@ -27,6 +28,9 @@ import {
 } from "./lib/common.js";
 
 async function main() {
+  // An argv check, so it costs nothing and runs before every other line: a stale artifact
+  // would make the runtime-code check print a pass it did not earn.
+  assertCompilationNotSkipped("fund");
   const deployment = readDeployment();
   const deposits = readPredepositAndTopUpDepositData();
   const connection = await network.create();
