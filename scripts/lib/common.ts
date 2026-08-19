@@ -459,6 +459,24 @@ export function envAddress(name: string, fallback?: Address): Address {
   return asAddress(value);
 }
 
+/// Parses an integer that decides how much ETH moves. Only a canonical unsigned decimal
+/// string is accepted, mirroring `parseBeaconUint64` minus its uint64 bound — wei amounts
+/// legitimately exceed uint64.
+///
+/// `BigInt` on its own also accepts `"0x20"`, `"+5"`, `" 5 "`, and `"5_0"`. None of those
+/// is a form anyone means to type into an amount, and `0x20` in particular reads as
+/// thirty-two and is thirty-two only by coincidence of it also being valid hex. An amount
+/// that does not look like the number it is meant to be is a parse error, not a value.
+export function parseUnsignedDecimal(value: string, name: string): bigint {
+  if (!CANONICAL_UNSIGNED_DECIMAL.test(value)) {
+    throw new Error(
+      `${name} ${JSON.stringify(value)} is not a canonical unsigned decimal integer: no 0x ` +
+        `prefix, no sign, no leading zeros, no separators, no surrounding whitespace`,
+    );
+  }
+  return BigInt(value);
+}
+
 export function envBigInt(name: string, fallback?: bigint): bigint {
   const value = process.env[name];
   if (value === undefined || value === "") {
@@ -467,7 +485,7 @@ export function envBigInt(name: string, fallback?: bigint): bigint {
     }
     return fallback;
   }
-  return BigInt(value);
+  return parseUnsignedDecimal(value, name);
 }
 
 export function envNumber(name: string, fallback: number): number {
@@ -480,8 +498,13 @@ export function parseAddressList(value: string): Address[] {
   return value.split(",").map((entry) => asAddress(entry.trim()));
 }
 
-export function parseBigIntList(value: string): bigint[] {
-  return value.split(",").map((entry) => BigInt(entry.trim()));
+/// Entries are parsed exactly as `envBigInt` parses a single value, with one difference:
+/// surrounding whitespace between the commas is trimmed, because a comma-separated list is
+/// routinely written with spaces after the commas.
+export function parseBigIntList(value: string, name: string): bigint[] {
+  return value
+    .split(",")
+    .map((entry, index) => parseUnsignedDecimal(entry.trim(), `${name} entry ${index}`));
 }
 
 export function deploymentPath(): string {
@@ -1659,14 +1682,6 @@ export function readDepositDataFile(file = process.env.DEPOSIT_DATA_FILE ?? DEFA
   return JSON.parse(readFileSync(file, "utf8")) as DepositData[];
 }
 
-export function readSingleDepositData(file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE): DepositData {
-  const deposits = readDepositDataFile(file);
-  if (deposits.length !== 1) {
-    throw new Error(`Expected exactly one validator deposit entry, got ${deposits.length}`);
-  }
-  return deposits[0];
-}
-
 export function readPredepositAndTopUpDepositData(
   file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE,
 ): { predeposit: DepositData; topUp: DepositData } {
@@ -1817,4 +1832,76 @@ function gweiToNumber(value: bigint): number {
 
 export function formatWei(value: bigint): string {
   return `${value} wei (${formatEther(value)} ETH)`;
+}
+
+// ---------------------------------------------------------------------------
+// Funding path selection and the final on-chain re-read
+//
+// These two live here rather than in `scripts/fund.ts` so they can be tested:
+// every script file runs `main()` on import, so importing one from a test would
+// execute the command.
+// ---------------------------------------------------------------------------
+
+const STATE_FUNDING = 2;
+
+/// Plain transfers are the clear-signing path: a Ledger renders destination and
+/// amount for a zero-calldata transfer, where `fund()` calldata is blind-signed.
+/// Defaults on whenever the connection signs with a Ledger; `FUND_VIA_TRANSFER`
+/// forces it on (`1`) or off (`0`) on any network.
+///
+/// The two paths are identical in every pool state but one; see "Plain-Transfer Funding —
+/// The One Divergence" in `README.md` for the window in which the transfer path is
+/// accepted as pool proceeds where `fund()` would have reverted.
+export function fundViaPlainTransfer(networkConfig: { ledgerAccounts?: readonly string[] }): boolean {
+  const override = process.env.FUND_VIA_TRANSFER;
+  if (override === "1") return true;
+  if (override === "0") return false;
+  if (override !== undefined && override !== "") {
+    throw new Error(`FUND_VIA_TRANSFER must be 0 or 1, got ${override}`);
+  }
+  return (networkConfig.ledgerAccounts ?? []).length > 0;
+}
+
+interface FundingStateReader {
+  read: {
+    state: () => Promise<number>;
+    fundingDeadline: () => Promise<bigint>;
+    fundingRemainingWeiOf: (args: readonly [Address]) => Promise<bigint>;
+  };
+}
+
+interface LatestBlockReader {
+  getBlock: () => Promise<{ number: bigint | null; timestamp: bigint }>;
+}
+
+/// The last on-chain read before a funding transaction is signed: the attempt is still
+/// open, the deadline has not passed, and the caller's remaining allocation still covers
+/// the amount. It narrows the race between deciding to fund and being mined; it cannot
+/// close it, and on the plain-transfer path the contract's own revert is not there to
+/// catch what slips through.
+export async function assertStillFundable(
+  pool: FundingStateReader,
+  publicClient: LatestBlockReader,
+  caller: Address,
+  amount: bigint,
+) {
+  const [state, fundingDeadline, remaining, block] = await Promise.all([
+    pool.read.state(),
+    pool.read.fundingDeadline(),
+    pool.read.fundingRemainingWeiOf([caller]),
+    publicClient.getBlock(),
+  ]);
+
+  if (Number(state) !== STATE_FUNDING) {
+    throw new Error(`Pool state changed to ${state}; funding is no longer open`);
+  }
+  if (block.timestamp >= fundingDeadline) {
+    throw new Error(`Funding deadline ${fundingDeadline} has passed at block timestamp ${block.timestamp}`);
+  }
+  if (amount > remaining) {
+    throw new Error(`Remaining funding cap dropped to ${formatWei(remaining)}; ${formatWei(amount)} would revert`);
+  }
+
+  console.log(`Final re-read at block ${block.number}: state=${state} remaining=${formatWei(remaining)}`);
+  console.log(`Final re-read deadline margin: ${fundingDeadline - block.timestamp}s`);
 }

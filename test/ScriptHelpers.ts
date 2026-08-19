@@ -6,6 +6,10 @@ import type { Address, Hex } from "viem";
 import {
   assertActiveSigner,
   assertDeployedAt,
+  assertStillFundable,
+  envBigInt,
+  fundViaPlainTransfer,
+  parseBigIntList,
   waitForSenderVerifiedReceipt,
 } from "../scripts/lib/common.js";
 
@@ -86,6 +90,15 @@ function captureLog(): { lines: string[]; restore: () => void } {
       console.log = originalLog;
     },
   };
+}
+
+async function silentlyAsync<T>(run: () => Promise<T>): Promise<T> {
+  const log = captureLog();
+  try {
+    return await run();
+  } finally {
+    log.restore();
+  }
 }
 
 function restoreEnv(name: string, value: string | undefined) {
@@ -360,6 +373,171 @@ describe("assertActiveSigner", function () {
       restoreEnv("LEDGER_ADDRESS", original);
       restoreEnv("EXPECTED_SIGNER", originalExpected);
     }
+  });
+});
+
+describe("fundViaPlainTransfer", function () {
+  const noLedger = {};
+  const withLedger = { ledgerAccounts: [SIGNER] };
+
+  it("defaults to the transfer path only when the connection signs with a device", function () {
+    const original = process.env.FUND_VIA_TRANSFER;
+    delete process.env.FUND_VIA_TRANSFER;
+
+    try {
+      assert.equal(fundViaPlainTransfer(withLedger), true);
+      assert.equal(fundViaPlainTransfer(noLedger), false);
+      assert.equal(fundViaPlainTransfer({ ledgerAccounts: [] }), false);
+      // An empty override is the same as an unset one.
+      process.env.FUND_VIA_TRANSFER = "";
+      assert.equal(fundViaPlainTransfer(withLedger), true);
+      assert.equal(fundViaPlainTransfer(noLedger), false);
+    } finally {
+      restoreEnv("FUND_VIA_TRANSFER", original);
+    }
+  });
+
+  it("lets FUND_VIA_TRANSFER force either path on either kind of connection", function () {
+    const original = process.env.FUND_VIA_TRANSFER;
+
+    try {
+      process.env.FUND_VIA_TRANSFER = "1";
+      assert.equal(fundViaPlainTransfer(noLedger), true);
+      assert.equal(fundViaPlainTransfer(withLedger), true);
+
+      process.env.FUND_VIA_TRANSFER = "0";
+      assert.equal(fundViaPlainTransfer(noLedger), false);
+      assert.equal(fundViaPlainTransfer(withLedger), false);
+    } finally {
+      restoreEnv("FUND_VIA_TRANSFER", original);
+    }
+  });
+
+  it("refuses any other value rather than guessing which path was meant", function () {
+    const original = process.env.FUND_VIA_TRANSFER;
+
+    try {
+      for (const value of ["true", "yes", "01", "2", "TRUE", " 1", "0x1"]) {
+        process.env.FUND_VIA_TRANSFER = value;
+        assert.throws(
+          () => fundViaPlainTransfer(withLedger),
+          new RegExp(`FUND_VIA_TRANSFER must be 0 or 1, got ${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+        );
+      }
+    } finally {
+      restoreEnv("FUND_VIA_TRANSFER", original);
+    }
+  });
+});
+
+describe("assertStillFundable", function () {
+  const FUNDING = 2;
+  const DEADLINE = 2_000n;
+
+  function poolAt(state: number, remaining: bigint) {
+    return {
+      read: {
+        state: async () => state,
+        fundingDeadline: async () => DEADLINE,
+        fundingRemainingWeiOf: async (_args: readonly [Address]) => remaining,
+      },
+    };
+  }
+
+  function blockAt(timestamp: bigint) {
+    return { getBlock: async () => ({ number: 42n, timestamp }) };
+  }
+
+  it("passes and prints the re-read when funding is still open", async function () {
+    const log = captureLog();
+    try {
+      await assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n);
+      assert.deepEqual(log.lines, [
+        "Final re-read at block 42: state=2 remaining=10 wei (0.00000000000000001 ETH)",
+        "Final re-read deadline margin: 1000s",
+      ]);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("refuses once the pool has left the Funding state", async function () {
+    // State 3 is ToppedUp, which is the one state where a plain transfer is accepted as
+    // pool proceeds instead of reverting.
+    for (const state of [0, 1, 3]) {
+      await assert.rejects(
+        assertStillFundable(poolAt(state, 10n), blockAt(1_000n), SIGNER, 10n),
+        new RegExp(`Pool state changed to ${state}; funding is no longer open`),
+      );
+    }
+  });
+
+  it("refuses at and after the funding deadline", async function () {
+    for (const timestamp of [DEADLINE, DEADLINE + 1n]) {
+      await assert.rejects(
+        assertStillFundable(poolAt(FUNDING, 10n), blockAt(timestamp), SIGNER, 10n),
+        new RegExp(`Funding deadline ${DEADLINE} has passed at block timestamp ${timestamp}`),
+      );
+    }
+    await assert.doesNotReject(
+      silentlyAsync(() => assertStillFundable(poolAt(FUNDING, 10n), blockAt(DEADLINE - 1n), SIGNER, 10n)),
+    );
+  });
+
+  it("refuses an amount above the remaining allocation, and allows exactly it", async function () {
+    await assert.rejects(
+      assertStillFundable(poolAt(FUNDING, 9n), blockAt(1_000n), SIGNER, 10n),
+      /Remaining funding cap dropped to 9 wei .*; 10 wei .* would revert/,
+    );
+    await assert.doesNotReject(
+      silentlyAsync(() => assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n)),
+    );
+  });
+});
+
+describe("unsigned decimal environment values", function () {
+  const rejected = ["0x20", "+5", "-5", " 5", "5 ", "5_0", "05", "1e3", "", "five", "1.0"];
+
+  it("requires a canonical unsigned decimal from envBigInt and names the variable", function () {
+    const original = process.env.AMOUNT_WEI;
+
+    try {
+      for (const value of rejected) {
+        process.env.AMOUNT_WEI = value;
+        if (value === "") {
+          // An empty value is an unset value, and falls back.
+          assert.equal(envBigInt("AMOUNT_WEI", 7n), 7n);
+          continue;
+        }
+        assert.throws(
+          () => envBigInt("AMOUNT_WEI", 7n),
+          /AMOUNT_WEI ".*" is not a canonical unsigned decimal integer/,
+        );
+      }
+
+      for (const value of ["0", "5", "31000000000000000000"]) {
+        process.env.AMOUNT_WEI = value;
+        assert.equal(envBigInt("AMOUNT_WEI"), BigInt(value));
+      }
+    } finally {
+      restoreEnv("AMOUNT_WEI", original);
+    }
+  });
+
+  it("requires the same of every entry of a list, and names the entry", function () {
+    assert.deepEqual(parseBigIntList("1,2, 3 ,0", "FUNDING_TARGETS_GWEI"), [1n, 2n, 3n, 0n]);
+    assert.throws(
+      () => parseBigIntList("1,0x20", "FUNDING_TARGETS_GWEI"),
+      /FUNDING_TARGETS_GWEI entry 1 "0x20" is not a canonical unsigned decimal integer/,
+    );
+    assert.throws(
+      () => parseBigIntList("+1,2", "FUNDING_TARGETS_GWEI"),
+      /FUNDING_TARGETS_GWEI entry 0 "\+1" is not a canonical unsigned decimal integer/,
+    );
+    assert.throws(
+      () => parseBigIntList("1,,2", "FUNDING_TARGETS_GWEI"),
+      /FUNDING_TARGETS_GWEI entry 1 "" is not a canonical unsigned decimal integer/,
+    );
   });
 });
 

@@ -32,7 +32,7 @@ async function main() {
     ? parseAddressList(process.env.PARTICIPANTS)
     : [liveConfig.operator];
   const fundingTargetsGwei = process.env.FUNDING_TARGETS_GWEI
-    ? parseBigIntList(process.env.FUNDING_TARGETS_GWEI)
+    ? parseBigIntList(process.env.FUNDING_TARGETS_GWEI, "FUNDING_TARGETS_GWEI")
     : [VALIDATOR_DEPOSIT_GWEI];
   if (participants.length !== fundingTargetsGwei.length) {
     throw new Error("PARTICIPANTS and FUNDING_TARGETS_GWEI length mismatch");

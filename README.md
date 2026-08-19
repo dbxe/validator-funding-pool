@@ -452,7 +452,7 @@ RPC_URL=http://localhost:8545 npm run status
 
 The `PRIVATE_KEY=0x...` shown above is the development form. On mainnet, drop it and use `npm run <action>:ledger` with `LEDGER_ADDRESS` set, or store `RPC_URL` and `PRIVATE_KEY` in the encrypted keystore. See "Signing And Key Custody".
 
-Environment variables:
+Environment variables. Every numeric one — amounts, fees, windows, targets — must be a plain unsigned decimal integer: no `0x` prefix, no sign, no leading zeros, no separators, no surrounding whitespace. `0x20` is a parse error naming the variable, not thirty-two.
 
 - `LEDGER_ADDRESS`: Ledger account address for the `ledger` network; required by every `:ledger` command.
 - `EXPECTED_SIGNER`: optional declared signing address. Every command prints the account it is about to sign with; set this and the command additionally refuses to sign with anything else, on any network including `ledger`. It is the check that catches a forgotten `PRIVATE_KEY` in the environment outranking a keystore entry.
@@ -463,6 +463,7 @@ Environment variables:
 - `FUNDING_WINDOW_SECONDS`: funding window per attempt; defaults to `86400`.
 - `PARTICIPANTS`: comma-separated addresses for `open-funding-attempt`; must include the operator.
 - `FUNDING_TARGETS_GWEI`: comma-separated final economic weights matching `PARTICIPANTS`; must sum to `32000000000`.
+- `AMOUNT_WEI`: optional partial funding amount for `fund`; defaults to the caller's entire remaining allocation and may not exceed it.
 - `EXPECTED_PUBKEY`: optional pubkey check for `commit-predeposit`.
 - `EXPECTED_FUNDING_ATTEMPT`: optional `fund` check for the active attempt number.
 - `EXPECTED_MY_TARGET_GWEI`: optional `fund` check for the caller's current-attempt target.

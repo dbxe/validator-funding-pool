@@ -1,5 +1,4 @@
 import { network } from "hardhat";
-import type { Address } from "viem";
 
 import {
   assertActiveSigner,
@@ -7,8 +6,10 @@ import {
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorStillFresh,
   assertDeploymentIntegrity,
+  assertStillFundable,
   envBigInt,
   formatWei,
+  fundViaPlainTransfer,
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
   readDeployment,
@@ -20,7 +21,6 @@ import {
 } from "./lib/common.js";
 
 const GWEI = 1_000_000_000n;
-const STATE_FUNDING = 2;
 
 async function main() {
   const deployment = readDeployment();
@@ -119,59 +119,6 @@ async function main() {
     : await pool.write.fund({ value: amount });
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "fund");
   console.log(`Funded in block ${receipt.blockNumber}`);
-}
-
-/// Plain transfers are the clear-signing path: a Ledger renders destination and
-/// amount for a zero-calldata transfer, where `fund()` calldata is blind-signed.
-/// Defaults on whenever the connection signs with a Ledger; `FUND_VIA_TRANSFER`
-/// forces it on (`1`) or off (`0`) on any network.
-function fundViaPlainTransfer(networkConfig: { ledgerAccounts?: string[] }): boolean {
-  const override = process.env.FUND_VIA_TRANSFER;
-  if (override === "1") return true;
-  if (override === "0") return false;
-  if (override !== undefined && override !== "") {
-    throw new Error(`FUND_VIA_TRANSFER must be 0 or 1, got ${override}`);
-  }
-  return (networkConfig.ledgerAccounts ?? []).length > 0;
-}
-
-interface FundingStateReader {
-  read: {
-    state: () => Promise<number>;
-    fundingDeadline: () => Promise<bigint>;
-    fundingRemainingWeiOf: (args: readonly [Address]) => Promise<bigint>;
-  };
-}
-
-interface LatestBlockReader {
-  getBlock: () => Promise<{ number: bigint | null; timestamp: bigint }>;
-}
-
-async function assertStillFundable(
-  pool: FundingStateReader,
-  publicClient: LatestBlockReader,
-  caller: Address,
-  amount: bigint,
-) {
-  const [state, fundingDeadline, remaining, block] = await Promise.all([
-    pool.read.state(),
-    pool.read.fundingDeadline(),
-    pool.read.fundingRemainingWeiOf([caller]),
-    publicClient.getBlock(),
-  ]);
-
-  if (Number(state) !== STATE_FUNDING) {
-    throw new Error(`Pool state changed to ${state}; funding is no longer open`);
-  }
-  if (block.timestamp >= fundingDeadline) {
-    throw new Error(`Funding deadline ${fundingDeadline} has passed at block timestamp ${block.timestamp}`);
-  }
-  if (amount > remaining) {
-    throw new Error(`Remaining funding cap dropped to ${formatWei(remaining)}; ${formatWei(amount)} would revert`);
-  }
-
-  console.log(`Final re-read at block ${block.number}: state=${state} remaining=${formatWei(remaining)}`);
-  console.log(`Final re-read deadline margin: ${fundingDeadline - block.timestamp}s`);
 }
 
 async function printAndCheckFundingReview(pool: any, caller: string) {
