@@ -451,6 +451,7 @@ The `PRIVATE_KEY=0x...` shown above is the development form. On mainnet, drop it
 Environment variables:
 
 - `LEDGER_ADDRESS`: Ledger account address for the `ledger` network; required by every `:ledger` command.
+- `EXPECTED_SIGNER`: optional declared signing address. Every command prints the account it is about to sign with; set this and the command additionally refuses to sign with anything else, on any network including `ledger`. It is the check that catches a forgotten `PRIVATE_KEY` in the environment outranking a keystore entry.
 - `FUND_VIA_TRANSFER`: `1` forces `fund` to send a zero-calldata transfer, `0` forces the `fund()` calldata path. Defaults to the transfer path on the `ledger` network and to calldata elsewhere.
 - `DEPOSIT_CONTRACT`: deposit contract address.
 - `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address.

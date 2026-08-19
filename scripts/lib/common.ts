@@ -252,12 +252,33 @@ interface ObservedReplacement {
 /// (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/hook-handlers/network.js`
 /// lines 47-63), so a node that exposes unlocked accounts would otherwise have every
 /// script sign with one of them.
+///
+/// Off the Ledger path there is nothing to compare against unless the operator says what
+/// they expect, so `EXPECTED_SIGNER` is offered as a declare-and-verify check: set it and
+/// the active address must equal it on ANY network, Ledger included. Unset, the address is
+/// printed and nothing about it is asserted — an environment-supplied `PRIVATE_KEY` that
+/// outranks a keystore entry is exactly the case this catches, and it is invisible without
+/// a declaration to check against.
 export function assertActiveSigner(
   connection: SignerConnection,
   activeAddress: Address,
   label: string,
 ): Address {
   console.log(`${label} active signer: ${activeAddress} (network ${connection.networkName})`);
+
+  const expectedSigner = process.env.EXPECTED_SIGNER ?? "";
+  if (expectedSigner !== "") {
+    if (!isAddress(expectedSigner, { strict: false })) {
+      throw new Error(`EXPECTED_SIGNER ${expectedSigner} is not a 0x-prefixed 20-byte address`);
+    }
+    if (activeAddress.toLowerCase() !== expectedSigner.toLowerCase()) {
+      throw new Error(
+        `${label} would sign with ${activeAddress}, not the declared EXPECTED_SIGNER ` +
+          `${expectedSigner}. Nothing has been sent. Check which key this network resolves — an ` +
+          `environment PRIVATE_KEY outranks the keystore — and re-run`,
+      );
+    }
+  }
 
   const ledgerAccounts = connection.networkConfig.ledgerAccounts ?? [];
   if (ledgerAccounts.length === 0) return activeAddress;

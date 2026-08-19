@@ -245,19 +245,25 @@ describe("assertActiveSigner", function () {
   const ledger = { networkName: "ledger", networkConfig: { ledgerAccounts: [SIGNER] } };
 
   it("prints the active signer and the network on every connection", function () {
+    const original = process.env.EXPECTED_SIGNER;
     const log = captureLog();
+    delete process.env.EXPECTED_SIGNER;
+
     try {
       assert.equal(assertActiveSigner(nonLedger, SIGNER, "fund"), SIGNER);
       assert.deepEqual(log.lines, [`fund active signer: ${SIGNER} (network rpc)`]);
     } finally {
       log.restore();
+      restoreEnv("EXPECTED_SIGNER", original);
     }
   });
 
   it("requires LEDGER_ADDRESS on a Ledger-signing connection", function () {
     const original = process.env.LEDGER_ADDRESS;
+    const originalExpected = process.env.EXPECTED_SIGNER;
     const log = captureLog();
     delete process.env.LEDGER_ADDRESS;
+    delete process.env.EXPECTED_SIGNER;
 
     try {
       assert.throws(
@@ -267,13 +273,81 @@ describe("assertActiveSigner", function () {
     } finally {
       log.restore();
       restoreEnv("LEDGER_ADDRESS", original);
+      restoreEnv("EXPECTED_SIGNER", originalExpected);
+    }
+  });
+
+  it("asserts nothing about the address when neither variable is declared", function () {
+    const originalExpected = process.env.EXPECTED_SIGNER;
+    const originalLedger = process.env.LEDGER_ADDRESS;
+    const log = captureLog();
+    delete process.env.EXPECTED_SIGNER;
+    delete process.env.LEDGER_ADDRESS;
+
+    try {
+      assert.equal(assertActiveSigner(nonLedger, OTHER_SIGNER, "claim"), OTHER_SIGNER);
+    } finally {
+      log.restore();
+      restoreEnv("EXPECTED_SIGNER", originalExpected);
+      restoreEnv("LEDGER_ADDRESS", originalLedger);
+    }
+  });
+
+  it("enforces EXPECTED_SIGNER on a network that signs with no device", function () {
+    const original = process.env.EXPECTED_SIGNER;
+    const log = captureLog();
+    process.env.EXPECTED_SIGNER = SIGNER;
+
+    try {
+      assert.equal(assertActiveSigner(nonLedger, SIGNER, "fund"), SIGNER);
+      // Declared and active differ only in case: still the same account.
+      assert.equal(
+        assertActiveSigner(nonLedger, SIGNER.toUpperCase().replace("0X", "0x") as Address, "fund").toLowerCase(),
+        SIGNER,
+      );
+      assert.throws(
+        () => assertActiveSigner(nonLedger, OTHER_SIGNER, "fund"),
+        /fund would sign with .* not the declared EXPECTED_SIGNER/,
+      );
+      process.env.EXPECTED_SIGNER = "not-an-address";
+      assert.throws(
+        () => assertActiveSigner(nonLedger, SIGNER, "fund"),
+        /EXPECTED_SIGNER not-an-address is not a 0x-prefixed 20-byte address/,
+      );
+    } finally {
+      log.restore();
+      restoreEnv("EXPECTED_SIGNER", original);
+    }
+  });
+
+  it("enforces EXPECTED_SIGNER on the Ledger path too, alongside LEDGER_ADDRESS", function () {
+    const originalExpected = process.env.EXPECTED_SIGNER;
+    const originalLedger = process.env.LEDGER_ADDRESS;
+    const log = captureLog();
+    process.env.LEDGER_ADDRESS = SIGNER;
+    process.env.EXPECTED_SIGNER = OTHER_SIGNER;
+
+    try {
+      // The device account is the one that would sign, and it is not the declared one.
+      assert.throws(
+        () => assertActiveSigner(ledger, SIGNER, "fund"),
+        /not the declared EXPECTED_SIGNER/,
+      );
+      process.env.EXPECTED_SIGNER = SIGNER;
+      assert.equal(assertActiveSigner(ledger, SIGNER, "fund"), SIGNER);
+    } finally {
+      log.restore();
+      restoreEnv("EXPECTED_SIGNER", originalExpected);
+      restoreEnv("LEDGER_ADDRESS", originalLedger);
     }
   });
 
   it("refuses to sign with an account that is not the Ledger account", function () {
     const original = process.env.LEDGER_ADDRESS;
+    const originalExpected = process.env.EXPECTED_SIGNER;
     const log = captureLog();
     process.env.LEDGER_ADDRESS = SIGNER;
+    delete process.env.EXPECTED_SIGNER;
 
     try {
       assert.throws(
@@ -284,6 +358,7 @@ describe("assertActiveSigner", function () {
     } finally {
       log.restore();
       restoreEnv("LEDGER_ADDRESS", original);
+      restoreEnv("EXPECTED_SIGNER", originalExpected);
     }
   });
 });
