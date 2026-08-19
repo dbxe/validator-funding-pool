@@ -1,17 +1,19 @@
 import { network } from "hardhat";
+import type { Address } from "viem";
 
+import type { FundingPinnedValues } from "./lib/common.js";
 import {
   assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorStillFresh,
   assertDeploymentIntegrity,
+  assertFundingPins,
   assertFundingWasCredited,
   assertStillFundable,
   envBigInt,
   formatWei,
   fundViaPlainTransfer,
-  optionalEnvBigInt,
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
   readDeployment,
@@ -21,8 +23,6 @@ import {
   VALIDATOR_DEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
-
-const GWEI = 1_000_000_000n;
 
 async function main() {
   const deployment = readDeployment();
@@ -81,7 +81,7 @@ async function main() {
     "fund",
   );
 
-  await printAndCheckFundingReview(pool, signer);
+  const reviewed = await printAndCheckFundingReview(pool, signer);
 
   const remaining = await pool.read.fundingRemainingWeiOf([signer]);
   if (remaining <= 0n) {
@@ -114,7 +114,7 @@ async function main() {
     "fund",
     headBalanceGwei,
   );
-  await assertStillFundable(pool, publicClient, signer, amount);
+  await assertStillFundable(pool, publicClient, signer, amount, reviewed.fundingAttempt);
 
   const hash = viaTransfer
     ? await wallet.sendTransaction({ to: deployment.pool, value: amount })
@@ -128,24 +128,38 @@ async function main() {
   console.log(`Funded in block ${receipt.blockNumber}`);
 }
 
-async function printAndCheckFundingReview(pool: any, caller: string) {
+/// The pool reads the funding review makes. Structural rather than `any`: the review is
+/// what the operator decides on, and an `any` here silently tolerated a misspelled getter
+/// or a value read as the wrong type.
+interface FundingReviewReader {
+  address: Address;
+  read: {
+    state: () => Promise<number>;
+    fundingAttempt: () => Promise<bigint>;
+    fundingDeadline: () => Promise<bigint>;
+    totalActiveFundedWei: () => Promise<bigint>;
+    totalRefundableWei: () => Promise<bigint>;
+    participantCount: () => Promise<bigint>;
+    operator: () => Promise<Address>;
+    participantAt: (args: readonly [bigint]) => Promise<Address>;
+    fundingTargetWeiOf: (args: readonly [Address]) => Promise<bigint>;
+    activeFundedWeiOf: (args: readonly [Address]) => Promise<bigint>;
+    fundingRemainingWeiOf: (args: readonly [Address]) => Promise<bigint>;
+    refundableWeiOf: (args: readonly [Address]) => Promise<bigint>;
+  };
+}
+
+async function printAndCheckFundingReview(
+  pool: FundingReviewReader,
+  caller: Address,
+): Promise<FundingPinnedValues> {
   const fundingAttempt = await pool.read.fundingAttempt();
   const fundingDeadline = await pool.read.fundingDeadline();
   const state = await pool.read.state();
   const totalActiveFundedWei = await pool.read.totalActiveFundedWei();
   const totalRefundableWei = await pool.read.totalRefundableWei();
   const participantCount = Number(await pool.read.participantCount());
-  const operator = (await pool.read.operator()) as string;
-
-  const expectedAttempt = optionalEnvBigInt("EXPECTED_FUNDING_ATTEMPT");
-  if (expectedAttempt !== undefined && expectedAttempt !== fundingAttempt) {
-    throw new Error(`Funding attempt ${fundingAttempt} != EXPECTED_FUNDING_ATTEMPT ${expectedAttempt}`);
-  }
-
-  const expectedDeadlineBefore = optionalEnvBigInt("EXPECTED_DEADLINE_BEFORE");
-  if (expectedDeadlineBefore !== undefined && fundingDeadline > expectedDeadlineBefore) {
-    throw new Error(`Funding deadline ${fundingDeadline} is after EXPECTED_DEADLINE_BEFORE ${expectedDeadlineBefore}`);
-  }
+  const operator = await pool.read.operator();
 
   console.log(`Funding review for pool ${pool.address}`);
   console.log(`State: ${state}`);
@@ -154,16 +168,16 @@ async function printAndCheckFundingReview(pool: any, caller: string) {
   console.log(`Total active funded: ${formatWei(totalActiveFundedWei)}`);
   console.log(`Total refundable from previous attempts: ${formatWei(totalRefundableWei)}`);
 
-  let callerTarget = 0n;
-  let operatorTarget = 0n;
+  let callerTargetWei = 0n;
+  let operatorTargetWei = 0n;
   for (let i = 0; i < participantCount; ++i) {
-    const participant = (await pool.read.participantAt([BigInt(i)])) as string;
+    const participant = await pool.read.participantAt([BigInt(i)]);
     const target = await pool.read.fundingTargetWeiOf([participant]);
     const funded = await pool.read.activeFundedWeiOf([participant]);
     const remaining = await pool.read.fundingRemainingWeiOf([participant]);
     const refundable = await pool.read.refundableWeiOf([participant]);
-    if (participant.toLowerCase() === caller.toLowerCase()) callerTarget = target;
-    if (participant.toLowerCase() === operator.toLowerCase()) operatorTarget = target;
+    if (participant.toLowerCase() === caller.toLowerCase()) callerTargetWei = target;
+    if (participant.toLowerCase() === operator.toLowerCase()) operatorTargetWei = target;
 
     console.log(
       `Participant ${i}: ${participant} target=${formatWei(target)} activeFunded=${formatWei(
@@ -171,19 +185,11 @@ async function printAndCheckFundingReview(pool: any, caller: string) {
       )} remaining=${formatWei(remaining)} refundable=${formatWei(refundable)}`,
     );
   }
-  console.log(`Operator target: ${formatWei(operatorTarget)} (${formatPercent(operatorTarget)})`);
+  console.log(`Operator target: ${formatWei(operatorTargetWei)} (${formatPercent(operatorTargetWei)})`);
 
-  const expectedMyTargetGwei = optionalEnvBigInt("EXPECTED_MY_TARGET_GWEI");
-  if (expectedMyTargetGwei !== undefined && callerTarget !== expectedMyTargetGwei * GWEI) {
-    throw new Error(`Caller target ${formatWei(callerTarget)} != EXPECTED_MY_TARGET_GWEI ${expectedMyTargetGwei}`);
-  }
-
-  const expectedOperatorTargetGwei = optionalEnvBigInt("EXPECTED_OPERATOR_TARGET_GWEI");
-  if (expectedOperatorTargetGwei !== undefined && operatorTarget !== expectedOperatorTargetGwei * GWEI) {
-    throw new Error(
-      `Operator target ${formatWei(operatorTarget)} != EXPECTED_OPERATOR_TARGET_GWEI ${expectedOperatorTargetGwei}`,
-    );
-  }
+  const reviewed = { fundingAttempt, fundingDeadline, callerTargetWei, operatorTargetWei };
+  assertFundingPins(reviewed, "Funding review");
+  return reviewed;
 }
 
 function formatPercent(value: bigint): string {

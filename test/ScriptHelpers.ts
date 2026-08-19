@@ -710,13 +710,23 @@ describe("assertFundingWasCredited", function () {
 describe("assertStillFundable", function () {
   const FUNDING = 2;
   const DEADLINE = 2_000n;
+  const REVIEWED_ATTEMPT = 4n;
+  const GWEI = 1_000_000_000n;
 
-  function poolAt(state: number, remaining: bigint) {
+  function poolAt(
+    state: number,
+    remaining: bigint,
+    overrides: { attempt?: bigint; targets?: Record<string, bigint> } = {},
+  ) {
+    const targets = overrides.targets ?? {};
     return {
       read: {
         state: async () => state,
+        fundingAttempt: async () => overrides.attempt ?? REVIEWED_ATTEMPT,
         fundingDeadline: async () => DEADLINE,
         fundingRemainingWeiOf: async (_args: readonly [Address]) => remaining,
+        fundingTargetWeiOf: async ([who]: readonly [Address]) => targets[who.toLowerCase()] ?? 0n,
+        operator: async () => OTHER_SIGNER,
       },
     };
   }
@@ -728,9 +738,10 @@ describe("assertStillFundable", function () {
   it("passes and prints the re-read when funding is still open", async function () {
     const log = captureLog();
     try {
-      await assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n);
+      await assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT);
       assert.deepEqual(log.lines, [
         "Final re-read at block 42: state=2 remaining=10 wei (0.00000000000000001 ETH)",
+        "Final re-read attempt: 4 (unchanged since the funding review)",
         "Final re-read deadline margin: 1000s",
       ]);
     } finally {
@@ -743,31 +754,118 @@ describe("assertStillFundable", function () {
     // pool proceeds instead of reverting.
     for (const state of [0, 1, 3]) {
       await assert.rejects(
-        assertStillFundable(poolAt(state, 10n), blockAt(1_000n), SIGNER, 10n),
+        assertStillFundable(poolAt(state, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
         new RegExp(`Pool state changed to ${state}; funding is no longer open`),
       );
+    }
+  });
+
+  it("refuses an attempt that was closed and reopened since the funding review", async function () {
+    // Every other signal still looks fundable: the pool is in Funding, the deadline is
+    // ahead, and the caller's allocation covers the amount. It is a different agreement.
+    await assert.rejects(
+      assertStillFundable(
+        poolAt(FUNDING, 10n, { attempt: REVIEWED_ATTEMPT + 1n }),
+        blockAt(1_000n),
+        SIGNER,
+        10n,
+        REVIEWED_ATTEMPT,
+      ),
+      (error: Error) => {
+        assert.match(error.message, /Funding attempt changed from 4 at the funding review to 5/);
+        assert.match(error.message, /nothing was sent/);
+        assert.match(error.message, /participant set, every funding target, and your own allocation/);
+        assert.match(error.message, /Re-run "npm run fund"/);
+        return true;
+      },
+    );
+
+    // A stale review of an OLDER attempt is refused just as loudly.
+    await assert.rejects(
+      assertStillFundable(
+        poolAt(FUNDING, 10n, { attempt: REVIEWED_ATTEMPT }),
+        blockAt(1_000n),
+        SIGNER,
+        10n,
+        REVIEWED_ATTEMPT - 1n,
+      ),
+      /Funding attempt changed from 3 at the funding review to 4/,
+    );
+  });
+
+  it("re-evaluates every EXPECTED_ pin against state read now, not at the review", async function () {
+    const originals = {
+      attempt: process.env.EXPECTED_FUNDING_ATTEMPT,
+      deadline: process.env.EXPECTED_DEADLINE_BEFORE,
+      mine: process.env.EXPECTED_MY_TARGET_GWEI,
+      operator: process.env.EXPECTED_OPERATOR_TARGET_GWEI,
+    };
+    const targets = { [SIGNER.toLowerCase()]: 16n * GWEI * GWEI, [OTHER_SIGNER.toLowerCase()]: 16n * GWEI * GWEI };
+    const pool = poolAt(FUNDING, 10n, { targets });
+
+    try {
+      for (const [name, value, expected] of [
+        ["EXPECTED_FUNDING_ATTEMPT", "9", /Final re-read: funding attempt 4 != EXPECTED_FUNDING_ATTEMPT 9/],
+        ["EXPECTED_DEADLINE_BEFORE", "1999", /Final re-read: funding deadline 2000 is after EXPECTED_DEADLINE_BEFORE 1999/],
+        ["EXPECTED_MY_TARGET_GWEI", "8000000000", /Final re-read: caller target .* != EXPECTED_MY_TARGET_GWEI 8000000000/],
+        [
+          "EXPECTED_OPERATOR_TARGET_GWEI",
+          "8000000000",
+          /Final re-read: operator target .* != EXPECTED_OPERATOR_TARGET_GWEI 8000000000/,
+        ],
+      ] as const) {
+        delete process.env.EXPECTED_FUNDING_ATTEMPT;
+        delete process.env.EXPECTED_DEADLINE_BEFORE;
+        delete process.env.EXPECTED_MY_TARGET_GWEI;
+        delete process.env.EXPECTED_OPERATOR_TARGET_GWEI;
+        process.env[name] = value;
+
+        await assert.rejects(
+          assertStillFundable(pool, blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
+          expected,
+        );
+      }
+
+      // The pins that hold are silent, and the caller's and operator's targets are read
+      // separately: the operator's comes from `operator()`, not from the caller.
+      process.env.EXPECTED_FUNDING_ATTEMPT = "4";
+      process.env.EXPECTED_DEADLINE_BEFORE = "2000";
+      process.env.EXPECTED_MY_TARGET_GWEI = "16000000000";
+      process.env.EXPECTED_OPERATOR_TARGET_GWEI = "16000000000";
+      await assert.doesNotReject(
+        silentlyAsync(() => assertStillFundable(pool, blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT)),
+      );
+    } finally {
+      restoreEnv("EXPECTED_FUNDING_ATTEMPT", originals.attempt);
+      restoreEnv("EXPECTED_DEADLINE_BEFORE", originals.deadline);
+      restoreEnv("EXPECTED_MY_TARGET_GWEI", originals.mine);
+      restoreEnv("EXPECTED_OPERATOR_TARGET_GWEI", originals.operator);
     }
   });
 
   it("refuses at and after the funding deadline", async function () {
     for (const timestamp of [DEADLINE, DEADLINE + 1n]) {
       await assert.rejects(
-        assertStillFundable(poolAt(FUNDING, 10n), blockAt(timestamp), SIGNER, 10n),
+        assertStillFundable(poolAt(FUNDING, 10n), blockAt(timestamp), SIGNER, 10n, REVIEWED_ATTEMPT),
         new RegExp(`Funding deadline ${DEADLINE} has passed at block timestamp ${timestamp}`),
       );
     }
     await assert.doesNotReject(
-      silentlyAsync(() => assertStillFundable(poolAt(FUNDING, 10n), blockAt(DEADLINE - 1n), SIGNER, 10n)),
+      silentlyAsync(() =>
+        assertStillFundable(poolAt(FUNDING, 10n), blockAt(DEADLINE - 1n), SIGNER, 10n, REVIEWED_ATTEMPT),
+      ),
     );
   });
 
   it("refuses an amount above the remaining allocation, and allows exactly it", async function () {
     await assert.rejects(
-      assertStillFundable(poolAt(FUNDING, 9n), blockAt(1_000n), SIGNER, 10n),
+      assertStillFundable(poolAt(FUNDING, 9n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
       /Remaining funding cap dropped to 9 wei .*; 10 wei .* would revert/,
     );
     await assert.doesNotReject(
-      silentlyAsync(() => assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n)),
+      silentlyAsync(() =>
+        assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
+      ),
     );
   });
 });

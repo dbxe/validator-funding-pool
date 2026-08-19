@@ -2096,11 +2096,70 @@ export function assertFundingWasCredited(
   );
 }
 
+const GWEI_WEI = 1_000_000_000n;
+
+/// The four values the operator may pin with an `EXPECTED_*` variable, read together so
+/// they can be asserted at more than one moment.
+export interface FundingPinnedValues {
+  fundingAttempt: bigint;
+  fundingDeadline: bigint;
+  callerTargetWei: bigint;
+  operatorTargetWei: bigint;
+}
+
+/// Evaluates every declare-and-verify pin the operator set, against values read now.
+///
+/// `where` names the moment, because these run twice: once in the funding review the
+/// operator reads, and again in the final on-chain re-read immediately before signing. A
+/// pin that only ran in the review asserts what was true minutes ago, which on the Ledger
+/// path is minutes before the device is even touched.
+export function assertFundingPins(pinned: FundingPinnedValues, where: string) {
+  const expectedAttempt = optionalEnvBigInt("EXPECTED_FUNDING_ATTEMPT");
+  if (expectedAttempt !== undefined && expectedAttempt !== pinned.fundingAttempt) {
+    throw new Error(
+      `${where}: funding attempt ${pinned.fundingAttempt} != EXPECTED_FUNDING_ATTEMPT ${expectedAttempt}`,
+    );
+  }
+
+  const expectedDeadlineBefore = optionalEnvBigInt("EXPECTED_DEADLINE_BEFORE");
+  if (expectedDeadlineBefore !== undefined && pinned.fundingDeadline > expectedDeadlineBefore) {
+    throw new Error(
+      `${where}: funding deadline ${pinned.fundingDeadline} is after EXPECTED_DEADLINE_BEFORE ` +
+        expectedDeadlineBefore,
+    );
+  }
+
+  const expectedCallerTargetGwei = optionalEnvBigInt("EXPECTED_MY_TARGET_GWEI");
+  if (
+    expectedCallerTargetGwei !== undefined &&
+    pinned.callerTargetWei !== expectedCallerTargetGwei * GWEI_WEI
+  ) {
+    throw new Error(
+      `${where}: caller target ${formatWei(pinned.callerTargetWei)} != EXPECTED_MY_TARGET_GWEI ` +
+        expectedCallerTargetGwei,
+    );
+  }
+
+  const expectedOperatorTargetGwei = optionalEnvBigInt("EXPECTED_OPERATOR_TARGET_GWEI");
+  if (
+    expectedOperatorTargetGwei !== undefined &&
+    pinned.operatorTargetWei !== expectedOperatorTargetGwei * GWEI_WEI
+  ) {
+    throw new Error(
+      `${where}: operator target ${formatWei(pinned.operatorTargetWei)} != ` +
+        `EXPECTED_OPERATOR_TARGET_GWEI ${expectedOperatorTargetGwei}`,
+    );
+  }
+}
+
 interface FundingStateReader {
   read: {
     state: () => Promise<number>;
+    fundingAttempt: () => Promise<bigint>;
     fundingDeadline: () => Promise<bigint>;
     fundingRemainingWeiOf: (args: readonly [Address]) => Promise<bigint>;
+    fundingTargetWeiOf: (args: readonly [Address]) => Promise<bigint>;
+    operator: () => Promise<Address>;
   };
 }
 
@@ -2113,21 +2172,45 @@ interface LatestBlockReader {
 /// the amount. It narrows the race between deciding to fund and being mined; it cannot
 /// close it, and on the plain-transfer path the contract's own revert is not there to
 /// catch what slips through.
+///
+/// `reviewedAttempt` is the funding attempt number the review printed, and it must still be
+/// the live one. Everything the operator read in that review — the participant list, every
+/// target, their own allocation — belongs to that attempt and to no other. An attempt that
+/// expires, is closed, and is reopened with a different participant set between the review
+/// and the signature leaves state, deadline, and remaining allocation all looking perfectly
+/// fundable while describing a completely different agreement. On the Ledger path that gap
+/// is however long the operator takes at the device. The counter is the one value that
+/// cannot be reused, so it is what the reviewed state is pinned to; every `EXPECTED_*` pin
+/// the operator set is re-evaluated here as well, against values read now.
 export async function assertStillFundable(
   pool: FundingStateReader,
   publicClient: LatestBlockReader,
   caller: Address,
   amount: bigint,
+  reviewedAttempt: bigint,
 ) {
-  const [state, fundingDeadline, remaining, block] = await Promise.all([
-    pool.read.state(),
-    pool.read.fundingDeadline(),
-    pool.read.fundingRemainingWeiOf([caller]),
-    publicClient.getBlock(),
-  ]);
+  const [state, fundingAttempt, fundingDeadline, remaining, callerTargetWei, operator, block] =
+    await Promise.all([
+      pool.read.state(),
+      pool.read.fundingAttempt(),
+      pool.read.fundingDeadline(),
+      pool.read.fundingRemainingWeiOf([caller]),
+      pool.read.fundingTargetWeiOf([caller]),
+      pool.read.operator(),
+      publicClient.getBlock(),
+    ]);
+  const operatorTargetWei = await pool.read.fundingTargetWeiOf([operator]);
 
   if (Number(state) !== STATE_FUNDING) {
     throw new Error(`Pool state changed to ${state}; funding is no longer open`);
+  }
+  if (fundingAttempt !== reviewedAttempt) {
+    throw new Error(
+      `Funding attempt changed from ${reviewedAttempt} at the funding review to ${fundingAttempt} ` +
+        `before signing; nothing was sent. The participant set, every funding target, and your own ` +
+        `allocation all belong to an attempt, so the review you just read describes an agreement ` +
+        `that is no longer the live one. Re-run "npm run fund" and read the review it prints`,
+    );
   }
   if (block.timestamp >= fundingDeadline) {
     throw new Error(`Funding deadline ${fundingDeadline} has passed at block timestamp ${block.timestamp}`);
@@ -2135,7 +2218,12 @@ export async function assertStillFundable(
   if (amount > remaining) {
     throw new Error(`Remaining funding cap dropped to ${formatWei(remaining)}; ${formatWei(amount)} would revert`);
   }
+  assertFundingPins(
+    { fundingAttempt, fundingDeadline, callerTargetWei, operatorTargetWei },
+    "Final re-read",
+  );
 
   console.log(`Final re-read at block ${block.number}: state=${state} remaining=${formatWei(remaining)}`);
+  console.log(`Final re-read attempt: ${fundingAttempt} (unchanged since the funding review)`);
   console.log(`Final re-read deadline margin: ${fundingDeadline - block.timestamp}s`);
 }
