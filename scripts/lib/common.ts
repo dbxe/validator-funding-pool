@@ -24,6 +24,7 @@ export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
+const ALLOWED_CONFIRMATION_STATE_IDS = ["finalized", "justified"];
 const HEAD_STATE_ID = "head";
 const FAR_FUTURE_EPOCH = (2n ** 64n - 1n).toString();
 
@@ -581,7 +582,7 @@ async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
   const preflight = await readBeaconValidatorPreflight(
     beaconNodeUrl,
     pubkey,
-    process.env.BEACON_CONFIRMATION_STATE_ID ?? DEFAULT_CONFIRMATION_STATE_ID,
+    confirmationStateId(label),
     label,
   );
   assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
@@ -887,6 +888,19 @@ function requireBeaconNodeUrl(label: string): string {
     throw new Error(`${label} requires BEACON_NODE_URL for mandatory beacon confirmation`);
   }
   return beaconNodeUrl;
+}
+
+// Credential confirmation reads a settled state and is then re-confirmed at head. Allowing "head"
+// here would collapse those two reads into one, so the state id is restricted to settled states.
+function confirmationStateId(label: string): string {
+  const stateId = process.env.BEACON_CONFIRMATION_STATE_ID ?? DEFAULT_CONFIRMATION_STATE_ID;
+  if (!ALLOWED_CONFIRMATION_STATE_IDS.includes(stateId)) {
+    throw new Error(
+      `${label} BEACON_CONFIRMATION_STATE_ID ${stateId} is not allowed; use one of ` +
+        ALLOWED_CONFIRMATION_STATE_IDS.join(", "),
+    );
+  }
+  return stateId;
 }
 
 function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight) {

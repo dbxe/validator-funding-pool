@@ -645,6 +645,58 @@ describe("beacon preflight checks", function () {
     }
   });
 
+  it("restricts BEACON_CONFIRMATION_STATE_ID to settled states", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    const originalStateId = process.env.BEACON_CONFIRMATION_STATE_ID;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      for (const stateId of ["head", "justified-ish", "0x1234", ""]) {
+        process.env.BEACON_CONFIRMATION_STATE_ID = stateId;
+        installBeaconMock({});
+        try {
+          await assert.rejects(
+            assertBeaconValidatorReadyForFunding(
+              PUBKEY,
+              WITHDRAWAL_CREDENTIALS,
+              "fund-test",
+              refusingReader(),
+            ),
+            new RegExp(
+              `fund-test BEACON_CONFIRMATION_STATE_ID ${stateId} is not allowed; ` +
+                `use one of finalized, justified`,
+            ),
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+
+      for (const stateId of ["finalized", "justified"]) {
+        process.env.BEACON_CONFIRMATION_STATE_ID = stateId;
+        const calls = installBeaconMock({});
+        const log = captureLog();
+        try {
+          await assertBeaconValidatorReadyForFunding(
+            PUBKEY,
+            WITHDRAWAL_CREDENTIALS,
+            "fund-test",
+            refusingReader(),
+          );
+        } finally {
+          log.restore();
+          restoreFetch();
+        }
+        assert(calls.includes(`/eth/v1/beacon/states/${stateId}/validators/${PUBKEY}`));
+        assert(calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+      restoreEnv("BEACON_CONFIRMATION_STATE_ID", originalStateId);
+    }
+  });
+
   it("rejects exit preflight before SHARD_COMMITTEE_PERIOD has elapsed", async function () {
     installBeaconMock({
       headSlot: "8191",
