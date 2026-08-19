@@ -1016,12 +1016,7 @@ export async function assertBeaconMatchesExecutionChain(
     "/eth/v1/config/deposit_contract",
     label,
   );
-  let beaconChainId: bigint;
-  try {
-    beaconChainId = BigInt(config.data.chain_id);
-  } catch {
-    throw new Error(`${label} beacon deposit chain_id ${config.data.chain_id} is invalid`);
-  }
+  const beaconChainId = parseBeaconUint64(config.data.chain_id, "deposit chain_id", label);
   if (beaconChainId !== BigInt(deployment.chainId)) {
     throw new Error(
       `${label} beacon deposit chain_id ${config.data.chain_id} does not match deployment chainId ` +
@@ -1043,24 +1038,54 @@ export async function assertBeaconMatchesExecutionChain(
   return true;
 }
 
+/// Establishes that the head state contains NO validator for `pubkey`.
+///
+/// Absence has to be proven positively. The single-validator endpoint answers 404 for a
+/// pubkey it does not know, but it also answers 404 for a misspelled path, a URL whose
+/// base path was discarded, a state id the node has pruned, a proxy that does not route
+/// this method, and an endpoint that is not a beacon node at all. Reading any of those as
+/// "the pubkey is free" is how the operator ends up predepositing to a validator that
+/// already exists with somebody else's withdrawal credentials.
+///
+/// So this queries the LIST endpoint, which answers 200 with an entry per validator it
+/// knows, and requires an empty `data` array. A non-empty array is the existing fatal. A
+/// non-200, a body that is not a list, or anything else is fatal as INCONCLUSIVE — the
+/// question was not answered, which is not the same as answered "no".
 export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconNodeHealthy(beaconNodeUrl, label);
-  const url = new URL(`/eth/v1/beacon/states/head/validators/${pubkey}`, beaconNodeUrl);
+
+  const url = beaconApiUrl(beaconNodeUrl, `/eth/v1/beacon/states/${HEAD_STATE_ID}/validators`);
+  url.searchParams.set("id", pubkey);
   const response = await fetch(url);
-  if (response.status === 404) {
-    console.log(`${label} beacon preflight passed: validator pubkey is not in head state`);
-    return;
-  }
   if (!response.ok) {
-    throw new Error(`${label} beacon validator lookup failed: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `${label} beacon validator lookup returned ${response.status} ${response.statusText}; the ` +
+        `head state's validator list was not read, so the pubkey's absence is INCONCLUSIVE. A ` +
+        `404 in particular is not proof of absence — it is also what a wrong path, a wrong base ` +
+        `URL, or an endpoint that is not a beacon node returns. Fix BEACON_NODE_URL and re-run`,
+    );
   }
 
-  const body = (await response.json()) as BeaconValidatorResponse;
-  throw new Error(
-    `${label} beacon preflight failed: validator ${pubkey} already exists with status ${
-      body.data.status
-    } and withdrawal_credentials ${body.data.validator.withdrawal_credentials}`,
+  const body = (await response.json()) as { data?: unknown };
+  if (!Array.isArray(body.data)) {
+    throw new Error(
+      `${label} beacon validator list response has no data array (${describeBeaconValue(body.data)}); ` +
+        `the pubkey's absence is inconclusive`,
+    );
+  }
+  if (body.data.length !== 0) {
+    const first = asBeaconObject(body.data[0], "validator list entry", label);
+    const validator = asBeaconObject(first.validator, "validator list entry validator", label);
+    throw new Error(
+      `${label} beacon preflight failed: validator ${pubkey} already exists in head state with ` +
+        `status ${describeBeaconValue(first.status)} and withdrawal_credentials ` +
+        describeBeaconValue(validator.withdrawal_credentials),
+    );
+  }
+
+  console.log(
+    `${label} beacon preflight passed: the head state validator list is empty for this pubkey`,
   );
 }
 
@@ -1100,12 +1125,14 @@ async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
 // confirmation without a terminal. It is not an authority boundary and grants a caller nothing:
 // any importer of this module could skip the preflight altogether. The supported commands never
 // pass it, so a real run always reads a real TTY.
+/// Both return the head-state balance in Gwei the preflight settled on, which is what
+/// `assertBeaconValidatorStillFresh` requires to still hold immediately before broadcast.
 export async function assertBeaconValidatorReadyForTopUp(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
   testOnlyConfirmationReader?: ExcessBalanceConfirmationReader,
-) {
+): Promise<bigint> {
   return assertBeaconValidatorIsFreshPredeposit(
     pubkey,
     expectedWithdrawalCredentials,
@@ -1119,7 +1146,7 @@ export async function assertBeaconValidatorReadyForFunding(
   expectedWithdrawalCredentials: Hex,
   label: string,
   testOnlyConfirmationReader?: ExcessBalanceConfirmationReader,
-) {
+): Promise<bigint> {
   return assertBeaconValidatorIsFreshPredeposit(
     pubkey,
     expectedWithdrawalCredentials,
@@ -1128,12 +1155,52 @@ export async function assertBeaconValidatorReadyForFunding(
   );
 }
 
+/// Re-runs the head-state preflight immediately before a transaction is broadcast, and
+/// requires the balance to be exactly what the full preflight settled on.
+///
+/// Between that preflight and the broadcast sit the funding review, the final on-chain
+/// re-read, and — on the Ledger path — however long the operator takes to approve on the
+/// device. That is minutes during which anyone may deposit to the committed pubkey, or the
+/// validator may be slashed or activated. This shrinks the window to seconds. It cannot
+/// close it: see the residual-risk entry in `SECURITY.md` §5 for the remainder, which runs
+/// from this check to inclusion and cannot be checked from here at all.
+///
+/// A changed balance is fatal rather than a fresh prompt. An excess balance is resolvable,
+/// but only by a person reading the current number, which is what re-running the command
+/// gives them.
+export async function assertBeaconValidatorStillFresh(
+  pubkey: Hex,
+  expectedWithdrawalCredentials: Hex,
+  label: string,
+  expectedBalanceGwei: bigint,
+): Promise<void> {
+  const beaconNodeUrl = requireBeaconNodeUrl(label);
+  const balanceGwei = await assertFreshPredepositHeadState(
+    beaconNodeUrl,
+    pubkey,
+    expectedWithdrawalCredentials,
+    `${label} pre-broadcast`,
+    { compact: true },
+  );
+  if (balanceGwei !== expectedBalanceGwei) {
+    throw new Error(
+      `${label} head beacon validator balance changed from ${expectedBalanceGwei} Gwei at the ` +
+        `preflight to ${balanceGwei} Gwei immediately before broadcast; nothing was sent. Re-run ` +
+        `this command so the preflight decides on the state that exists now`,
+    );
+  }
+  console.log(
+    `${label} pre-broadcast head recheck passed: balance still ${balanceGwei} Gwei, credentials, ` +
+      `slashing flag, and all four epochs unchanged`,
+  );
+}
+
 async function assertBeaconValidatorIsFreshPredeposit(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
   testOnlyConfirmationReader: ExcessBalanceConfirmationReader = stdinConfirmationReader(),
-) {
+): Promise<bigint> {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
     beaconNodeUrl,
@@ -1150,7 +1217,7 @@ async function assertBeaconValidatorIsFreshPredeposit(
   );
   if (balanceGwei <= PREDEPOSIT_GWEI) {
     console.log(`${label} head beacon fresh-predeposit preflight passed`);
-    return;
+    return balanceGwei;
   }
 
   await confirmExcessBalance(balanceGwei, label, testOnlyConfirmationReader);
@@ -1178,20 +1245,23 @@ async function assertBeaconValidatorIsFreshPredeposit(
     `${label} head beacon fresh-predeposit preflight passed WITH an interactively confirmed ` +
       `excess balance of ${balanceGwei} Gwei`,
   );
+  return balanceGwei;
 }
 
 /// Fetches head state fresh and runs the whole fresh-predeposit preflight over it, returning
-/// the head-state balance in Gwei.
+/// the head-state balance in Gwei. `compact` skips the field-by-field printout; it asserts
+/// exactly the same things.
 async function assertFreshPredepositHeadState(
   beaconNodeUrl: string,
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
+  options: { compact?: boolean } = {},
 ): Promise<bigint> {
   const preflight = await readBeaconValidatorPreflight(beaconNodeUrl, pubkey, HEAD_STATE_ID, label);
   assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
   const balanceGwei = assertFreshPredepositMutableState(preflight, label);
-  printBeaconPreflight(label, preflight);
+  if (options.compact !== true) printBeaconPreflight(label, preflight);
   return balanceGwei;
 }
 
@@ -1314,10 +1384,15 @@ export async function assertBeaconValidatorReadyForExit(
     throw new Error(`${label} beacon validator status is ${preflight.validator.status}, expected active_ongoing`);
   }
 
-  const slotsPerEpoch = beaconSpecUint(spec, "SLOTS_PER_EPOCH");
-  const shardCommitteePeriod = beaconSpecUint(spec, "SHARD_COMMITTEE_PERIOD");
-  const currentEpoch = BigInt(preflight.syncing.head_slot) / slotsPerEpoch;
-  const exitEligibleEpoch = BigInt(validator.activation_epoch) + shardCommitteePeriod;
+  const slotsPerEpoch = beaconSpecUint(spec, "SLOTS_PER_EPOCH", label);
+  if (slotsPerEpoch === 0n) {
+    throw new Error(`${label} beacon spec SLOTS_PER_EPOCH is 0; no epoch can be derived from it`);
+  }
+  const shardCommitteePeriod = beaconSpecUint(spec, "SHARD_COMMITTEE_PERIOD", label);
+  const headSlot = parseBeaconUint64(preflight.syncing.head_slot, "node head_slot", label);
+  const activationEpoch = parseBeaconUint64(validator.activation_epoch, "validator activation_epoch", label);
+  const currentEpoch = headSlot / slotsPerEpoch;
+  const exitEligibleEpoch = activationEpoch + shardCommitteePeriod;
   if (currentEpoch < exitEligibleEpoch) {
     throw new Error(
       `${label} beacon validator is not exit-eligible until epoch ${exitEligibleEpoch} ` +
@@ -1344,12 +1419,16 @@ function assertBeaconValidatorWithdrawalCredentials(
   }
 }
 
-function beaconSpecUint(spec: BeaconSpecResponse, key: string): bigint {
-  const value = spec.data[key];
+/// Spec constants are decided on exactly like validator fields are, so they are parsed
+/// exactly like validator fields: canonical unsigned decimal, within uint64. A bare
+/// `BigInt` here accepted `"0x20"` and `" 32 "`, and `""` — which is `0n` — would have made
+/// `SLOTS_PER_EPOCH` a division by zero.
+function beaconSpecUint(spec: BeaconSpecResponse, key: string, label: string): bigint {
+  const value = spec.data?.[key];
   if (value === undefined) {
-    throw new Error(`Beacon spec is missing ${key}`);
+    throw new Error(`${label} beacon spec is missing ${key}`);
   }
-  return BigInt(value);
+  return parseBeaconUint64(value, `spec ${key}`, label);
 }
 
 async function readBeaconValidatorPreflight(
@@ -1378,7 +1457,7 @@ async function readBeaconValidatorPreflight(
     genesis: genesis.data,
     syncing,
     finality: finality.data,
-    validator: assertBeaconValidatorResponseShape(validator.data, label),
+    validator: assertBeaconValidatorResponseShape(validator.data, label, pubkey),
   };
 }
 
@@ -1464,9 +1543,17 @@ function requireBeaconHex(value: unknown, bytes: number, field: string, label: s
   return hex;
 }
 
+/// `requestedPubkey` is the pubkey the URL asked about. The response must echo it.
+///
+/// Nothing else in a preflight looks at which validator the body describes: credentials,
+/// balance, slashing, and all four epochs are read from whatever came back. A proxy or a
+/// misrouted endpoint that answers every validator query with one particular validator's
+/// record therefore passes every one of those checks while describing a different
+/// validator entirely.
 function assertBeaconValidatorResponseShape(
   data: unknown,
   label: string,
+  requestedPubkey: Hex,
 ): BeaconValidatorResponse["data"] {
   const response = asBeaconObject(data, "validator response", label);
   const validator = asBeaconObject(response.validator, "validator response validator", label);
@@ -1474,6 +1561,14 @@ function assertBeaconValidatorResponseShape(
   requireBeaconString(response.index, "validator index", label);
   requireBeaconString(response.status, "validator status", label);
   parseBeaconUint64(response.balance, "validator balance", label);
+  const pubkey = requireBeaconHex(validator.pubkey, 48, "validator pubkey", label);
+  if (pubkey.toLowerCase() !== requestedPubkey.toLowerCase()) {
+    throw new Error(
+      `${label} beacon validator response describes pubkey ${pubkey}, but ${requestedPubkey} was ` +
+        `requested. Every other assertion in this preflight reads whatever validator came back, ` +
+        `so a response about a different validator proves nothing about the one being funded`,
+    );
+  }
   requireBeaconHex(validator.withdrawal_credentials, 32, "validator withdrawal_credentials", label);
   requireBeaconBoolean(validator.slashed, "validator slashed", label);
   parseBeaconUint64(validator.effective_balance, "validator effective_balance", label);
@@ -1496,8 +1591,20 @@ function assertBeaconSyncingResponseShape(
   return data as BeaconSyncingResponse["data"];
 }
 
+/// Builds a beacon API URL that PRESERVES any path component of `BEACON_NODE_URL`.
+///
+/// `new URL("/eth/v1/...", base)` is root-anchored and silently discards the base's path,
+/// so a hosted endpoint of the form `https://host/eth-beacon-node/<key>` was rewritten to
+/// `https://host/eth/v1/...` — a different endpoint, on which every preflight would have
+/// been deciding from whatever that URL happened to answer. Appending relative to a base
+/// with a trailing slash keeps the prefix.
+export function beaconApiUrl(beaconNodeUrl: string, pathname: string): URL {
+  const base = beaconNodeUrl.endsWith("/") ? beaconNodeUrl : `${beaconNodeUrl}/`;
+  return new URL(pathname.replace(/^\/+/, ""), base);
+}
+
 async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label: string): Promise<T> {
-  const url = new URL(pathname, beaconNodeUrl);
+  const url = beaconApiUrl(beaconNodeUrl, pathname);
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`${label} beacon request ${pathname} failed: ${response.status} ${response.statusText}`);

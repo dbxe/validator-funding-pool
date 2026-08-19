@@ -5,6 +5,7 @@ import {
   assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForFunding,
+  assertBeaconValidatorStillFresh,
   assertDeploymentIntegrity,
   envBigInt,
   formatWei,
@@ -72,7 +73,11 @@ async function main() {
   if (committedTopUpSignature.toLowerCase() !== topUp.signature.toLowerCase()) {
     throw new Error("Committed top-up signature does not match deposit-data file");
   }
-  await assertBeaconValidatorReadyForFunding(predeposit.pubkey, expectedCredentials, "fund");
+  const headBalanceGwei = await assertBeaconValidatorReadyForFunding(
+    predeposit.pubkey,
+    expectedCredentials,
+    "fund",
+  );
 
   await printAndCheckFundingReview(pool, signer);
 
@@ -92,9 +97,21 @@ async function main() {
       `via ${viaTransfer ? "plain transfer (zero calldata)" : "fund() calldata"}`,
   );
 
-  // Final race-narrowing re-read, immediately before signing. It cannot close the
+  // Final race-narrowing re-reads, immediately before signing. They cannot close the
   // race, only shorten it: see "Plain-Transfer Funding" in the README for the one
   // window where a plain transfer behaves differently from a reverting fund().
+  //
+  // The beacon leg matters just as much as the on-chain leg here. The full preflight ran
+  // before the funding review printed and before the operator started reading it; on the
+  // Ledger path the device approval is still ahead. Re-reading head state now shrinks the
+  // window in which a third-party deposit, a slashing, or an activation can go unnoticed
+  // from minutes to seconds.
+  await assertBeaconValidatorStillFresh(
+    predeposit.pubkey,
+    expectedCredentials,
+    "fund",
+    headBalanceGwei,
+  );
   await assertStillFundable(pool, publicClient, signer, amount);
 
   const hash = viaTransfer

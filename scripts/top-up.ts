@@ -4,6 +4,7 @@ import {
   assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForTopUp,
+  assertBeaconValidatorStillFresh,
   assertDeploymentIntegrity,
   readDeployment,
   waitForSenderVerifiedReceipt,
@@ -28,11 +29,19 @@ async function main() {
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
   const pubkey = await pool.read.committedPubkey();
-  await assertBeaconValidatorReadyForTopUp(pubkey, expectedCredentials, "top-up");
+  const headBalanceGwei = await assertBeaconValidatorReadyForTopUp(
+    pubkey,
+    expectedCredentials,
+    "top-up",
+  );
 
   console.log(`Submitting 31 ETH top-up through ${deployment.pool}`);
   console.log(`Validator pubkey: ${pubkey}`);
   console.log(`Top-up deposit data root: ${await pool.read.topUpDepositDataRoot()}`);
+
+  // Last read before the device is asked to sign. Everything after this line is outside
+  // what any check here can see.
+  await assertBeaconValidatorStillFresh(pubkey, expectedCredentials, "top-up", headBalanceGwei);
   const hash = await pool.write.topUpValidator();
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "top-up");
   console.log(`Topped up in block ${receipt.blockNumber}`);

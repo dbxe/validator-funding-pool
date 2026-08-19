@@ -14,6 +14,7 @@ import {
   assertBeaconValidatorReadyForExit,
   assertBeaconValidatorReadyForFunding,
   assertBeaconValidatorReadyForTopUp,
+  assertBeaconValidatorStillFresh,
   assertDeploymentMatchesPool,
   computeDepositDataRoot,
   computeDepositSigningRoot,
@@ -28,6 +29,8 @@ import {
 
 const PUBKEY =
   "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111" as Hex;
+const OTHER_PUBKEY =
+  "0x999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999" as Hex;
 const WITHDRAWAL_CREDENTIALS = "0x0100000000000000000000002222222222222222222222222222222222222222" as Hex;
 const OTHER_WITHDRAWAL_CREDENTIALS =
   "0x0100000000000000000000003333333333333333333333333333333333333333" as Hex;
@@ -969,6 +972,281 @@ describe("beacon preflight checks", function () {
     }
   });
 
+  it("rejects a validator body that describes a different pubkey than the one requested", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      // A proxy that answers every validator query with one particular validator's record
+      // satisfies every other assertion in the preflight: the credentials, the balance, the
+      // slashing flag, and all four epochs are read from whatever came back.
+      for (const overrides of [
+        { finalizedValidator: beaconValidator("pending_initialized", { pubkey: OTHER_PUBKEY }) },
+        { headValidator: beaconValidator("pending_initialized", { pubkey: OTHER_PUBKEY }) },
+      ]) {
+        for (const leg of freshPredepositLegs) {
+          installBeaconMock(overrides);
+          try {
+            await assert.rejects(
+              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
+              new RegExp(
+                `${leg.label}.* beacon validator response describes pubkey ${OTHER_PUBKEY}, but ` +
+                  `${PUBKEY} was requested`,
+              ),
+            );
+          } finally {
+            restoreFetch();
+          }
+        }
+      }
+
+      // A pubkey that is not 48 bytes is caught at the same boundary.
+      installBeaconMock({ headValidator: beaconValidator("pending_initialized", { pubkey: "0x1234" }) });
+      try {
+        await assert.rejects(
+          assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund", refusingReader()),
+          /fund head beacon validator pubkey 0x1234 is not a 48-byte 0x-prefixed hex string/,
+        );
+      } finally {
+        restoreFetch();
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("requires a canonical decimal beacon deposit chain_id", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      for (const chainId of ["0x7a69", " 31337 ", "+31337", "", "31337.0"]) {
+        installBeaconMock({ beaconChainId: chainId });
+        try {
+          await assert.rejects(
+            assertBeaconMatchesExecutionChain(
+              { chainId: 31337 },
+              { depositContract: "0x1111111111111111111111111111111111111111" },
+              "fund",
+            ),
+            /fund beacon deposit chain_id .* is not a canonical unsigned decimal string/,
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("fails closed on malformed exit-preflight spec constants", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    const activeValidator = beaconValidator("active_ongoing", { activation_epoch: "0" });
+
+    try {
+      const cases = [
+        { specOverrides: { SLOTS_PER_EPOCH: "0x20" }, expected: /spec SLOTS_PER_EPOCH "0x20" is not a canonical unsigned decimal string/ },
+        { specOverrides: { SLOTS_PER_EPOCH: undefined }, expected: /beacon spec is missing SLOTS_PER_EPOCH/ },
+        // A zero would make the current epoch a division by zero, which a bare BigInt
+        // parse admits and nothing downstream would catch.
+        { specOverrides: { SLOTS_PER_EPOCH: "0" }, expected: /SLOTS_PER_EPOCH is 0; no epoch can be derived from it/ },
+        { specOverrides: { SHARD_COMMITTEE_PERIOD: " 256" }, expected: /spec SHARD_COMMITTEE_PERIOD .* is not a canonical unsigned decimal string/ },
+        { specOverrides: { SHARD_COMMITTEE_PERIOD: undefined }, expected: /beacon spec is missing SHARD_COMMITTEE_PERIOD/ },
+      ];
+
+      for (const { specOverrides, expected } of cases) {
+        installBeaconMock({ headValidator: activeValidator, specOverrides });
+        try {
+          await assert.rejects(
+            assertBeaconValidatorReadyForExit(PUBKEY, WITHDRAWAL_CREDENTIALS, "exit-test"),
+            expected,
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("proves the committed pubkey is absent instead of reading a 404 as absence", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      // An empty list from a node that answered the question is the only thing that counts.
+      const calls = installBeaconMock({ validatorList: [] });
+      const log = captureLog();
+      try {
+        await assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit");
+        assert.ok(
+          log.lines.some((line) =>
+            line.includes("the head state validator list is empty for this pubkey"),
+          ),
+        );
+      } finally {
+        log.restore();
+        restoreFetch();
+      }
+      assert.ok(calls.includes(`/eth/v1/beacon/states/head/validators?id=${PUBKEY}`));
+
+      // A 404 used to be read as proof of absence. It is also what a wrong path, a wrong
+      // base URL, or an endpoint that is not a beacon node returns.
+      for (const status of [404, 400, 500, 503]) {
+        installBeaconMock({ validatorListStatus: status });
+        try {
+          await assert.rejects(
+            assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit"),
+            new RegExp(
+              `commit-predeposit beacon validator lookup returned ${status} .*absence is INCONCLUSIVE`,
+            ),
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+
+      // A body that is not a list answers nothing either.
+      for (const body of [{}, { data: null }, { data: "none" }, { data: 0 }] as const) {
+        installBeaconMock({ validatorListBody: body });
+        try {
+          await assert.rejects(
+            assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit"),
+            /has no data array .* absence is inconclusive/s,
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
+
+      // A non-empty list stays the fatal it always was, and still names what it found.
+      installBeaconMock({
+        validatorList: [beaconValidator("active_ongoing").data],
+      });
+      try {
+        await assert.rejects(
+          assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit"),
+          new RegExp(
+            `validator ${PUBKEY} already exists in head state with status "active_ongoing" and ` +
+              `withdrawal_credentials "${WITHDRAWAL_CREDENTIALS}"`,
+          ),
+        );
+      } finally {
+        restoreFetch();
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("preserves a path component in BEACON_NODE_URL on every request", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+
+    for (const base of [
+      "http://beacon.example/eth-beacon-node/deadbeefkey",
+      "http://beacon.example/eth-beacon-node/deadbeefkey/",
+    ]) {
+      // Every route is served under the prefix and nowhere else, so a root-anchored URL
+      // join reaches no route at all.
+      const calls = installBeaconMock({
+        basePath: "/eth-beacon-node/deadbeefkey",
+        validatorList: [],
+      });
+      const log = captureLog();
+      process.env.BEACON_NODE_URL = base;
+
+      try {
+        await assertBeaconMatchesExecutionChain(
+          { chainId: 31337 },
+          { depositContract: "0x1111111111111111111111111111111111111111" },
+          "fund",
+        );
+        assert.equal(await readBeaconGenesisForkVersion("fund"), "0x00000000");
+        await assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit");
+        await assertBeaconValidatorReadyForFunding(
+          PUBKEY,
+          WITHDRAWAL_CREDENTIALS,
+          "fund",
+          refusingReader(),
+        );
+      } finally {
+        log.restore();
+        restoreFetch();
+      }
+
+      assert.ok(calls.length > 0);
+      for (const call of calls) {
+        assert.ok(
+          call.startsWith("/eth-beacon-node/deadbeefkey/eth/v1/"),
+          `request ${call} dropped the base path`,
+        );
+      }
+    }
+
+    restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+  });
+
+  it("re-runs the head preflight immediately before broadcast and refuses a changed balance", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+
+    try {
+      const log = captureLog();
+      installBeaconMock({});
+      try {
+        await assertBeaconValidatorStillFresh(
+          PUBKEY,
+          WITHDRAWAL_CREDENTIALS,
+          "fund",
+          PREDEPOSIT_GWEI,
+        );
+        assert.ok(
+          log.lines.some((line) => line.includes("fund pre-broadcast head recheck passed")),
+        );
+        // Compact: the recheck does not reprint the whole preflight.
+        assert.ok(!log.lines.some((line) => line.includes("fund pre-broadcast beacon state id")));
+      } finally {
+        log.restore();
+        restoreFetch();
+      }
+
+      // A third-party deposit landing between the preflight and the broadcast is fatal,
+      // not a fresh prompt: only a person reading the current number can resolve it.
+      installBeaconMock({
+        headValidator: beaconValidator("pending_initialized", {}, { balance: "2000000000" }),
+      });
+      try {
+        await assert.rejects(
+          assertBeaconValidatorStillFresh(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund", PREDEPOSIT_GWEI),
+          /balance changed from 1000000000 Gwei at the preflight to 2000000000 Gwei immediately before broadcast/,
+        );
+      } finally {
+        restoreFetch();
+      }
+
+      // Every other head-state assertion still applies at the recheck.
+      installBeaconMock({ headValidator: beaconValidator("pending_initialized", { slashed: true }) });
+      try {
+        await assert.rejects(
+          assertBeaconValidatorStillFresh(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund", PREDEPOSIT_GWEI),
+          /fund pre-broadcast beacon validator is slashed/,
+        );
+      } finally {
+        restoreFetch();
+      }
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
   it("compares every recorded immutable against the live pool", async function () {
     const depositContract = "0x1111111111111111111111111111111111111111" as const;
     const withdrawalRequestPredeploy = "0x2222222222222222222222222222222222222222" as const;
@@ -1097,6 +1375,11 @@ function installBeaconMock({
   depositContractAddress = "0x1111111111111111111111111111111111111111",
   validatorStatus = 200,
   syncingOverrides = {},
+  specOverrides = {},
+  validatorList = [] as unknown,
+  validatorListBody = undefined as unknown,
+  validatorListStatus = 200,
+  basePath = "",
 }: {
   finalizedValidator?: BeaconValidatorBody;
   /// A single body, or one body per successive head-state validator fetch. The last entry is
@@ -1109,6 +1392,18 @@ function installBeaconMock({
   depositContractAddress?: string;
   validatorStatus?: number;
   syncingOverrides?: Record<string, unknown>;
+  specOverrides?: Record<string, unknown>;
+  /// Body of the `?id=` validator-list endpoint that positive-absence uses. Deliberately
+  /// `unknown`: one test needs a conforming node's empty list and another needs a body no
+  /// conforming node would send.
+  validatorList?: unknown;
+  /// Replaces the whole list-endpoint body, for the shapes where `data` itself is absent.
+  validatorListBody?: unknown;
+  validatorListStatus?: number;
+  /// Path prefix the endpoint is served under, as a hosted beacon URL with an API key in
+  /// the path would be. Requests are recorded with the prefix and dispatched without it, so
+  /// a URL join that drops the prefix reaches no route at all.
+  basePath?: string;
 }): string[] {
   const calls: string[] = [];
   const headValidators = Array.isArray(headValidator) ? headValidator : [headValidator];
@@ -1117,9 +1412,22 @@ function installBeaconMock({
 
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = new URL(input instanceof URL ? input.href : typeof input === "string" ? input : input.url);
-    calls.push(url.pathname);
+    calls.push(`${url.pathname}${url.search}`);
+    const pathname =
+      basePath !== "" && url.pathname.startsWith(basePath)
+        ? url.pathname.slice(basePath.length)
+        : url.pathname;
 
-    if (url.pathname === "/eth/v1/node/syncing") {
+    if (pathname === "/eth/v1/beacon/states/head/validators") {
+      if (validatorListStatus !== 200) {
+        return new Response("not found", { status: validatorListStatus });
+      }
+      return jsonResponse(
+        validatorListBody === undefined ? { data: validatorList } : validatorListBody,
+      );
+    }
+
+    if (pathname === "/eth/v1/node/syncing") {
       return jsonResponse({
         data: {
           head_slot: headSlot,
@@ -1131,7 +1439,7 @@ function installBeaconMock({
         },
       });
     }
-    if (url.pathname === "/eth/v1/beacon/genesis") {
+    if (pathname === "/eth/v1/beacon/genesis") {
       return jsonResponse({
         data: {
           genesis_time: "0",
@@ -1140,7 +1448,7 @@ function installBeaconMock({
         },
       });
     }
-    if (url.pathname.endsWith("/finality_checkpoints")) {
+    if (pathname.endsWith("/finality_checkpoints")) {
       return jsonResponse({
         data: {
           previous_justified: { epoch: "254", root: `0x${"22".repeat(32)}` },
@@ -1149,14 +1457,14 @@ function installBeaconMock({
         },
       });
     }
-    if (url.pathname === "/eth/v1/config/spec") {
-      return jsonResponse({ data: { SLOTS_PER_EPOCH: "32", SHARD_COMMITTEE_PERIOD: "256" } });
+    if (pathname === "/eth/v1/config/spec") {
+      return jsonResponse({ data: { SLOTS_PER_EPOCH: "32", SHARD_COMMITTEE_PERIOD: "256", ...specOverrides } });
     }
-    if (url.pathname === "/eth/v1/config/deposit_contract") {
+    if (pathname === "/eth/v1/config/deposit_contract") {
       return jsonResponse({ data: { chain_id: beaconChainId, address: depositContractAddress } });
     }
 
-    const validatorMatch = url.pathname.match(/^\/eth\/v1\/beacon\/states\/([^/]+)\/validators\//);
+    const validatorMatch = pathname.match(/^\/eth\/v1\/beacon\/states\/([^/]+)\/validators\//);
     if (validatorMatch !== null) {
       if (validatorStatus !== 200) {
         return new Response("validator not found", { status: validatorStatus });
