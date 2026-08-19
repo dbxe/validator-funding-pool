@@ -161,7 +161,12 @@ interface SystemCodeReader {
   getCode: (args: { address: Address }) => Promise<Hex | undefined>;
 }
 
-type DeploymentPublicClient = Pick<PublicClient, "getChainId" | "getCode" | "readContract">;
+/// Exported because `status` runs the forwarder check outside the integrity gate and needs to
+/// name the client it passes in.
+export type DeploymentPublicClient = Pick<
+  PublicClient,
+  "getChainId" | "getCode" | "readContract"
+>;
 
 interface FeeRecipientForwarderReader {
   address: Address;
@@ -1458,6 +1463,12 @@ export type ForwarderScope = "authenticate-forwarder" | "forwarder-untouched";
 /// to brick all three, over a sidecar whose whole purpose is optional EL rewards. So the full
 /// check runs in the three commands whose work is about the forwarder (`sweep`,
 /// `deploy-forwarder`, `status`) and nowhere else.
+///
+/// `status` is neither: it authenticates the forwarder, and does it OUTSIDE this gate, after
+/// every line of pool state has been printed, reporting a failure as a warning. See
+/// `reportForwarder` in `scripts/status.ts`. The scope here is about what may REFUSE a
+/// command, and `status` signs nothing, so it has nothing to protect by refusing and a great
+/// deal to lose: every FATAL in this repository ends by telling the operator to run it.
 ///
 /// The `EXPECTED_FORWARDER` pin is NOT scoped: it runs wherever a record is read. It is a
 /// string comparison against the record, it depends on no artifact and no RPC read, and a pin

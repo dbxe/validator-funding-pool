@@ -1311,6 +1311,49 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(claiming, "Nothing to claim; no transaction was sent.");
     assertOutputLacks(claiming, "FeeRecipientForwarder");
 
+    // `status` is the command every FATAL in this repository tells the operator to run, so it
+    // must never be the one the sidecar takes down. It signs nothing, so the forwarder is
+    // reported rather than gated: all the pool state, then a loud warning beside the forwarder
+    // line, and exit 0.
+    const reading = expectSuccess(
+      await runCommand({
+        script: "status",
+        network: "read",
+        env: { RPC_URL: chain.url, DEPLOYMENT_FILE: brokenFile, PRIVATE_KEY: undefined },
+      }),
+    );
+    assertOutputContains(reading, `Pool: ${pool}`);
+    assertOutputContains(reading, "State: ToppedUp (3)");
+    assertOutputContains(reading, `Validator pubkey: ${deposits.pubkey}`);
+    assertOutputContains(reading, `Fee recipient forwarder: ${outsider.address}`);
+    assertOutputContains(
+      reading,
+      `WARNING: the fee-recipient forwarder at ${outsider.address} did NOT authenticate.`,
+    );
+    assertOutputContains(reading, `feeRecipientForwarder has no code at ${outsider.address}`);
+    assertOutputContains(reading, "status signs nothing");
+    // The pool state comes first, which is the point: the finding must not cost the operator
+    // the reconciliation they ran the command for.
+    assertOutputOrder(reading, "State: ToppedUp (3)", "did NOT authenticate.");
+    assertOutputLacks(reading, "FATAL: status did not complete.");
+
+    // The control, against the record that names the real forwarder: the same three
+    // authenticity layers run, they pass, and the warning is absent.
+    const healthy = expectSuccess(
+      await runCommand({
+        script: "status",
+        network: "read",
+        env: { RPC_URL: chain.url, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
+      }),
+    );
+    assertOutputContains(healthy, `Fee recipient forwarder: ${forwarder}`);
+    assertOutputContains(
+      healthy,
+      "FeeRecipientForwarder runtime code matches the local build artifacts/contracts/" +
+        "FeeRecipientForwarder.sol/FeeRecipientForwarder.json",
+    );
+    assertOutputLacks(healthy, "did NOT authenticate.");
+
     // And the escape hatch itself, which spends a real EIP-7002 fee against the real predeploy.
     const exiting = await beacon.withScenario(
       () => beacon.setValidator(deposits.pubkey, activeValidator(withdrawalCredentials)),
