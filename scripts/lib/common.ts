@@ -21,8 +21,6 @@ export const PREDEPOSIT_GWEI = 1_000_000_000n;
 export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
-export const UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY = "UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY";
-export const UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK = "I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY";
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
 const HEAD_STATE_ID = "head";
@@ -591,17 +589,14 @@ async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
   return preflight;
 }
 
+// The fund and top-up legs run the identical preflight. Both names are kept so call sites stay
+// labeled with the operation the operator actually ran.
 export async function assertBeaconValidatorReadyForTopUp(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
 ) {
-  return assertBeaconValidatorIsFreshPredeposit(
-    pubkey,
-    expectedWithdrawalCredentials,
-    label,
-    true,
-  );
+  return assertBeaconValidatorIsFreshPredeposit(pubkey, expectedWithdrawalCredentials, label);
 }
 
 export async function assertBeaconValidatorReadyForFunding(
@@ -609,19 +604,13 @@ export async function assertBeaconValidatorReadyForFunding(
   expectedWithdrawalCredentials: Hex,
   label: string,
 ) {
-  return assertBeaconValidatorIsFreshPredeposit(
-    pubkey,
-    expectedWithdrawalCredentials,
-    label,
-    false,
-  );
+  return assertBeaconValidatorIsFreshPredeposit(pubkey, expectedWithdrawalCredentials, label);
 }
 
 async function assertBeaconValidatorIsFreshPredeposit(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
-  allowTopUpOverride: boolean,
 ) {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
@@ -639,10 +628,7 @@ async function assertBeaconValidatorIsFreshPredeposit(
   );
   assertBeaconValidatorWithdrawalCredentials(headPreflight, expectedWithdrawalCredentials, `${label} head`);
 
-  const mutableAnomalyOverride = allowTopUpOverride && topUpValidatorAnomalyOverrideEnabled(label);
-  if (!mutableAnomalyOverride) {
-    assertFreshPredepositMutableState(headPreflight, label);
-  }
+  assertFreshPredepositMutableState(headPreflight, label);
 
   printBeaconPreflight(`${label} head`, headPreflight);
   console.log(`${label} head beacon fresh-predeposit preflight passed`);
@@ -807,23 +793,6 @@ function requireBeaconNodeUrl(label: string): string {
     throw new Error(`${label} requires BEACON_NODE_URL for mandatory beacon confirmation`);
   }
   return beaconNodeUrl;
-}
-
-function topUpValidatorAnomalyOverrideEnabled(label: string): boolean {
-  if (process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY] !== "1") return false;
-  if (process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK] !== "1") {
-    throw new Error(
-      `${label}: ${UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY}=1 requires ` +
-        `${UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK}=1`,
-    );
-  }
-
-  console.warn(
-    `${label}: UNSAFE top-up validator anomaly override enabled. Mutable head-state assertions for ` +
-      `balance, slashing, activation epochs, and exit epochs are waived. Beacon availability, node ` +
-      `health, and finalized and head withdrawal-credential confirmation remain mandatory.`,
-  );
-  return true;
 }
 
 function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight) {

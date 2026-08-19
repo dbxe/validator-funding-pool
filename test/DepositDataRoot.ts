@@ -21,8 +21,6 @@ import {
   readBeaconGenesisForkVersion,
   readDeployment,
   TOP_UP_GWEI,
-  UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY,
-  UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK,
   validateDepositData,
   VALIDATOR_DEPOSIT_GWEI,
   writeDeployment,
@@ -34,6 +32,18 @@ const WITHDRAWAL_CREDENTIALS = "0x0100000000000000000000002222222222222222222222
 const OTHER_WITHDRAWAL_CREDENTIALS =
   "0x0100000000000000000000003333333333333333333333333333333333333333" as Hex;
 const FAR_FUTURE_EPOCH = "18446744073709551615";
+// Both variables were deleted from the codebase. They are referenced here only to prove that
+// setting them changes nothing.
+const DELETED_OVERRIDE_VARS = [
+  "UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY",
+  "I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY",
+] as const;
+// The fund and top-up legs run the identical fresh-predeposit preflight; every case below is
+// exercised against both.
+const freshPredepositLegs = [
+  { label: "fund-test", assert: assertBeaconValidatorReadyForFunding },
+  { label: "top-up-test", assert: assertBeaconValidatorReadyForTopUp },
+] as const;
 
 function bytesToHex(bytes: Uint8Array): Hex {
   return `0x${Buffer.from(bytes).toString("hex")}` as Hex;
@@ -136,11 +146,14 @@ describe("deposit data validation", function () {
 
   it("requires BEACON_NODE_URL on every capital-risk path despite obsolete bypass variables", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
-    const originalUnsafeSkip = process.env.UNSAFE_SKIP_BEACON_CONFIRMATION;
-    const originalUnsafeAck = process.env.I_UNDERSTAND_FUNDS_CAN_BE_LOST;
+    const obsolete = [
+      "UNSAFE_SKIP_BEACON_CONFIRMATION",
+      "I_UNDERSTAND_FUNDS_CAN_BE_LOST",
+      ...DELETED_OVERRIDE_VARS,
+    ];
+    const originalObsolete = obsolete.map((name) => [name, process.env[name]] as const);
     delete process.env.BEACON_NODE_URL;
-    process.env.UNSAFE_SKIP_BEACON_CONFIRMATION = "1";
-    process.env.I_UNDERSTAND_FUNDS_CAN_BE_LOST = "1";
+    for (const name of obsolete) process.env[name] = "1";
 
     try {
       await assert.rejects(
@@ -148,7 +161,15 @@ describe("deposit data validation", function () {
         /commit-predeposit requires BEACON_NODE_URL/,
       );
       await assert.rejects(
-        assertBeaconValidatorHasWithdrawalCredentials(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund"),
+        assertBeaconValidatorHasWithdrawalCredentials(
+          PUBKEY,
+          WITHDRAWAL_CREDENTIALS,
+          "credential-confirmation",
+        ),
+        /credential-confirmation requires BEACON_NODE_URL/,
+      );
+      await assert.rejects(
+        assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund"),
         /fund requires BEACON_NODE_URL/,
       );
       await assert.rejects(
@@ -157,8 +178,7 @@ describe("deposit data validation", function () {
       );
     } finally {
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
-      restoreEnv("UNSAFE_SKIP_BEACON_CONFIRMATION", originalUnsafeSkip);
-      restoreEnv("I_UNDERSTAND_FUNDS_CAN_BE_LOST", originalUnsafeAck);
+      for (const [name, value] of originalObsolete) restoreEnv(name, value);
     }
   });
 
@@ -337,7 +357,7 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("refuses participant funding for every fresh-predeposit mutable-state anomaly", async function () {
+  it("refuses funding and top-up for every fresh-predeposit mutable-state anomaly", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
     process.env.BEACON_NODE_URL = "http://beacon.example";
 
@@ -368,21 +388,23 @@ describe("beacon preflight checks", function () {
       ];
 
       for (const testCase of cases) {
-        installBeaconMock({
-          finalizedValidator: beaconValidator("pending_initialized"),
-          headValidator: beaconValidator(
-            "pending_initialized",
-            testCase.validator,
-            testCase.response,
-          ),
-        });
-        try {
-          await assert.rejects(
-            assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund-test"),
-            testCase.message,
-          );
-        } finally {
-          restoreFetch();
+        for (const leg of freshPredepositLegs) {
+          installBeaconMock({
+            finalizedValidator: beaconValidator("pending_initialized"),
+            headValidator: beaconValidator(
+              "pending_initialized",
+              testCase.validator,
+              testCase.response,
+            ),
+          });
+          try {
+            await assert.rejects(
+              leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label),
+              testCase.message,
+            );
+          } finally {
+            restoreFetch();
+          }
         }
       }
     } finally {
@@ -411,7 +433,7 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("rejects a head-state credential divergence even with the top-up anomaly override", async function () {
+  it("rejects a head-state credential divergence even with the deleted override variables set", async function () {
     installBeaconMock({
       finalizedValidator: beaconValidator("pending_initialized"),
       headValidator: beaconValidator("pending_initialized", {
@@ -419,12 +441,9 @@ describe("beacon preflight checks", function () {
         exit_epoch: "17",
       }),
     });
+    const restore = setDeletedOverrideVars();
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
-    const originalOverride = process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY];
-    const originalAck = process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK];
     process.env.BEACON_NODE_URL = "http://beacon.example";
-    process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY] = "1";
-    process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK] = "1";
 
     try {
       await assert.rejects(
@@ -434,50 +453,56 @@ describe("beacon preflight checks", function () {
     } finally {
       restoreFetch();
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
-      restoreEnv(UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY, originalOverride);
-      restoreEnv(UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK, originalAck);
+      restore();
     }
   });
 
-  it("allows only top-up to waive mutable anomalies with both override variables", async function () {
+  it("keeps mutable anomalies fatal on both legs with the deleted override variables set", async function () {
+    const restore = setDeletedOverrideVars();
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
-    const originalOverride = process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY];
-    const originalAck = process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK];
     process.env.BEACON_NODE_URL = "http://beacon.example";
-    process.env[UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY] = "1";
-    process.env[UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK] = "1";
 
     try {
-      installBeaconMock({
-        finalizedValidator: beaconValidator("pending_initialized"),
-        headValidator: beaconValidator(
-          "active_exiting",
-          {
-            slashed: true,
-            activation_epoch: "12",
-            activation_eligibility_epoch: "11",
-            exit_epoch: "14",
-            withdrawable_epoch: "15",
-          },
-          { balance: "32000000000" },
-        ),
-      });
-      await assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test");
-      restoreFetch();
+      for (const leg of freshPredepositLegs) {
+        installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: beaconValidator(
+            "active_exiting",
+            {
+              slashed: true,
+              activation_epoch: "12",
+              activation_eligibility_epoch: "11",
+              exit_epoch: "14",
+              withdrawable_epoch: "15",
+            },
+            { balance: "32000000000" },
+          ),
+        });
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label),
+            /balance 32000000000 is not exactly 1000000000 Gwei/,
+          );
+        } finally {
+          restoreFetch();
+        }
 
-      installBeaconMock({
-        finalizedValidator: beaconValidator("pending_initialized"),
-        headValidator: beaconValidator("pending_initialized", {}, { balance: "1000000001" }),
-      });
-      await assert.rejects(
-        assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund-test"),
-        /balance 1000000001 is not exactly 1000000000 Gwei/,
-      );
+        installBeaconMock({
+          finalizedValidator: beaconValidator("pending_initialized"),
+          headValidator: beaconValidator("pending_initialized", { withdrawable_epoch: "15" }),
+        });
+        try {
+          await assert.rejects(
+            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label),
+            /withdrawable_epoch 15 is not FAR_FUTURE_EPOCH/,
+          );
+        } finally {
+          restoreFetch();
+        }
+      }
     } finally {
-      restoreFetch();
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
-      restoreEnv(UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY, originalOverride);
-      restoreEnv(UNSAFE_TOPUP_VALIDATOR_ANOMALY_ACK, originalAck);
+      restore();
     }
   });
 
@@ -486,12 +511,14 @@ describe("beacon preflight checks", function () {
     process.env.BEACON_NODE_URL = "http://beacon.example";
 
     try {
-      installBeaconMock({});
-      await assertBeaconValidatorReadyForFunding(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund-test");
-      restoreFetch();
-
-      installBeaconMock({});
-      await assertBeaconValidatorReadyForTopUp(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up-test");
+      for (const leg of freshPredepositLegs) {
+        installBeaconMock({});
+        try {
+          await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label);
+        } finally {
+          restoreFetch();
+        }
+      }
     } finally {
       restoreFetch();
       restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
@@ -591,6 +618,14 @@ function restoreEnv(name: string, value: string | undefined) {
   } else {
     process.env[name] = value;
   }
+}
+
+function setDeletedOverrideVars(): () => void {
+  const originals = DELETED_OVERRIDE_VARS.map((name) => [name, process.env[name]] as const);
+  for (const name of DELETED_OVERRIDE_VARS) process.env[name] = "1";
+  return () => {
+    for (const [name, value] of originals) restoreEnv(name, value);
+  };
 }
 
 let originalFetch: typeof fetch | undefined;
