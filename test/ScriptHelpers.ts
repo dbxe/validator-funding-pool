@@ -6,6 +6,7 @@ import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "
 import {
   assertActiveSigner,
   assertDeployedAt,
+  assertExpectedPool,
   assertFundingWasCredited,
   assertStillFundable,
   beaconApiUrl,
@@ -723,6 +724,7 @@ describe("assertStillFundable", function () {
   ) {
     const targets = overrides.targets ?? {};
     return {
+      address: POOL,
       read: {
         state: async () => state,
         fundingAttempt: async () => overrides.attempt ?? REVIEWED_ATTEMPT,
@@ -846,6 +848,31 @@ describe("assertStillFundable", function () {
     }
   });
 
+  it("re-checks EXPECTED_POOL against the contract the transaction is about to go to", async function () {
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      process.env.EXPECTED_POOL = OTHER_SIGNER;
+      await assert.rejects(
+        assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
+        (error: Error) => {
+          assert.match(error.message, /^Final re-read: the deployment record /);
+          assert.match(error.message, new RegExp(`names pool ${POOL}`));
+          return true;
+        },
+      );
+
+      process.env.EXPECTED_POOL = POOL;
+      await assert.doesNotReject(
+        silentlyAsync(() =>
+          assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
+        ),
+      );
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
+  });
+
   it("refuses at and after the funding deadline", async function () {
     for (const timestamp of [DEADLINE, DEADLINE + 1n]) {
       await assert.rejects(
@@ -870,6 +897,82 @@ describe("assertStillFundable", function () {
         assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
       ),
     );
+  });
+});
+
+describe("assertExpectedPool", function () {
+  // `DEPLOYMENT_FILE` selects the record, and the record selects the pool every other check
+  // is made about. This is the only declaration that catches a record naming a pool the
+  // operator did not mean.
+  it("asserts nothing when the pin is unset or empty", function () {
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_POOL", value);
+        assert.doesNotThrow(() => assertExpectedPool(POOL, "Deployment record"));
+        assert.doesNotThrow(() => assertExpectedPool(OTHER_SIGNER, "Deployment record"));
+      }
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
+  });
+
+  it("accepts the declared pool, case differences aside", function () {
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      process.env.EXPECTED_POOL = POOL;
+      assert.doesNotThrow(() => assertExpectedPool(POOL, "Deployment record"));
+      assert.doesNotThrow(() =>
+        assertExpectedPool(POOL.toUpperCase().replace("0X", "0x") as Address, "Final re-read"),
+      );
+      process.env.EXPECTED_POOL = POOL.toUpperCase().replace("0X", "0x");
+      assert.doesNotThrow(() => assertExpectedPool(POOL, "Deployment record"));
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
+  });
+
+  it("is fatal for a record naming a different pool, and names the moment", function () {
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      process.env.EXPECTED_POOL = POOL;
+      for (const where of ["Deployment record", "Final re-read"]) {
+        assert.throws(
+          () => assertExpectedPool(OTHER_SIGNER, where),
+          (error: Error) => {
+            assert.match(error.message, new RegExp(`^${where}: the deployment record `));
+            assert.match(error.message, new RegExp(`names pool ${OTHER_SIGNER}`));
+            assert.match(error.message, new RegExp(`declared EXPECTED_POOL ${POOL}`));
+            assert.match(error.message, /Nothing has been sent/);
+            assert.match(error.message, /DEPLOYMENT_FILE selects/);
+            return true;
+          },
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
+  });
+
+  it("is fatal for a malformed declaration rather than ignoring it", function () {
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      // A pin that cannot be parsed has not been declared. Ignoring one reports a pass for a
+      // check that never ran, which is worse than no pin at all.
+      for (const value of ["not-an-address", "0x1234", POOL.slice(0, -1), `${POOL}00`, "0"]) {
+        process.env.EXPECTED_POOL = value;
+        assert.throws(
+          () => assertExpectedPool(POOL, "Deployment record"),
+          new RegExp(`EXPECTED_POOL ${value} is not a 0x-prefixed 20-byte address`),
+        );
+      }
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
   });
 });
 

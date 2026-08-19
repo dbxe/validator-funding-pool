@@ -822,9 +822,47 @@ export function writeDeployment(record: DeploymentRecord) {
   console.log(`Wrote deployment: ${file}`);
 }
 
+/// Reads the deployment record, announcing which file it came from.
+///
+/// The path is printed BEFORE the file is opened, and it is printed unconditionally. This
+/// is the one input that selects the SUBJECT of every other check: the record names the
+/// pool, and chain id, immutables, code hashes, canonicity, the forwarder binding, and the
+/// address capital is sent to are all read from — or compared against — whatever that
+/// record says. `DEPLOYMENT_FILE` chooses it, silently, from the environment. An operator
+/// who cannot see which record a command is acting on cannot tell a run against the pool
+/// they mean from a run against a stale or swapped one, and every command would report a
+/// clean pass either way. `EXPECTED_POOL` turns the printed line into an assertion.
 export function readDeployment(): DeploymentRecord {
   const file = deploymentPath();
+  console.log(`Deployment record: ${file}`);
   return JSON.parse(readFileSync(file, "utf8")) as DeploymentRecord;
+}
+
+/// A declare-and-verify pin on the pool the deployment record names.
+///
+/// Follows `EXPECTED_SIGNER` exactly: unset or empty declares nothing, a value that is not
+/// an address is fatal and names the variable, and a mismatch is fatal before anything is
+/// sent. A pin that cannot be parsed has NOT been declared, so it is never silently
+/// ignored — that would report a pass for a check which never ran.
+///
+/// It is evaluated at two moments, for the same reason the funding pins are: once when the
+/// record is first verified against the chain, and again in the final on-chain re-read
+/// immediately before a funding transaction is signed. On the Ledger path those two are
+/// minutes apart.
+export function assertExpectedPool(poolAddress: Address, where: string) {
+  const expectedPool = process.env.EXPECTED_POOL ?? "";
+  if (expectedPool === "") return;
+  if (!isAddress(expectedPool, { strict: false })) {
+    throw new Error(`EXPECTED_POOL ${expectedPool} is not a 0x-prefixed 20-byte address`);
+  }
+  if (poolAddress.toLowerCase() !== expectedPool.toLowerCase()) {
+    throw new Error(
+      `${where}: the deployment record ${deploymentPath()} names pool ${poolAddress}, not the ` +
+        `declared EXPECTED_POOL ${expectedPool}. Nothing has been sent. DEPLOYMENT_FILE selects ` +
+        `which record every check in this command is made against; point it at the record for ` +
+        `the pool you mean and re-run`,
+    );
+  }
 }
 
 export function defaultDepositContract(): Address {
@@ -979,6 +1017,9 @@ export async function assertDeploymentIntegrity(
   pool: PoolDeploymentReader,
   deployment: DeploymentRecord,
 ): Promise<PoolDeploymentConfig> {
+  // First, before a single RPC read: everything below this line is about the pool this
+  // record names, so a record naming the wrong pool has to be caught before any of it runs.
+  assertExpectedPool(deployment.pool, "Deployment record");
   const chainId = await assertDeploymentChain(publicClient, deployment);
   await assertHasCode(publicClient, deployment.pool, "pool");
   const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
@@ -2426,6 +2467,7 @@ export function assertFundingPins(pinned: FundingPinnedValues, where: string) {
 }
 
 interface FundingStateReader {
+  address: Address;
   read: {
     state: () => Promise<number>;
     fundingAttempt: () => Promise<bigint>;
@@ -2474,6 +2516,10 @@ export async function assertStillFundable(
     ]);
   const operatorTargetWei = await pool.read.fundingTargetWeiOf([operator]);
 
+  // Re-evaluated here for the same reason the funding pins are: the record was checked
+  // minutes ago, and on the Ledger path the device has not been touched yet. The address
+  // compared is the contract instance the transaction is about to go to.
+  assertExpectedPool(pool.address, "Final re-read");
   if (Number(state) !== STATE_FUNDING) {
     throw new Error(`Pool state changed to ${state}; funding is no longer open`);
   }

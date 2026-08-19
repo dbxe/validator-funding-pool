@@ -200,6 +200,9 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
 
     assertActiveSignerPrinted(result, "deploy", operator.address.toLowerCase());
+    // `DEPLOYMENT_FILE` selects the record every later command's checks are made about, so
+    // the resolved path is printed here too, next to the signer line.
+    assertOutputContains(result, `Deployment record: ${deploymentFile} (to be written by this command)`);
     // The canonicity pin exists only for mainnet, so an unrecognised chain id must WARN and
     // fall back to record-to-pool consistency. Asserted, not suppressed.
     assertOutputContains(result, CANONICITY_WARNING);
@@ -269,6 +272,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
 
     assertActiveSignerPrinted(result, "commit-predeposit", operator.address.toLowerCase());
+    assertOutputContains(result, `Deployment record: ${deploymentFile}`);
     assertOutputContains(
       result,
       "commit-predeposit beacon preflight passed: the head state validator list is empty for this pubkey",
@@ -361,6 +365,31 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
     // It fails inside `assertActiveSigner`, so nothing after it ran: no beacon read, no
     // funding review, and above all no transaction.
+    assertOutputLacks(result, "Funding review for pool");
+    assertOutputLacks(result, "Funded in block");
+  });
+
+  it("a declared EXPECTED_POOL that the record does not name stops the command dead", async () => {
+    // `DEPLOYMENT_FILE` selects the record, and a record for a different pool is internally
+    // consistent — chain id, immutables, code hashes and runtime code all agree — so this
+    // declaration is the only thing that catches it.
+    const result = expectFailure(
+      await runCommand({
+        script: "fund",
+        env: asParticipant({ EXPECTED_POOL: outsider.address }),
+      }),
+    );
+
+    assertOutputContains(result, `Deployment record: ${deploymentFile}`);
+    assertReadableFailure(
+      result,
+      "fund",
+      `Deployment record: the deployment record ${deploymentFile} names pool ${pool}, not the ` +
+        `declared EXPECTED_POOL ${outsider.address}`,
+    );
+    // It fails at the head of `assertDeploymentIntegrity`, before any other check runs: no
+    // beacon read, no funding review, and no transaction.
+    assertOutputLacks(result, "fund beacon");
     assertOutputLacks(result, "Funding review for pool");
     assertOutputLacks(result, "Funded in block");
   });
@@ -693,6 +722,9 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     };
     const result = expectSuccess(await runCommand({ script: "status", network: "read", env }));
 
+    // `status` signs nothing, so the record path is the only thing it prints about where it
+    // is looking. It is printed there too.
+    assertOutputContains(result, `Deployment record: ${deploymentFile}`);
     assertOutputContains(result, `Pool: ${pool}`);
     assertOutputContains(result, "State: ToppedUp (3)");
     assertOutputContains(result, `Operator: ${operator.address}`);

@@ -10,6 +10,7 @@ import {
   assertPoolRuntimeCodeMatchesLocalBuild,
   codeHash,
   defaultDepositContract,
+  deploymentPath,
   envAddress,
   envBigInt,
   readLocalPoolBuildArtifacts,
@@ -25,6 +26,10 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [deployer] = await viem.getWalletClients();
   const signer = assertActiveSigner(connection, deployer.account.address, "deploy");
+  // `deploy` is the one command that WRITES the record every other command reads, so it
+  // announces the same path at the same point in its output rather than only when it
+  // writes. An existing record at that path is overwritten.
+  console.log(`Deployment record: ${deploymentPath()} (to be written by this command)`);
 
   const depositContract = envAddress("DEPOSIT_CONTRACT", defaultDepositContract());
   const withdrawalRequestPredeploy = envAddress(
