@@ -5,11 +5,16 @@ import {
   formatWei,
   parseAddressList,
   readDeployment,
+  warnOnPlaintextEndpoints,
 } from "./lib/common.js";
 
 const STATE_NAMES = ["Uninitialized", "Predeposited", "Funding", "ToppedUp"];
 
 async function main() {
+  // Every other command reaches this through `assertActiveSigner`. `status` signs nothing,
+  // so it calls it directly — a status read is exactly where an operator would notice that
+  // the endpoint everything else trusts is plaintext.
+  warnOnPlaintextEndpoints();
   const deployment = readDeployment();
   const { viem } = await network.create();
   const publicClient = await viem.getPublicClient();

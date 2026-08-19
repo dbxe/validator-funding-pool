@@ -23,7 +23,13 @@ async function main() {
 
   const claimable = await pool.read.claimable([signer]);
   console.log(`Claimable for ${signer}: ${formatWei(claimable)}`);
-  if (claimable === 0n) return;
+  if (claimable === 0n) {
+    // Said outright rather than left to be inferred from a command that printed a zero and
+    // exited quietly: on the Ledger path there is no device prompt either, and "nothing
+    // happened" and "something happened and it worked" looked identical.
+    console.log("Nothing to claim; no transaction was sent.");
+    return;
+  }
 
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   const hash = recipient.toLowerCase() === signer.toLowerCase()

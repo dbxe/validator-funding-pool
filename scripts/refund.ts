@@ -23,7 +23,11 @@ async function main() {
 
   const refundable = await pool.read.refundableWeiOf([signer]);
   console.log(`Refundable for ${signer}: ${formatWei(refundable)}`);
-  if (refundable === 0n) return;
+  if (refundable === 0n) {
+    // See claim.ts: a zero-balance exit says so instead of ending in silence.
+    console.log("Nothing to refund; no transaction was sent.");
+    return;
+  }
 
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   const hash = recipient.toLowerCase() === signer.toLowerCase()

@@ -258,6 +258,46 @@ interface ObservedReplacement {
   transaction: ObservedTransaction;
 }
 
+/// Hostnames whose traffic never leaves the machine, so plaintext HTTP to them is not on
+/// any wire an observer can sit on. `URL.hostname` keeps the brackets for an IPv6 literal.
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === "localhost" || host === "::1" || host === "[::1]") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/// Warns, loudly, when either endpoint is plaintext `http:` to a non-loopback host.
+///
+/// Not fatal: a node on the operator's own LAN over plain HTTP is a legitimate and common
+/// setup, and refusing it would push people toward worse workarounds. But `SECURITY.md` §2
+/// describes what a dishonest endpoint can do — lie about validator state, lie about pool
+/// state, and on the plain-transfer path turn one ordinary funding transfer into a donation
+/// — and over plaintext that entire capability belongs to anyone on the path, not just to
+/// whoever runs the endpoint. TLS is what limits it to the operator of the URL.
+export function warnOnPlaintextEndpoints() {
+  for (const name of ["RPC_URL", "BEACON_NODE_URL"] as const) {
+    const value = process.env[name];
+    if (value === undefined || value === "") continue;
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      // Not this function's business: whatever consumes the value fails on it there.
+      continue;
+    }
+    if (url.protocol !== "http:" || isLoopbackHost(url.hostname)) continue;
+    console.warn(
+      `\nWARNING: ${name} is plaintext http:// to ${url.hostname}, which is not loopback.\n` +
+        `  Anyone on the network path — not merely whoever runs that endpoint — can read every ` +
+        `request and rewrite every response.\n` +
+        `  That is the full lying-endpoint capability described in SECURITY.md §2: false ` +
+        `validator state, false pool state, and on the plain-transfer funding path a single ` +
+        `ordinary transfer turned into a donation.\n` +
+        `  Use https://, or a node reached over loopback or an SSH tunnel.\n`,
+    );
+  }
+}
+
 /// Asserts that the wallet a script is about to sign with is the wallet the operator
 /// intended, and prints it on every network.
 ///
@@ -290,6 +330,7 @@ export function assertActiveSigner(
   activeAddress: Address,
   label: string,
 ): Address {
+  warnOnPlaintextEndpoints();
   console.log(`${label} active signer: ${activeAddress} (network ${connection.networkName})`);
 
   const expectedSigner = process.env.EXPECTED_SIGNER ?? "";
@@ -1158,6 +1199,7 @@ export async function assertBeaconMatchesExecutionChain(
     "/eth/v1/config/deposit_contract",
     label,
   );
+  requireBeaconDataEnvelope(config, "deposit contract config", label);
   const beaconChainId = parseBeaconUint64(config.data.chain_id, "deposit chain_id", label);
   if (beaconChainId !== BigInt(deployment.chainId)) {
     throw new Error(
@@ -1199,7 +1241,7 @@ export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
 
   const url = beaconApiUrl(beaconNodeUrl, `/eth/v1/beacon/states/${HEAD_STATE_ID}/validators`);
   url.searchParams.set("id", pubkey);
-  const response = await fetch(url);
+  const response = await fetchBeacon(url, label);
   if (!response.ok) {
     throw new Error(
       `${label} beacon validator lookup returned ${response.status} ${response.statusText}; the ` +
@@ -1239,6 +1281,7 @@ export async function readBeaconGenesisForkVersion(label: string): Promise<Hex> 
     "/eth/v1/beacon/genesis",
     label,
   );
+  requireBeaconDataEnvelope(genesis, "genesis", label);
   return normalizeHexLength(genesis.data.genesis_fork_version, 4, "genesis_fork_version").toLowerCase() as Hex;
 }
 
@@ -1505,7 +1548,15 @@ export async function assertBeaconValidatorReadyForExit(
 ) {
   const beaconNodeUrl = process.env.BEACON_NODE_URL;
   if (!beaconNodeUrl) {
-    console.log(`Skipping ${label} beacon exit preflight: BEACON_NODE_URL not set`);
+    // Both documents call this a warning, and it is one: the exit request will be sent
+    // without any check that the validator is active, unexited, unslashed, and old enough
+    // for consensus to honour it. A `console.log` put that on the same channel as every
+    // routine success line.
+    console.warn(
+      `WARNING: skipping ${label} beacon exit preflight because BEACON_NODE_URL is not set. ` +
+        `The exit request will be sent with the validator's consensus state unchecked; the ` +
+        `EIP-7002 fee is spent either way`,
+    );
     return;
   }
 
@@ -1593,6 +1644,10 @@ async function readBeaconValidatorPreflight(
       label,
     ),
   ]);
+
+  requireBeaconDataEnvelope(genesis, "genesis", label);
+  requireBeaconDataEnvelope(finality, `${stateId} finality checkpoints`, label);
+  requireBeaconDataEnvelope(validator, `${stateId} validator`, label);
 
   return {
     stateId,
@@ -1756,13 +1811,55 @@ export function beaconApiUrl(beaconNodeUrl: string, pathname: string): URL {
   return url;
 }
 
+/// Every beacon read is on a capital path and every one of them blocks the command. An
+/// endpoint that accepts the connection and then never answers would hang `fund` forever
+/// with no output — indistinguishable, to the operator, from a slow node — so each request
+/// is bounded and a timeout is a named failure.
+const BEACON_REQUEST_TIMEOUT_MS = 30_000;
+
+/// The identity of a request, for an error message. Deliberately origin and path only: the
+/// query is where hosted providers put the API key, and an error message ends up in
+/// terminals, logs, and pasted issue reports.
+function describeBeaconRequest(url: URL): string {
+  return `${url.origin}${url.pathname}`;
+}
+
+async function fetchBeacon(url: URL, label: string): Promise<Response> {
+  try {
+    return await fetch(url, { signal: AbortSignal.timeout(BEACON_REQUEST_TIMEOUT_MS) });
+  } catch (error) {
+    throw new Error(
+      `${label} beacon request to ${describeBeaconRequest(url)} did not complete within ` +
+        `${BEACON_REQUEST_TIMEOUT_MS}ms or failed outright (${
+          error instanceof Error ? error.message : String(error)
+        }); nothing was read, so nothing this preflight decides is established. Check ` +
+        `BEACON_NODE_URL and the node's reachability, and re-run`,
+    );
+  }
+}
+
 async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label: string): Promise<T> {
   const url = beaconApiUrl(beaconNodeUrl, pathname);
-  const response = await fetch(url);
+  const response = await fetchBeacon(url, label);
   if (!response.ok) {
     throw new Error(`${label} beacon request ${pathname} failed: ${response.status} ${response.statusText}`);
   }
   return (await response.json()) as T;
+}
+
+/// Fatal, naming the field, when a beacon response has no `data` object at all.
+///
+/// The per-field shape validators below start from `data`, so a body without one reached
+/// them as `undefined` and produced a TypeError rather than a beacon-preflight failure —
+/// and the three responses that had no field validation at all (the deposit-contract
+/// config, genesis, and finality checkpoints) dereferenced it directly. An HTML error page,
+/// a proxy's `{"error": ...}`, and an empty body all land here.
+function requireBeaconDataEnvelope(response: unknown, what: string, label: string): void {
+  const body = asBeaconObject(response, `${what} response`, label);
+  if (!("data" in body)) {
+    throw new Error(`${label} beacon ${what} response has no data field`);
+  }
+  asBeaconObject(body.data, `${what} response data`, label);
 }
 
 function requireBeaconNodeUrl(label: string): string {
