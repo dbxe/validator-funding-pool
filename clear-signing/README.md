@@ -8,6 +8,8 @@ It does not change what `npm run <action>:ledger` shows. `@nomicfoundation/hardh
 
 There is also no descriptor entry for `receive()`. A plain ETH transfer carries no selector, and wallets clear-sign it natively from the transaction itself. That is why `fund.ts` prefers a transfer on the `ledger` network.
 
+Nor can anything here help the two deployment commands, `deploy:ledger` and `deploy-forwarder:ledger`. A descriptor is bound to a deployed contract address (`context.contract.deployments`) and keyed by function selector; a contract-creation transaction has neither. It has no destination address to match a descriptor against and no selector to look up, so the device shows creation bytecode with the constructor arguments appended and no registry entry can change that. Deployments are verified after the fact, not on the device — see "What The Device Actually Shows" in the repository README.
+
 `FeeRecipientForwarder` is not covered. Its only write function is `sweep()`, which takes no arguments and moves nothing to a caller-chosen address, so there is nothing a descriptor could clarify or mislabel.
 
 ## Deployment Binding

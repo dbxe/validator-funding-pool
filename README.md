@@ -61,7 +61,7 @@ Repository scripts read the authoritative `genesis_fork_version` from the connec
 
 Beacon confirmation is mandatory in the supported repository scripts on every path that puts capital at risk: `commit-predeposit`, `fund`, and `top-up`. These paths require `BEACON_NODE_URL`, and no environment variable waives any part of it. `fund` and `top-up` run the identical preflight. Credentials are confirmed at a settled state and re-confirmed at head; head state must also show a fresh predeposit: no slashing, activation, activation-eligibility, exit, and withdrawable epochs all equal to `FAR_FUTURE_EPOCH`, and a balance of at least the 1,000,000,000 Gwei predeposit. These checks use the consensus fields rather than the Beacon API status label.
 
-A head balance *above* 1 ETH is the one condition an operator resolves rather than a hard failure, and only once every other assertion has passed. The script prints why the excess is harmless and then requires an interactive typed confirmation: the operator types the exact observed balance in Gwei on a terminal. No environment variable, flag, or acknowledgement string substitutes for it, and a non-interactive stdin fails instead of proceeding. The confirmation waives nothing — credentials at both states, the slashing flag, all four epochs, and the 1 ETH balance floor stay fatal on both legs — and the confirmed run's final log line names the confirmed excess balance instead of reporting a plain pass. See [Hard Failure On Excess Predeposit Balance](#hard-failure-on-excess-predeposit-balance).
+A head balance *above* 1 ETH is the one condition the person running the command resolves rather than a hard failure, and only once every other assertion has passed. The script prints why the excess is harmless and then requires an interactive typed confirmation: whoever runs `fund` or `top-up` types the exact observed balance in Gwei on a terminal. No environment variable, flag, or acknowledgement string substitutes for it, and a non-interactive stdin fails instead of proceeding. Once the balance is confirmed the entire head-state preflight is re-run against a fresh fetch — node health, credentials, slashing, all four epochs, balance — and the fresh balance must still equal the confirmed value exactly; a validator whose state moved while the prompt was open is fatal, not waived. The confirmation waives nothing — credentials at both states, the slashing flag, all four epochs, and the 1 ETH balance floor stay fatal on both legs — and the confirmed run's final log line names the confirmed excess balance instead of reporting a plain pass. See [Hard Failure On Excess Predeposit Balance](#hard-failure-on-excess-predeposit-balance).
 
 The `request-exit` recovery path deliberately treats its beacon preflight as advisory: without `BEACON_NODE_URL`, it warns and proceeds so an unavailable beacon API cannot disable the escape hatch. With a beacon URL, `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
 
@@ -127,11 +127,17 @@ The top-up preflight used to accept a two-variable override that waived every mu
 
 ### Hard Failure On Excess Predeposit Balance
 
-Requiring the head balance to equal exactly 1 ETH turned a permissionless deposit into a brick. Anyone can deposit to the committed pubkey, and the deposit contract's 1 ETH minimum is the entire griefing cost. Before this change, one such deposit during the funding window raised the balance above 1,000,000,000 Gwei and hard-failed every subsequent `fund` and `top-up` preflight, with no supported way to finish the attempt and the operator's predeposit stranded.
+Requiring the head balance to equal exactly 1 ETH turned a permissionless deposit into a brick. Anyone can deposit to the committed pubkey, and the deposit contract's 1 ETH minimum is the entire griefing cost. Before this change, one such deposit during the funding window raised the balance above 1,000,000,000 Gwei and hard-failed every subsequent `fund` and `top-up` preflight.
+
+There was a way forward for `top-up`, and it was the wrong one. The two-variable override described above waived every mutable head-state assertion at once — balance, slashing, and all four epochs — so an operator could push the top-up through by waiving far more than the one condition that was actually harmless. `fund` had no route at all: the override only ever applied to the top-up leg, so participants were simply stuck, and the operator's predeposit stayed stranded until the funding window expired.
 
 Excess balance is harmless to custody. Withdrawal credentials are written once, when the validator is created, and a deposit for an existing pubkey only increases balance; every withdrawal, partial or full, pays the execution address in those credentials, which is the pool. What extra deposits change is activation timing and economics, not ownership — an uncredited external top-up that the pool distributes pro rata to its own participants, never back to the depositor.
 
-So the resolution is an operator confirmation covering exactly the condition verified harmless, with everything else still fatal. A new environment variable was rejected for the same reason the old override was deleted: it converts a human judgement about one specific validator into a value that lives in a shell profile and applies to every run. Typing the observed balance on a terminal cannot be set once and forgotten.
+So the resolution is an interactive confirmation covering exactly the condition verified harmless, with everything else still fatal. A new environment variable was rejected for the same reason the old override was deleted: it converts a human judgement about one specific validator into a value that lives in a shell profile and applies to every run. Typing the observed balance on a terminal cannot be set once and forgotten.
+
+The confirmation is about a state that was read before the prompt appeared, and a person can sit at a prompt for minutes. So the confirmation is not the last word: `assertBeaconValidatorIsFreshPredeposit` in `scripts/lib/common.ts` re-runs the whole head-state preflight from a fresh fetch afterwards and additionally requires the fresh balance to equal the confirmed value exactly. Any difference aborts and tells the operator to re-run, rather than sending capital against a stale read.
+
+The confirmation's guarantee is precise and worth stating precisely. Ordinary non-interactive execution — a pipe, a cron job, CI — is rejected, and there is no environment variable, flag, or acknowledgement string that stands in for a typed answer. It is not proof against the machine's owner: a deliberate PTY wrapper such as `expect` or `script(1)` can drive any interactive program, and nothing in a local script can prevent that. The check exists to stop accidents and ambient automation, which is the threat it is aimed at.
 
 ## Accounting Model
 
@@ -278,15 +284,21 @@ LEDGER_ADDRESS=0xYourLedgerAccount \
 npm run fund:ledger
 ```
 
-Every write action has one: `deploy:ledger`, `deploy-forwarder:ledger`, `commit-predeposit:ledger`, `open-funding-attempt:ledger`, `close-expired-funding-attempt:ledger`, `fund:ledger`, `refund:ledger`, `top-up:ledger`, `claim:ledger`, `request-exit:ledger`, `sweep:ledger`. `status` reads only and needs no signer.
+Every write action has one: `deploy:ledger`, `deploy-forwarder:ledger`, `commit-predeposit:ledger`, `open-funding-attempt:ledger`, `close-expired-funding-attempt:ledger`, `fund:ledger`, `refund:ledger`, `top-up:ledger`, `claim:ledger`, `request-exit:ledger`, `sweep:ledger`.
+
+`status` reads only, so it has no `:ledger` variant and needs no signer. It runs on its own `read` network, which sets no `accounts` at all. That is load-bearing rather than tidy: the `rpc` network declares `accounts: [configVariable("PRIVATE_KEY")]`, and Hardhat resolves an http network's `accounts` array on the connection's first JSON-RPC request, so on `rpc` even a pure `eth_call` fails when no `PRIVATE_KEY` is resolvable. A Ledger-only operator has no private key anywhere, and `npm run status` has to keep working for them.
 
 There are separate entries rather than one command with a network flag because Hardhat rejects a repeated `--network` option, so `npm run fund -- --network ledger` cannot work while `npm run fund` pins `--network rpc`. An environment-selected network is worse: the pinned `--network rpc` silently wins over `HARDHAT_NETWORK`, so a Ledger user who set the variable would sign with the plaintext key instead. Two explicit entries cannot be confused for each other.
 
-The plugin locates `LEDGER_ADDRESS` by walking `m/44'/60'/<index>'/0/0` for indices `0` through `20` and asking the device for each address, so the first command of a session is slow and the device must stay unlocked throughout. An account on a different derivation scheme, such as the legacy `m/44'/60'/0'/<index>`, is not found; set `ledgerOptions.derivationFunction` on the `ledger` network for that case.
+The plugin locates `LEDGER_ADDRESS` by walking `m/44'/60'/<index>'/0/0` for indices `0` through `20` and asking the device for each address. That walk happens **only for an address the plugin has not seen before**. On success it writes the address-to-path mapping to a cache file and, on every later run, returns the cached path for that address without asking the device to derive anything (`@nomicfoundation/hardhat-ledger/dist/src/internal/handler.js`, `#derivePath`, lines 190-192). So the first command against a new address is slow, later ones are not, and the device must stay unlocked throughout either way. An account on a different derivation scheme, such as the legacy `m/44'/60'/0'/<index>`, is not found; set `ledgerOptions.derivationFunction` on the `ledger` network for that case.
+
+The cache is a persistent file outside this repository, at `<hardhat config dir>/ledger/accounts.json` (`internal/cache.js`); the config directory is `env-paths("hardhat").config`, which is `~/Library/Preferences/hardhat-nodejs` on macOS, `${XDG_CONFIG_HOME:-~/.config}/hardhat-nodejs` on Linux, and `%APPDATA%\hardhat-nodejs\Config` on Windows.
+
+**Delete that file whenever the connected device or the seed on it changes.** A cached path is trusted, not re-verified: if a different device or a restored-from-different-seed device is plugged in, the plugin asks it to sign at the cached path, that path holds a different key on the new seed, and nothing in the plugin notices. The transaction is signed by an account you did not intend. Every transacting script therefore checks the mined `receipt.from` against the address it signed for and fails loudly on a mismatch (`waitForSenderVerifiedReceipt` in `scripts/lib/common.ts`) — but that is after-the-fact detection of a transaction already on chain, not prevention. Clearing the cache is the prevention.
 
 The `ledger` network configures no `accounts`, so no private key is read for it. `LEDGER_ADDRESS` is a public address, not a secret, and is read from the environment rather than the keystore; the `ledger` network refuses to load without it.
 
-`eth_accounts` on the `ledger` network returns the node's accounts followed by the Ledger account. Every script signs with the first. Point `RPC_URL` at a node that exposes no unlocked accounts — any public provider, or your own node with the `personal`/`accounts` namespace disabled — or the scripts will sign with a node account instead of the device.
+`eth_accounts` on the `ledger` network returns the node's accounts followed by the Ledger account (`@nomicfoundation/hardhat-ledger/dist/src/internal/hook-handlers/network.js`, lines 47-63). Every script signs with the first. Point `RPC_URL` at a node that exposes no unlocked accounts — any public provider, or your own node with the `personal`/`accounts` namespace disabled. Every transacting script also asserts before signing that the account it is about to use equals `LEDGER_ADDRESS` whenever the connection routes signing through a device, and prints the active signer address on every network (`assertActiveSigner` in `scripts/lib/common.ts`), so a node account slipping into first place aborts the run instead of silently signing.
 
 ### Encrypted Keystore
 
@@ -321,24 +333,30 @@ A keystore protects a key at rest on a machine you already trust. It does not pr
 
 ### What The Device Actually Shows
 
-A Ledger clear-signs a zero-calldata ETH transfer: destination address, amount, network, and fees all render on screen. Any transaction carrying calldata has to be blind-signed unless a clear-signing descriptor for that contract is loaded — the device shows the destination, the ETH value, and the fees, but not the decoded arguments. Blind signing must be enabled in the Ethereum app's settings for those actions to be possible at all.
+A Ledger clear-signs a zero-calldata ETH transfer: destination address, amount, network, and fees all render on screen. A *call* to an existing contract has a destination, so the device shows that address, the ETH value, and the fees — but not the decoded arguments, unless a clear-signing descriptor for that contract is loaded. A *contract creation* has no destination at all: the device shows creation bytecode with the constructor arguments appended, and there is no address to compare against anything. Blind signing must be enabled in the Ethereum app's settings for any of these to be possible at all.
 
 | Action | Command | Calldata | On device |
 | --- | --- | --- | --- |
 | Fund via transfer | `npm run fund:ledger` | none | Clear-signed: pool address and amount |
-| Fund via calldata | `FUND_VIA_TRANSFER=0 npm run fund:ledger` | `fund()` | Blind-signed; value is shown |
-| Claim to self | `npm run claim:ledger` | `claim()` | Blind-signed; value `0` |
-| Claim redirected | `RECIPIENT=0x... npm run claim:ledger` | `claimTo(address)` | Blind-signed; value `0`; recipient not shown |
-| Refund to self | `npm run refund:ledger` | `refund()` | Blind-signed; value `0` |
-| Refund redirected | `RECIPIENT=0x... npm run refund:ledger` | `refundTo(address)` | Blind-signed; value `0`; recipient not shown |
-| Request exit | `npm run request-exit:ledger` | `requestExit(uint256)` | Blind-signed; value is the fee |
-| Commit predeposit | `npm run commit-predeposit:ledger` | `commitAndPredeposit(...)` | Blind-signed; value `1 ETH` |
-| Open funding attempt | `npm run open-funding-attempt:ledger` | `openFundingAttempt(address[],uint256[])` | Blind-signed; value `0` |
-| Top up | `npm run top-up:ledger` | `topUpValidator()` | Blind-signed; value `0` |
-| Close expired attempt | `npm run close-expired-funding-attempt:ledger` | `closeExpiredFundingAttempt()` | Blind-signed; value `0` |
-| Sweep forwarder | `npm run sweep:ledger` | `sweep()` | Blind-signed; value `0` |
+| Fund via calldata | `FUND_VIA_TRANSFER=0 npm run fund:ledger` | `fund()` | Blind-signed; destination and value shown |
+| Claim to self | `npm run claim:ledger` | `claim()` | Blind-signed; destination shown; value `0` |
+| Claim redirected | `RECIPIENT=0x... npm run claim:ledger` | `claimTo(address)` | Blind-signed; destination shown; value `0`; recipient not shown |
+| Refund to self | `npm run refund:ledger` | `refund()` | Blind-signed; destination shown; value `0` |
+| Refund redirected | `RECIPIENT=0x... npm run refund:ledger` | `refundTo(address)` | Blind-signed; destination shown; value `0`; recipient not shown |
+| Request exit | `npm run request-exit:ledger` | `requestExit(uint256)` | Blind-signed; destination shown; value is `MAX_FEE_WEI`, the maximum fee sent, not the fee charged |
+| Commit predeposit | `npm run commit-predeposit:ledger` | `commitAndPredeposit(...)` | Blind-signed; destination shown; value `1 ETH` |
+| Open funding attempt | `npm run open-funding-attempt:ledger` | `openFundingAttempt(address[],uint256[])` | Blind-signed; destination shown; value `0` |
+| Top up | `npm run top-up:ledger` | `topUpValidator()` | Blind-signed; destination shown; value `0` |
+| Close expired attempt | `npm run close-expired-funding-attempt:ledger` | `closeExpiredFundingAttempt()` | Blind-signed; destination shown; value `0` |
+| Sweep forwarder | `npm run sweep:ledger` | `sweep()` | Blind-signed; destination shown; value `0` |
+| Deploy pool | `npm run deploy:ledger` | contract creation | Blind-signed; **no destination address exists**; creation bytecode plus constructor args; value `0` |
+| Deploy forwarder | `npm run deploy-forwarder:ledger` | contract creation | Blind-signed; **no destination address exists**; creation bytecode plus constructor args; value `0` |
 
 Funding is the only action with a clear-signed path, and it is the action that moves the most ETH. Everything else is blind-signed today.
+
+The `request-exit` value deserves the extra words in the table. `MAX_FEE_WEI` is a ceiling the caller sets, not a payment: `requestExit(uint256)` reads the live EIP-7002 fee, reverts if it exceeds the cap, forwards exactly the live fee to the predeploy, and refunds the difference to the caller in the same transaction (`ValidatorFundingPool.requestExit`). The device shows what is sent, which is the ceiling.
+
+The two deployment rows are the weakest position on this list. A creation transaction gives the device nothing checkable: no destination, no decodable arguments, just a bytecode blob. You cannot verify a deployment on the device, so verify it after. Before publishing the pool address to anyone, independently confirm that the deployed runtime bytecode and the immutables baked into it match the build you intended — read `depositContract`, `withdrawalRequestPredeploy`, `operator`, `fundingWindowDuration`, and `withdrawalCredentials` back from the chain, compare the runtime code hash against a local build, and verify the source on Sourcify (`clear-signing/README.md` requires Sourcify verification anyway for registry submission). `npm run deploy` writes all five immutables into the deployment record, and every later script re-reads them from the live pool and refuses on a mismatch — but that only detects a deployment record that drifted from the pool, not a pool that was wrong from the first block.
 
 ### The `claimTo` And `refundTo` Wart
 
@@ -398,7 +416,7 @@ Participants fund, then the operator submits the top-up:
 ```bash
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run fund
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run top-up
-RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
+RPC_URL=http://localhost:8545 npm run status
 ```
 
 Optionally deploy the EL-rewards sidecar after top-up, configure the validator client's `fee_recipient` to the printed forwarder address, and sweep accumulated rewards permissionlessly:
@@ -415,7 +433,7 @@ RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run close-expired-funding-at
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run refund
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run claim
 RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run request-exit
-RPC_URL=http://localhost:8545 PRIVATE_KEY=0x... npm run status
+RPC_URL=http://localhost:8545 npm run status
 ```
 
 The `PRIVATE_KEY=0x...` shown above is the development form. On mainnet, drop it and use `npm run <action>:ledger` with `LEDGER_ADDRESS` set, or store `RPC_URL` and `PRIVATE_KEY` in the encrypted keystore. See "Signing And Key Custody".
