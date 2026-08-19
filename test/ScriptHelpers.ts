@@ -26,11 +26,20 @@ interface FakeReceipt {
   contractAddress?: Address | null;
 }
 
+/// Mirrors `ObservedTransaction`: the four fields every transaction carries plus every
+/// non-fee semantic field viem's per-type transaction variants add
+/// (`node_modules/viem/_types/types/transaction.d.ts` lines 84-129, viem 2.49.3). Each of
+/// the optional ones is absent on the types that do not have it, which is what makes
+/// absent-versus-present a case the policy has to decide.
 interface FakeTransaction {
   hash: Hex;
   to: Address | null;
   value: bigint;
   input: Hex;
+  type?: string;
+  accessList?: readonly { address: Address; storageKeys: readonly Hex[] }[];
+  blobVersionedHashes?: readonly Hex[];
+  authorizationList?: readonly { address: Address; chainId: number; nonce: number; r: Hex; s: Hex; yParity: number }[];
 }
 
 interface FakeReplacement {
@@ -64,7 +73,15 @@ function fakeClient(receipt: FakeReceipt, replacement?: FakeReplacement) {
 }
 
 function sentTransaction(overrides: Partial<FakeTransaction> = {}): FakeTransaction {
-  return { hash: HASH, to: POOL, value: 1_000n, input: "0xdeadbeef", ...overrides };
+  return {
+    hash: HASH,
+    to: POOL,
+    value: 1_000n,
+    input: "0xdeadbeef",
+    type: "eip1559",
+    accessList: [],
+    ...overrides,
+  };
 }
 
 function replacementOf(
@@ -209,7 +226,7 @@ describe("waitForSenderVerifiedReceipt", function () {
 
     await assert.rejects(
       waitForSenderVerifiedReceipt(client, HASH, SIGNER, "sweep"),
-      /FATAL REPLACED TRANSACTION: sweep transaction .* reason "replaced", different destination, value, or calldata/,
+      /FATAL REPLACED TRANSACTION: sweep transaction .* reason "replaced", differing semantic fields: to, value, input/,
     );
   });
 
@@ -217,11 +234,11 @@ describe("waitForSenderVerifiedReceipt", function () {
     // viem only labels a replacement `repriced` when to, value, and input all match
     // (`waitForTransactionReceipt.js` lines 171-176). The policy re-derives that rather
     // than trusting the label, so a wrong label cannot buy a success line.
-    for (const changed of [
-      { to: OTHER_SIGNER },
-      { value: 999n },
-      { input: "0xbeefdead" as Hex },
-    ]) {
+    for (const [changed, field] of [
+      [{ to: OTHER_SIGNER }, "to"],
+      [{ value: 999n }, "value"],
+      [{ input: "0xbeefdead" as Hex }, "input"],
+    ] as const) {
       const client = fakeClient(
         { from: SIGNER, blockNumber: 11n, status: "success" },
         replacementOf("repriced", changed),
@@ -229,9 +246,113 @@ describe("waitForSenderVerifiedReceipt", function () {
 
       await assert.rejects(
         waitForSenderVerifiedReceipt(client, HASH, SIGNER, "fund"),
-        /different destination, value, or calldata/,
+        new RegExp(`differing semantic fields: ${field}`),
       );
     }
+  });
+
+  it("is fatal for a reprice that changed a semantic field beyond to, value, and input", async function () {
+    // viem's own `repriced` test is exactly to/value/input
+    // (`waitForTransactionReceipt.js` lines 171-176), so each of these is a substitution
+    // viem itself would label a reprice. The authorization-list case is the sharpest: same
+    // destination, same value, same calldata, and an EIP-7702 delegation of the sending
+    // EOA's own code to an arbitrary contract riding along.
+    const delegation = [
+      {
+        address: OTHER_SIGNER,
+        chainId: 1,
+        nonce: 7,
+        r: `0x${"11".repeat(32)}` as Hex,
+        s: `0x${"22".repeat(32)}` as Hex,
+        yParity: 0,
+      },
+    ];
+    for (const [changed, field] of [
+      [{ type: "eip7702", authorizationList: delegation }, "type, authorizationList"],
+      [{ authorizationList: delegation }, "authorizationList"],
+      [{ type: "legacy" }, "type"],
+      [{ accessList: [{ address: POOL, storageKeys: [`0x${"00".repeat(32)}` as Hex] }] }, "accessList"],
+      [{ accessList: undefined }, "accessList"],
+      [{ blobVersionedHashes: [`0x01${"33".repeat(31)}` as Hex] }, "blobVersionedHashes"],
+    ] as const) {
+      const client = fakeClient(
+        { from: SIGNER, blockNumber: 11n, status: "success" },
+        replacementOf("repriced", changed),
+      );
+
+      await assert.rejects(
+        waitForSenderVerifiedReceipt(client, HASH, SIGNER, "fund"),
+        (error: Error) => {
+          assert.match(error.message, /FATAL REPLACED TRANSACTION/);
+          assert.match(error.message, new RegExp(`differing semantic fields: ${field}$|differing semantic fields: ${field}\\)`));
+          return true;
+        },
+      );
+    }
+  });
+
+  it("accepts a reprice whose semantic fields match structurally, case and order aside", async function () {
+    const accessList = [
+      { address: POOL, storageKeys: [`0x${"ab".repeat(32)}` as Hex] },
+    ];
+    const client = fakeClient(
+      { from: SIGNER, blockNumber: 11n, status: "success" },
+      {
+        reason: "repriced",
+        replacedTransaction: sentTransaction({ accessList }),
+        transaction: sentTransaction({
+          hash: REPLACEMENT_HASH,
+          // Same destination and same access list, differently cased on the wire.
+          to: POOL.toUpperCase().replace("0X", "0x") as Address,
+          input: "0xDEADBEEF",
+          accessList: [
+            {
+              address: POOL.toUpperCase().replace("0X", "0x") as Address,
+              storageKeys: [`0x${"AB".repeat(32)}` as Hex],
+            },
+          ],
+        }),
+      },
+    );
+
+    await assert.doesNotReject(silentlyAsync(() => waitForSenderVerifiedReceipt(client, HASH, SIGNER, "fund")));
+  });
+
+  it("treats an absent optional field as equal only to another absent one", async function () {
+    // A legacy transaction repriced as a legacy transaction: `accessList`,
+    // `blobVersionedHashes`, and `authorizationList` are all absent on both sides.
+    const legacy = {
+      hash: HASH,
+      to: POOL,
+      value: 1_000n,
+      input: "0xdeadbeef" as Hex,
+      type: "legacy",
+    };
+    const client = fakeClient(
+      { from: SIGNER, blockNumber: 11n, status: "success" },
+      {
+        reason: "repriced",
+        replacedTransaction: legacy,
+        transaction: { ...legacy, hash: REPLACEMENT_HASH },
+      },
+    );
+
+    await assert.doesNotReject(silentlyAsync(() => waitForSenderVerifiedReceipt(client, HASH, SIGNER, "fund")));
+
+    // An empty access list is PRESENT, and present never equals absent.
+    const withEmptyList = fakeClient(
+      { from: SIGNER, blockNumber: 11n, status: "success" },
+      {
+        reason: "repriced",
+        replacedTransaction: legacy,
+        transaction: { ...legacy, hash: REPLACEMENT_HASH, accessList: [] },
+      },
+    );
+
+    await assert.rejects(
+      waitForSenderVerifiedReceipt(withEmptyList, HASH, SIGNER, "fund"),
+      /differing semantic fields: accessList/,
+    );
   });
 
   it("is fatal when an accepted reprice reverted", async function () {

@@ -9,9 +9,12 @@ import {
   formatEther,
   isAddress,
   keccak256,
+  type AccessList,
   type Address,
   type Hex,
   type PublicClient,
+  type SignedAuthorizationList,
+  type TransactionType,
 } from "viem";
 
 export const DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY: Address =
@@ -214,11 +217,33 @@ interface SenderVerifiedReceipt {
 
 /// The transaction fields the replacement policy compares. A subset of viem's
 /// `Transaction`, so a real client's `onReplaced` payload satisfies it structurally.
+///
+/// It is EVERY non-fee semantic field viem's transaction objects carry, at the locked viem
+/// 2.49.3 (`node_modules/viem/_types/types/transaction.d.ts`). `TransactionBase` (lines
+/// 51-83) contributes `to`, `value`, and `input`; the five per-type variants (lines 84-129,
+/// unioned into `Transaction` at line 130) each add `type` and exactly three further
+/// semantic fields, present on some types and `?: undefined` on the rest — `accessList`
+/// (eip2930, eip1559, eip4844, eip7702), `blobVersionedHashes` (eip4844), and
+/// `authorizationList` (eip7702, `SignedAuthorizationList` from
+/// `types/authorization.d.ts`).
+///
+/// Everything on those types that is NOT compared is one of: a fee value (`gas`,
+/// `gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `maxFeePerBlobGas`, from the
+/// `FeeValues*` mixins), a signature (`r`, `s`, `v`, `yParity`), inclusion metadata
+/// (`blockHash`, `blockNumber`, `blockTimestamp`, `transactionIndex`, `hash`), the nonce
+/// (identical by definition — a replacement is a same-nonce transaction), `typeHex` (the
+/// hex spelling of `type`), or `chainId` (the chain this client is watching, identical for
+/// both transactions by construction). A reprice may change the fee values and, through
+/// them, the signature and the hash. It may change nothing else.
 interface ObservedTransaction {
   hash: Hex;
   to: Address | null;
   value: bigint;
   input: Hex;
+  type?: TransactionType | undefined;
+  accessList?: AccessList | undefined;
+  blobVersionedHashes?: readonly Hex[] | undefined;
+  authorizationList?: SignedAuthorizationList | undefined;
 }
 
 /// The `onReplaced` payload, narrowed to what the policy below decides on.
@@ -322,9 +347,11 @@ export function assertActiveSigner(
 ///      fetched at line 163, `onReplaced` is invoked at line 182 and the promise resolves
 ///      with that same receipt at line 188). Without capturing the callback, the resolved
 ///      receipt silently describes a different transaction than the one this script
-///      signed. Only a reprice is acceptable: same destination, same value, same calldata,
-///      higher fee. A `cancelled` or `replaced` transaction did something else with the
-///      nonce, and the intended transaction never happened.
+///      signed. Only a reprice is acceptable, and a reprice means every non-fee semantic
+///      field is unchanged — destination, value, calldata, transaction type, access list,
+///      blob hashes, authorization list — with only the fee, and therefore the signature
+///      and the hash, different. A `cancelled` or `replaced` transaction did something else
+///      with the nonce, and the intended transaction never happened.
 ///   3. The status. A reverted transaction has a receipt, a block number, and the right
 ///      sender. Nothing below this line may report success for one.
 ///
@@ -381,23 +408,26 @@ export async function waitForSenderVerifiedReceipt<T extends SenderVerifiedRecei
 /// viem classifies the reason itself and only calls a replacement `repriced` when `to`,
 /// `value`, and `input` all match the replaced transaction
 /// (`waitForTransactionReceipt.js` lines 171-176). The content comparison is repeated here
-/// rather than trusted: this is the check that decides whether a success line may be
-/// printed, and it should not depend on a classification made elsewhere.
+/// rather than trusted, and it is deliberately WIDER than viem's: every non-fee semantic
+/// field of `ObservedTransaction` must match, not just those three. viem's three leave a
+/// same-to/value/input transaction free to change its `type`, attach an access list, or —
+/// the one that redirects authority rather than ETH — carry an EIP-7702
+/// `authorizationList` that delegates the sending EOA's code to an arbitrary contract.
+/// viem would still label that "repriced". This is the check that decides whether a success
+/// line may be printed, and it should not depend on a classification made elsewhere.
 function assertAcceptableReplacement(
   replacement: ObservedReplacement,
   hash: Hex,
   label: string,
 ) {
   const { reason, replacedTransaction, transaction } = replacement;
-  const sameContent =
-    sameAddress(transaction.to, replacedTransaction.to) &&
-    transaction.value === replacedTransaction.value &&
-    transaction.input.toLowerCase() === replacedTransaction.input.toLowerCase();
+  const differing = differingSemanticFields(replacedTransaction, transaction);
 
-  if (reason === "repriced" && sameContent) {
+  if (reason === "repriced" && differing.length === 0) {
     console.log(
       `${label} transaction ${hash} was repriced and mined as ${transaction.hash} with ` +
-        `identical destination, value, and calldata`,
+        `identical destination, value, calldata, transaction type, access list, blob hashes, ` +
+        `and authorization list`,
     );
     return;
   }
@@ -405,12 +435,60 @@ function assertAcceptableReplacement(
   throw new Error(
     `FATAL REPLACED TRANSACTION: ${label} transaction ${hash} never landed. A different ` +
       `transaction at the same nonce from the same sender was mined instead ` +
-      `(${transaction.hash}, reason "${reason}"${sameContent ? "" : ", different destination, value, or calldata"}): ` +
+      `(${transaction.hash}, reason "${reason}"` +
+      `${differing.length === 0 ? "" : `, differing semantic fields: ${differing.join(", ")}`}): ` +
       `to=${transaction.to ?? "<none>"} value=${transaction.value} instead of ` +
       `to=${replacedTransaction.to ?? "<none>"} value=${replacedTransaction.value}. ` +
       `What this script intended did NOT happen, and something else did. Run "npm run status", ` +
       `reconcile pool state against the mined transaction, and only then decide whether to re-run ${label}`,
   );
+}
+
+/// Names every non-fee semantic field on which the two transactions disagree. An absent
+/// field equals an absent field; absent against present is a difference, so a legacy
+/// transaction replaced by an eip7702 one carrying an authorization list is reported on
+/// both `type` and `authorizationList`.
+function differingSemanticFields(
+  replaced: ObservedTransaction,
+  mined: ObservedTransaction,
+): string[] {
+  const differing: string[] = [];
+  if (!sameAddress(mined.to, replaced.to)) differing.push("to");
+  if (mined.value !== replaced.value) differing.push("value");
+  if (mined.input.toLowerCase() !== replaced.input.toLowerCase()) differing.push("input");
+  if (!sameOptionalStructure(mined.type, replaced.type)) differing.push("type");
+  if (!sameOptionalStructure(mined.accessList, replaced.accessList)) differing.push("accessList");
+  if (!sameOptionalStructure(mined.blobVersionedHashes, replaced.blobVersionedHashes)) {
+    differing.push("blobVersionedHashes");
+  }
+  if (!sameOptionalStructure(mined.authorizationList, replaced.authorizationList)) {
+    differing.push("authorizationList");
+  }
+  return differing;
+}
+
+function sameOptionalStructure(left: unknown, right: unknown): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return canonicalStructure(left) === canonicalStructure(right);
+}
+
+/// Deep structural equality by canonical rendering. Hex-bearing fields (addresses, storage
+/// keys, blob hashes, authorization signature components) arrive with no guaranteed case, so
+/// every string is compared case-insensitively; bigints are tagged so `1n` never equals
+/// `"1"`; object keys are sorted and explicitly-undefined entries dropped so that key order
+/// and an absent-versus-undefined property do not read as a difference.
+function canonicalStructure(value: unknown): string {
+  if (typeof value === "bigint") return `bigint:${value}`;
+  if (typeof value === "string") return `string:${value.toLowerCase()}`;
+  if (Array.isArray(value)) return `[${value.map(canonicalStructure).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => `${key}:${canonicalStructure(entry)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return `${typeof value}:${String(value)}`;
 }
 
 function sameAddress(left: Address | null, right: Address | null): boolean {
