@@ -26,9 +26,10 @@
     "@chainsafe/blst": "^2.2.0",
     "@lodestar/params": "^1.43.0",
     "@lodestar/types": "^1.43.0",
+    "@nomicfoundation/hardhat-ledger": "^3.0.10",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",
     "@types/node": "^22.18.0",
-    "hardhat": "^3.0.4",
+    "hardhat": "^3.8.0",
     "typescript": "~5.8.0",
     "viem": "^2.37.2"
   }
