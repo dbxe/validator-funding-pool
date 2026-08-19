@@ -1178,6 +1178,13 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     // passes — and the run would deploy a SECOND forwarder and overwrite the record naming
     // the declared one. The validator client's fee_recipient still points at the old address,
     // so the rewards would keep arriving somewhere the record no longer mentions.
+    const nonceBefore = await chain.publicClient.getTransactionCount({
+      address: operator.address,
+      // `pending`, not `latest`: a transaction that was broadcast and is merely unmined must
+      // count as broadcast.
+      blockTag: "pending",
+    });
+
     const result = expectFailure(
       await runCommand({
         script: "deploy-forwarder",
@@ -1194,6 +1201,18 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     // Refused from the environment, before the record is read or anything is sent.
     assertOutputLacks(result, `Deployment record: ${deploymentFile}`);
     assertOutputLacks(result, "Fee recipient forwarder deployed:");
+    // And the statement the absent lines only imply: the deployer's nonce is unchanged, so no
+    // transaction of any kind left this run. Missing output is consistent with a deployment
+    // that broadcast and then failed to print; an unmoved nonce is not. This is the guard
+    // whose whole claim is that nothing is left deployed and unrecorded, so the claim is
+    // checked against the chain rather than against the log.
+    assert.equal(
+      await chain.publicClient.getTransactionCount({
+        address: operator.address,
+        blockTag: "pending",
+      }),
+      nonceBefore,
+    );
     const record = JSON.parse(readFileSync(deploymentFile, "utf8")) as DeploymentRecord;
     assert.equal(record.feeRecipientForwarder, forwarder);
   });
@@ -1278,9 +1297,23 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         participant.address.toLowerCase(),
     );
     assertOutputContains(result, "A Ledger will NOT render it");
+    // Pre-BROADCAST, not merely pre-success-line. The fee preview is the last thing printed
+    // before the write call is made, so a notice above it is a notice the operator has while
+    // the recipient is still a decision. Asserting only against "Claimed to ... in block"
+    // would pass for a notice printed after the transaction was already composed and sent.
+    assertOutputOrder(
+      result,
+      `CLAIM IS REDIRECTED: EVERY WEI GOES TO ${outsider.address}`,
+      "claim fees, as this endpoint suggests them",
+    );
     assertOutputOrder(
       result,
       `claim recipient: ${outsider.address}`,
+      "claim fees, as this endpoint suggests them",
+    );
+    assertOutputOrder(
+      result,
+      "claim fees, as this endpoint suggests them",
       `Claimed to ${outsider.address} in block `,
     );
     // And the mined receipt's own Claimed event, where `recipient` is a topic, is the next
@@ -1310,9 +1343,15 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         "recipient address goes into calldata",
     );
     assertOutputLacks(result, "CLAIM IS REDIRECTED");
+    // The other branch of `printPayoutRecipient`, held to the same pre-broadcast boundary.
     assertOutputOrder(
       result,
       `claim recipient: ${operator.address.toLowerCase()}`,
+      "claim fees, as this endpoint suggests them",
+    );
+    assertOutputOrder(
+      result,
+      "claim fees, as this endpoint suggests them",
       `Claimed to ${operator.address.toLowerCase()} in block `,
     );
     assertOutputContains(
@@ -1699,9 +1738,21 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         operator.address.toLowerCase(),
     );
     assertOutputContains(result, "A Ledger will NOT render it");
+    // See the claim case: the fee preview is the last line before the write call, so it is
+    // what "pre-broadcast" has to be measured against.
+    assertOutputOrder(
+      result,
+      `REFUND IS REDIRECTED: EVERY WEI GOES TO ${outsider.address}`,
+      "refund fees, as this endpoint suggests them",
+    );
     assertOutputOrder(
       result,
       `refund recipient: ${outsider.address}`,
+      "refund fees, as this endpoint suggests them",
+    );
+    assertOutputOrder(
+      result,
+      "refund fees, as this endpoint suggests them",
       `Refunded to ${outsider.address} in block `,
     );
     assertOutputContains(
