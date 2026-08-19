@@ -2227,12 +2227,27 @@ function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight
   console.log(`${label} validator withdrawable epoch: ${validator.validator.withdrawable_epoch}`);
 }
 
-export function readDepositDataFile(file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE): DepositData[] {
+export function depositDataPath(): string {
+  return process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE;
+}
+
+/// Reads the deposit-data file, announcing which file it came from.
+///
+/// The path is printed BEFORE the file is opened and it is printed unconditionally, exactly
+/// as `readDeployment` announces the record. These are the two environment variables that
+/// select the SUBJECT of the checks rather than waiving one: `DEPLOYMENT_FILE` chooses which
+/// pool every check is about, and `DEPOSIT_DATA_FILE` chooses which validator. The file
+/// supplies the pubkey `commit-predeposit` commits FOREVER, and the pubkey `fund` and
+/// `top-up` require the on-chain commitment to equal — so a run against the wrong file is a
+/// run about the wrong validator, and every check still reports a clean pass. An operator who
+/// cannot see which file a command opened cannot tell the two apart.
+export function readDepositDataFile(file = depositDataPath()): DepositData[] {
+  console.log(`Deposit data file: ${file}`);
   return JSON.parse(readFileSync(file, "utf8")) as DepositData[];
 }
 
 export function readPredepositAndTopUpDepositData(
-  file = process.env.DEPOSIT_DATA_FILE ?? DEFAULT_DEPOSIT_DATA_FILE,
+  file = depositDataPath(),
 ): { predeposit: DepositData; topUp: DepositData } {
   const deposits = readDepositDataFile(file);
   const predeposit = deposits.find((deposit) => BigInt(deposit.amount) === PREDEPOSIT_GWEI);

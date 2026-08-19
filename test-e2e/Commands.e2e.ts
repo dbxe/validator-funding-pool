@@ -273,6 +273,9 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
 
     assertActiveSignerPrinted(result, "commit-predeposit", operator.address.toLowerCase());
     assertOutputContains(result, `Deployment record: ${deploymentFile}`);
+    // The other variable that selects a subject rather than waiving a check. This command
+    // commits whatever pubkey that file names, forever, so the file is named in the output.
+    assertOutputContains(result, `Deposit data file: ${depositDataFile}`);
     assertOutputContains(
       result,
       "commit-predeposit beacon preflight passed: the head state validator list is empty for this pubkey",
@@ -534,6 +537,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
 
     assertActiveSignerPrinted(result, "fund", participant.address.toLowerCase());
+    assertOutputContains(result, `Deposit data file: ${depositDataFile}`);
     assertOutputContains(
       result,
       `Funding ${pool} from ${participant.address.toLowerCase()}: ${TARGET_WEI} wei (16 ETH) via fund() calldata`,
@@ -705,6 +709,9 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       }),
     );
 
+    // The printed path is what makes this diagnosable: the failure names two pubkeys, and the
+    // line above it names the file the second one came from.
+    assertOutputContains(result, `Deposit data file: ${otherValidatorFile}`);
     assertReadableFailure(
       result,
       "top-up",
@@ -722,6 +729,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     const result = expectSuccess(await runCommand({ script: "top-up", env: asOperator() }));
 
     assertActiveSignerPrinted(result, "top-up", operator.address.toLowerCase());
+    assertOutputContains(result, `Deposit data file: ${depositDataFile}`);
     assertOutputContains(result, `Submitting 31 ETH top-up through ${pool}`);
     assertOutputContains(result, `Validator pubkey: ${deposits.pubkey}`);
     assertOutputContains(result, "top-up head beacon fresh-predeposit preflight passed");
