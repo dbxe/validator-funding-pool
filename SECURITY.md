@@ -1,0 +1,142 @@
+# Security Model
+
+This document is written for a reader with no history with this project, including a future auditor. Every claim below either names the file and function that enforces it or points at a documented section. Read it with the code open. If the operator and the participants use the supported commands as documented, the guarantees stated here hold; where a guarantee is weaker than it looks, this document says so rather than rounding up.
+
+Nothing here is a promise about the contract's correctness. The contract is the audited artifact; this document describes the system built around it.
+
+## 1. System model
+
+Four components, with different trust properties.
+
+**The contract.** `contracts/ValidatorFundingPool.sol`, and the optional sidecar `contracts/FeeRecipientForwarder.sol`. Frozen and audited. Its invariants are ground truth: a claim about custody or accounting that the contract does not enforce is not enforced by this system, no matter what a script checks. The contract exposes no upgrade path, no owner rescue, no arbitrary external call, no delegatecall, and no way to change `withdrawalCredentials`, which is `immutable` and set in the constructor to `_makeEth1WithdrawalCredentials(address(this))`.
+
+**The operational scripts.** `scripts/*.ts` and `scripts/lib/common.ts`, invoked through the `npm run` entries in `package.json`. These are the supported path. They enforce cross-layer preconditions the contract cannot see — beacon state, chain identity, deposit-data validity, signer identity — and they fail closed. They are not a security boundary against their own caller: anything a script checks, a person can skip by calling the contract directly. What they buy is that the documented workflow cannot reach a bad state by accident.
+
+**The endpoints.** An execution-layer JSON-RPC endpoint (`RPC_URL`) and a beacon REST endpoint (`BEACON_NODE_URL`). Both are read over the network and neither is authenticated. Free public tiers are sufficient; see §4.
+
+**The operator's machine.** The host running the scripts. Trusted. See §2, "The script host".
+
+## 2. Trust model
+
+### The operator
+
+The operator is trusted to generate fresh validator key material, supply valid deposit data, pay the 1 ETH predeposit, open funding attempts with the agreed participants and weights, submit the top-up, run the validator, and configure `fee_recipient` as agreed. Those are documented trust boundaries, not enforced properties; see "Trust Boundaries" in `README.md`.
+
+**The operator can grief liveness.** They can decline to open a funding attempt, decline to call `topUpValidator()`, misoperate or abandon the validator, get slashed, and keep EL priority fees and MEV by pointing `fee_recipient` anywhere they like. `topUpValidator()` carries `onlyOperator`; no one else can complete an attempt.
+
+**The operator cannot redirect participant principal.** Four contract mechanisms, together:
+
+- Withdrawal credentials are `immutable` and point at the pool (constructor, `_makeEth1WithdrawalCredentials`). Every consensus withdrawal, partial or full, pays the pool. Ethereum consensus writes withdrawal credentials once, at validator creation, and a later deposit for an existing pubkey only increases balance — see the spec links in "Trust And Incentives" in `README.md`.
+- Refunds do not require the operator. `closeExpiredFundingAttempt()` has no access modifier and can be called by anyone once `block.timestamp > fundingDeadline`; it moves each participant's `activeFundedWeiOf` into `refundableWeiOf`. `refund()` / `refundTo(address payable)` then pay `msg.sender`'s balance to a recipient `msg.sender` chose.
+- Claims do not require the operator. `claim()` / `claimTo(address payable)` pay `claimable(msg.sender)`, computed from `creditedWeiOf` fixed at top-up.
+- Exits do not require the operator after top-up. `requestExit(uint256)` admits any address for which `_canRequestExit` is true, which is the operator **or** any address with nonzero `creditedWeiOf`.
+
+The operator also cannot dilute a participant's share after the fact: `creditedWeiOf` is written once inside `topUpValidator()` from `fundingTargetWeiOf`, and the function reverts `FundingTargetsDoNotMatchValidator` unless `totalCreditedWei` is exactly 32 ETH.
+
+### Participants
+
+Participants are trusted with nothing beyond their own funds. `_fund` reverts `NotParticipant` for an address not in the current attempt and `FundingCapExceeded` above that address's remaining allocation, on both the `fund()` and the plain-transfer path. A participant's only griefing surface against others is the post-top-up transfer window described in "Plain-Transfer Funding — The One Divergence" in `README.md`, which costs the sender more than it costs anyone else.
+
+Participants are expected to verify before funding rather than to trust the operator's word; the list is in "Participant Verification" in `README.md`, and `scripts/fund.ts` performs the same checks against the live pool.
+
+### Third parties
+
+Anyone may deposit to the committed validator pubkey through the deposit contract, permissionlessly. This is a property of Ethereum, not of this pool.
+
+- **Cost of the griefing.** One deposit, minimum 1 ETH — the deposit contract requires `msg.value >= 1 ether` (consensus-specs `solidity_deposit_contract/deposit_contract.sol`, matching `MIN_DEPOSIT_AMOUNT` in `presets/mainnet/phase0.yaml`). That is the whole price of raising the head balance above the predeposit.
+- **Custody impact: none.** The deposit cannot change withdrawal credentials, so the ETH is withdrawable only to the pool. It is uncredited external capital: the pool distributes it pro rata to its own participants and never back to the depositor.
+- **Operational impact.** It forces an interactive typed confirmation on every subsequent `fund` and `top-up`; see §3 and "Hard Failure On Excess Predeposit Balance" in `README.md`. A deposit of 31 ETH or more takes the validator to a 32 ETH effective balance, which makes it eligible for the activation queue (`is_eligible_for_activation_queue` in consensus-specs `specs/electra/beacon-chain.md`, `MIN_ACTIVATION_BALANCE` = 32 ETH in `presets/mainnet/electra.yaml`) and sets `activation_eligibility_epoch`. From that point the fresh-predeposit preflight fails permanently; see §5.
+
+### Infrastructure: the EL RPC and the beacon endpoint
+
+Neither endpoint is authenticated. This is stated in the code: `assertBeaconMatchesExecutionChain` in `scripts/lib/common.ts` closes with the comment that it catches endpoint misconfiguration and does not authenticate a dishonest beacon node.
+
+**What a wrong or malicious beacon endpoint can cause.** It can lie about validator state and thereby defeat every beacon-derived check at once: it can claim the pool's credentials on a validator that has different ones, claim a fresh predeposit for a validator that is slashed or exiting, or report a plain 1 ETH balance for a validator that has more. Participants who fund on the strength of such a lie can lose principal to a validator that is not bound to the pool. There is no cryptographic defence against this in-repo; the defence is to point `BEACON_NODE_URL` at an endpoint you control or trust, and — since the deposit data and beacon state are public — to have more than one participant check independently.
+
+**What it cannot cause.** It cannot move ETH. Custody follows the withdrawal credentials written on the beacon chain at validator creation, not what an API says about them. A lying endpoint can induce a bad decision; it cannot execute one.
+
+**What the layered checks do buy.** They make an *inconsistent* or *misconfigured* endpoint fail closed rather than pass silently:
+
+- Chain binding. `assertBeaconMatchesExecutionChain` requires the beacon node's `/eth/v1/config/deposit_contract` to report the deployment's `chainId` and the pool's own `depositContract` address. A beacon endpoint for the wrong network is fatal before any state is read.
+- Two-state confirmation. Credentials are confirmed at a settled state and re-confirmed at head, from separate requests; see §3. `confirmationStateId` rejects any `BEACON_CONFIRMATION_STATE_ID` other than `finalized` or `justified`, so the two reads cannot be collapsed into one head read.
+- Node health. `assertBeaconNodeHealthy` refuses a syncing node, an optimistic node, and a node reporting `el_offline`.
+- Shape validation. `assertBeaconValidatorResponseShape` and `assertBeaconSyncingResponseShape` validate every field the preflights decide on, at the parse boundary, and any violation is fatal and names the field. `slashed` must be exactly `true` or `false` — a missing or null value is never read as unslashed. Numeric fields must be canonical unsigned decimal strings within uint64 (`parseBeaconUint64`), which rejects the hex, sign-prefixed, and whitespace-padded forms `BigInt` would otherwise have accepted.
+
+**A wrong EL RPC** can misreport pool state, but every transaction is still bounded by the contract's own reverts, and `assertDeploymentIntegrity` re-derives all five pool immutables and both system-contract code hashes from the chain the transaction will actually execute on, then pins mainnet's system contracts against constants derived independently of any RPC (`CANONICAL_SYSTEM_CONTRACTS` in `scripts/lib/common.ts`, with re-derivation instructions in the comment above it).
+
+### The script host
+
+**Trusted.** A compromised host defeats everything below the contract, and specifically defeats blind-signed calldata: the machine composes the transaction the device is asked to sign, and on a blind-signed transaction the device renders nothing the operator can compare against intent.
+
+The sharpest instance is documented as a wart rather than a solved problem: `claimTo(address)` and `refundTo(address)` take the payout address as an ABI argument, so the device shows the pool as destination and `0` as value while the address that receives every wei sits in calldata the device does not render. See "The `claimTo` And `refundTo` Wart" in `README.md` for the mitigation ladder — prefer the no-argument `claim()` / `refund()`, which always pay `msg.sender`; `scripts/claim.ts` and `scripts/refund.ts` select them whenever `RECIPIENT` is unset or equals the signing account.
+
+A hardware wallet still helps against a compromised host on the one path that clear-signs: a zero-calldata transfer renders destination and amount, and `fundViaPlainTransfer` in `scripts/fund.ts` defaults to that path whenever the connection signs with a Ledger. Everything else in this repository is blind-signed today; the full table is "What The Device Actually Shows" in `README.md`.
+
+## 3. Enforced invariants
+
+| Invariant | Enforced in | Mechanism | Failure behaviour |
+| --- | --- | --- | --- |
+| Beacon confirmation is mandatory on every capital path | Script preflight | `requireBeaconNodeUrl` reached from `assertBeaconValidatorAbsent` (`commit-predeposit`), `assertBeaconValidatorReadyForFunding` (`fund`), `assertBeaconValidatorReadyForTopUp` (`top-up`), all in `scripts/lib/common.ts` | Fatal error; no environment variable waives it |
+| Beacon endpoint is bound to the execution chain and the pool's deposit contract | Script preflight | `assertBeaconMatchesExecutionChain` | Fatal error |
+| Credentials are confirmed at a settled state **and** re-confirmed at head | Script preflight | `assertBeaconValidatorHasWithdrawalCredentialsAtUrl` at `confirmationStateId(label)`, then `assertFreshPredepositHeadState` at `head`; both call `assertBeaconValidatorWithdrawalCredentials` | Fatal error |
+| The settled state cannot be `head` | Script preflight | `confirmationStateId` allows only `finalized` and `justified` | Fatal error |
+| Head state shows a fresh predeposit: unslashed, all four epochs `FAR_FUTURE_EPOCH`, balance at least 1 ETH | Script preflight | `assertFreshPredepositMutableState` | Fatal error |
+| Beacon fields the preflight decides on have the right runtime shape | Script preflight | `assertBeaconValidatorResponseShape`, `assertBeaconSyncingResponseShape`, `parseBeaconUint64`, `requireBeaconBoolean`, `requireBeaconHex` | Fatal error naming the field |
+| A head balance above 1 ETH is confirmed by a human, and confirmed against state that is still current | Script preflight | `confirmExcessBalance` requires a TTY and the exact balance typed back; `assertBeaconValidatorIsFreshPredeposit` then re-runs the whole head preflight from a fresh fetch and requires the fresh balance to equal the confirmed value | Interactive typed confirmation; fatal on non-TTY, wrong answer, or any divergence at the re-read |
+| Deposit data is valid for this chain: root recomputes, BLS signature verifies, fork version matches the beacon genesis fork version | Script preflight | `validateDepositData` against `readBeaconGenesisForkVersion` | Fatal error |
+| The local deposit-data file matches the on-chain commitment before any ETH is sent | Script preflight | `scripts/fund.ts` compares `committedPubkey`, `predepositDataRoot`, `topUpDepositDataRoot`, `predepositSignature`, `topUpSignature` | Fatal error |
+| The deployment record, the live pool, and the chain agree on all five immutables and both system-contract code hashes | Script preflight | `assertDeploymentIntegrity` → `assertDeploymentChain`, `assertDeploymentMatchesPool`, `assertDeploymentSystemCodeHashes` | Fatal error |
+| On mainnet, system contracts are canonical, not merely self-consistent | Script preflight | `assertDeploymentCanonicity` against `CANONICAL_SYSTEM_CONTRACTS` | Fatal error on mainnet; explicit warning on an unrecognised chain |
+| The active signer is the intended one, and is printed before the first transaction | Script preflight | `assertActiveSigner` — prints on every network, and on a Ledger-signing connection requires the active address to equal `LEDGER_ADDRESS` | Fatal error before signing |
+| The mined transaction was sent by the intended signer | Script post-check | `waitForSenderVerifiedReceipt` compares `receipt.from` | Fatal error **after** the transaction is on chain — detection, not prevention |
+| A deployment landed at the address the script recorded | Script post-check | `assertDeployedAt` against `receipt.contractAddress` | Fatal error |
+| Withdrawal credentials are pool-owned and cannot change | Contract | `withdrawalCredentials` is `immutable`, set in the constructor via `_makeEth1WithdrawalCredentials(address(this))` | Not expressible; no code path writes it |
+| The predeposit is exactly 1 ETH and only the operator sends it | Contract | `commitAndPredeposit` — `onlyOperator`, `msg.value != PREDEPOSIT_WEI` reverts `InvalidPredepositValue` | Revert |
+| Funding targets sum to exactly 32 ETH and include the operator with at least 1 ETH | Contract | `_setFundingAttempt` — reverts `FundingTargetsDoNotMatchValidator`, `OperatorTargetTooSmall`, `DuplicateParticipant`, `InvalidParticipant` | Revert |
+| No participant funds beyond their allocation, on either path | Contract | `_fund` — reverts `NotParticipant`, `FundingCapExceeded`, `FundingClosed`, `InvalidState`; `receive()` routes to the same `_fund` | Revert |
+| The top-up is exactly 31 ETH, fully funded, before the deadline, and once only | Contract | `topUpValidator` — `totalActiveFundedWei != TOP_UP_WEI` reverts `FundingIncomplete`, balance must cover top-up plus outstanding refunds, `topUpSubmitted` reverts `InvalidState`, `totalCreditedWei != VALIDATOR_DEPOSIT_WEI` reverts `FundingTargetsDoNotMatchValidator` | Revert |
+| Expired attempts become refundable without operator cooperation | Contract | `closeExpiredFundingAttempt` — no access modifier, requires `block.timestamp > fundingDeadline` | Revert if still open; otherwise permissionless |
+| Refund liabilities are never distributed as proceeds | Contract | `grossPoolProceeds() = balance + totalClaimedWei - totalRefundableWei`, used by `claimable` | Arithmetic invariant |
+| Claim timing does not change entitlement | Contract | `claimable` is cumulative-entitlement minus `claimedWeiOf` | Arithmetic invariant |
+| Payouts cannot be sent to the zero address or the pool | Contract | `_validateRecipient` | Revert `InvalidRecipient` |
+| Only the operator or a finally-credited participant can request an exit | Contract | `requestExit` → `_canRequestExit` | Revert `NotParticipant` |
+| An exit request forwards only the live fee and refunds the excess | Contract | `requestExit` — `currentExitRequestFee()`, reverts `ExitFeeTooHigh` above `maxFee`, refunds `msg.value - fee` | Revert or in-transaction refund |
+| Reentrancy cannot re-enter a payout or a deposit | Contract | `nonReentrant` on `commitAndPredeposit`, `topUpValidator`, `requestExit`, `refundTo`, `claimTo` | Revert `ReentrantCall` |
+
+## 4. Operational assumptions
+
+- **A live mainnet execution endpoint and a live mainnet beacon REST endpoint are available when capital moves.** This assumption is why no bypass exists anywhere in the preflights: free public tiers of both are sufficient for the handful of read requests these scripts make, so "the beacon API was unavailable" is never a reason to waive a check on a capital path. The one place the assumption is deliberately not made is `request-exit`, where `assertBeaconValidatorReadyForExit` skips its preflight when `BEACON_NODE_URL` is unset — refusing there would let an unavailable endpoint disable the recovery path. The reasoning is in "Required Beacon Preflight For Exit" in `README.md`.
+- **A terminal is available for the excess-balance path.** `confirmExcessBalance` requires `process.stdin.isTTY`. `fund` and `top-up` cannot complete over a pipe, from cron, or in CI once a third-party deposit has raised the head balance.
+- **Ledger is the mainnet signing path, with `LEDGER_ADDRESS` set.** The `ledger` network configures no `accounts`, so no private key is read for it; `ledgerAccounts()` in `hardhat.config.ts` refuses to load the network when `LEDGER_ADDRESS` is unset, and `selectedNetwork()` recognises both the `--network ledger` and `--network=ledger` spellings so the guard cannot be bypassed by spelling.
+- **The environment outranks the keystore.** Hardhat returns `process.env[name]` and skips the `configurationVariables` hook chain entirely when the variable is set, so a keystore entry is consulted only when the environment does not supply the value (`hardhat/dist/src/internal/core/configuration-variables.js`, `_getRawValue`). Keystore users must `unset PRIVATE_KEY RPC_URL` in the shell that runs mainnet commands; see "Encrypted Keystore" in `README.md`. The keystore is also skipped under CI.
+- **`status` needs no signer.** It runs on the `read` network, which declares no `accounts`; the `rpc` network's `accounts: [configVariable("PRIVATE_KEY")]` is resolved on the connection's first JSON-RPC request, so a read-only command on `rpc` would fail for an operator who has no private key at all.
+- **No environment variable waives any preflight.** The two former override variables were deleted, not narrowed; `test/DepositDataRoot.ts` sets both — along with two older bypass names — and asserts every capital path still fails closed. `BEACON_CONFIRMATION_STATE_ID` is the only beacon-related variable that changes preflight behaviour, and it can only select between two settled states.
+
+## 5. Residual risks
+
+Each entry: the risk, why it is accepted, and what would justify revisiting it.
+
+**Stranded 1 ETH predeposit.** If a funding attempt never completes, the operator's 1 ETH is bound to a validator that will not activate, and the contract has no path to return it. Accepted: the predeposit is what makes the credential guarantee checkable before participants commit capital, and it puts the first loss on the party asking for trust ("Trust And Incentives" in `README.md`). Revisit if the protocol ever offers a way to withdraw a partially deposited validator's balance without activation.
+
+**A third-party deposit of 31 ETH or more permanently closes the top-up.** It brings the validator to a 32 ETH effective balance, consensus sets `activation_eligibility_epoch`, and `assertFreshPredepositMutableState` then fails on every `fund` and `top-up` forever. There is deliberately no recourse: the preflight cannot distinguish a validator that was externally funded from one that was compromised, and a waiver broad enough to cover this case is the waiver that was deleted ("Environment-Variable Anomaly Override" in `README.md`). The pool's own 31 ETH is never sent; participants recover through the deadline and `refundTo()`, and the operator's 1 ETH is stranded as above. Accepted because the attack costs the attacker 31 ETH to strand 1 ETH. Revisit if the cost ratio changes.
+
+**The `ToppedUp` plain-transfer race.** A funding transfer that lands after `topUpValidator()` is accepted by `receive()` as pool proceeds instead of reverting, and the sender recovers only their pro-rata share. Reaching it requires the sender to have two funding transactions in flight; the mitigation is the double-send discipline in "Plain-Transfer Funding" in `README.md`, and `assertStillFundable` in `scripts/fund.ts` narrows but cannot close the window. `FUND_VIA_TRANSFER=0` trades the clear-signed device screen for a reverting `fund()`. Accepted because no off-chain check can close it. Revisit if the clear-signing situation changes enough that the transfer path stops being worth it.
+
+**Blind-signed surfaces.** Every action except a plain-transfer `fund` is blind-signed on the device: `fund()` calldata, `claim()`, `claimTo(address)`, `refund()`, `refundTo(address)`, `requestExit(uint256)`, `commitAndPredeposit(...)`, `openFundingAttempt(address[],uint256[])`, `topUpValidator()`, `closeExpiredFundingAttempt()`, `sweep()`, and both contract deployments. The deployments are the weakest: a creation transaction has no destination address at all, so the device shows creation bytecode with constructor arguments appended and there is nothing to compare. Accepted with a compensating control: verify the deployment after the fact — read the five immutables back from the chain, compare the runtime code hash against a local build, and verify on Sourcify — before publishing the pool address. See "What The Device Actually Shows" in `README.md`. Revisit when `@nomicfoundation/hardhat-ledger` requests descriptor resolution.
+
+**The hardhat-ledger derivation-path cache (upstream).** The plugin caches the address-to-path mapping in `<hardhat config dir>/ledger/accounts.json` and returns the cached path without re-deriving it on the connected device (`@nomicfoundation/hardhat-ledger/dist/src/internal/handler.js`, `#derivePath`). A swapped device or a device restored from a different seed will sign at that path with a different key and the plugin will not notice. Accepted because it is upstream behaviour this repository cannot change. Mitigated in two places: the operator is instructed to delete the cache file whenever the device or seed changes ("Ledger" in `README.md`), and `waitForSenderVerifiedReceipt` checks `receipt.from` on every transaction — which detects the mismatch after the transaction is mined, not before. Revisit if the plugin gains a re-derivation or verification option.
+
+**Environment-over-keystore precedence.** A forgotten `export PRIVATE_KEY=...` silently outranks a stored keystore key, including an empty string, and the run signs with the plaintext key. Accepted because it is Hardhat's documented resolution order and this repository cannot override it. Mitigated by the `unset` instruction and the `keystore get` verification step in "Encrypted Keystore" in `README.md`, and by `assertActiveSigner` printing the address that will sign before the first transaction. Revisit if Hardhat adds a way to make a configuration variable keystore-only.
+
+**The typed confirmation is not proof against the machine's owner.** Ordinary non-TTY execution is rejected and no environment variable, flag, or acknowledgement string substitutes for a typed answer, but a deliberate PTY wrapper such as `expect` or `script(1)` can drive any interactive program. Accepted: the check is aimed at accidents and ambient automation, not at a person determined to automate their own machine, and no local check can be aimed at the latter. Revisit never — this is a property of the technique, not a gap in the implementation.
+
+**Account confusion on the `ledger` network.** `eth_accounts` returns the node's own accounts first and the device account last, and every script signs with the first (`@nomicfoundation/hardhat-ledger/dist/src/internal/hook-handlers/network.js`). `assertActiveSigner` now aborts when the active address is not `LEDGER_ADDRESS`, which closes the accidental case. The residual: the assertion runs in the same process as everything else, so it protects against a misconfigured node, not against a tampered host. The operational instruction to point `RPC_URL` at a node exposing no unlocked accounts still stands. Revisit if the plugin gains a way to make the device account the default.
+
+**The ERC-7730 descriptor is a placeholder and is not submitted.** `clear-signing/calldata-ValidatorFundingPool.json` binds to the zero address because no mainnet pool exists yet, and submission has preconditions that cannot be met before deployment: the real pool address must be substituted, the contract must be verified on Sourcify, and a test file with real calldata samples must be written. Its path expressions are structurally valid but unverified against a real wallet, and the whole-array form used for `openFundingAttempt` is the least-exercised part. Accepted because none of it affects the Hardhat Ledger path, which requests no descriptor resolution at all. See `clear-signing/README.md`. Revisit at deployment.
+
+## 6. Out of scope
+
+- **Re-auditing the contract.** `contracts/*.sol` is frozen and audited; this document treats its behaviour as ground truth rather than re-deriving it.
+- **Consensus-layer correctness.** Deposit processing, activation, withdrawal, slashing, and EIP-7002 exit processing are Ethereum's, not this pool's. Where this document relies on a consensus rule it cites the spec.
+- **Host compromise.** See §2, "The script host". A compromised machine defeats blind-signed calldata and this repository does not claim otherwise.
+- **The validator key ceremony.** Generating key material, storing the mnemonic, and running the validator client are the operator's, outside anything in this repository.

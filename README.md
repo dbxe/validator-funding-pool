@@ -4,6 +4,8 @@ Minimal `0x01` withdrawal-credential funding pool for known participants funding
 
 The contract is a non-tokenized agreement between known funders. It mints no ERC-20, ERC-721, ERC-1155, vault share, receipt token, or transferable claim. Economic rights are internal accounting only.
 
+[`SECURITY.md`](SECURITY.md) is the security model: system and trust model, the table of enforced invariants and where each one is enforced, operational assumptions, and the residual-risk ledger. Read it before putting capital in.
+
 ## What This Is
 
 - One validator pubkey.
@@ -66,6 +68,8 @@ A head balance *above* 1 ETH is the one condition the person running the command
 The `request-exit` recovery path deliberately treats its beacon preflight as advisory: without `BEACON_NODE_URL`, it warns and proceeds so an unavailable beacon API cannot disable the escape hatch. With a beacon URL, `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
 
 ## Trust Boundaries
+
+This section states the operator-facing boundaries. [`SECURITY.md`](SECURITY.md) covers every party — operator, participants, third parties, the two endpoints, and the script host — and maps each enforced invariant to the function that enforces it.
 
 The operator is trusted to:
 
