@@ -193,11 +193,15 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
           RPC_URL: chain.url,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: deploymentFile,
+          // Required now, and bounded: the window becomes an immutable no command can change.
+          FUNDING_WINDOW_SECONDS: "86400",
         },
       }),
     );
 
     assertActiveSignerPrinted(result, "deploy", operator.address.toLowerCase());
+    // Printed before the deployment, because after it the number is fixed forever.
+    assertOutputOrder(result, "Funding window (immutable): 86400s", `Wrote deployment: ${deploymentFile}`);
     // `DEPLOYMENT_FILE` selects the record every later command's checks are made about, so
     // the resolved path is printed here too, next to the signer line.
     assertOutputContains(result, `Deployment record: ${deploymentFile} (to be written by this command)`);
@@ -242,6 +246,46 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     beacon.setValidator(deposits.pubkey, absentValidator());
   });
 
+  it("deploy refuses a funding window that is unset, too short, or too long", async () => {
+    // The window is the pool's immutable and the only bound on how long a listed participant
+    // who never funds can lock everyone else's capital. It used to default to 86400 silently.
+    for (const [declared, actionable] of [
+      [undefined, "deploy: FUNDING_WINDOW_SECONDS is unset or empty"],
+      ["3599", "deploy: FUNDING_WINDOW_SECONDS is 3599, outside the 3600..31536000 seconds"],
+      ["31536001", "deploy: FUNDING_WINDOW_SECONDS is 31536001, outside the 3600..31536000 seconds"],
+    ] as const) {
+      const result = expectFailure(
+        await runCommand({
+          script: "deploy",
+          env: {
+            RPC_URL: chain.url,
+            PRIVATE_KEY: operator.privateKey,
+            DEPLOYMENT_FILE: deploymentFile,
+            FUNDING_WINDOW_SECONDS: declared,
+          },
+        }),
+      );
+
+      assertReadableFailure(result, "deploy", actionable);
+      // Refused from the environment, before a single JSON-RPC request: no signer line, no
+      // deployment, and the record the earlier case wrote is untouched.
+      assertOutputLacks(result, "deploy active signer:");
+      assertOutputLacks(result, `Wrote deployment: ${deploymentFile}`);
+    }
+    // The unset error names the old default as the explicit form, so an operator who wanted
+    // exactly what they used to get can type it.
+    const unset = expectFailure(
+      await runCommand({
+        script: "deploy",
+        env: { RPC_URL: chain.url, PRIVATE_KEY: operator.privateKey, DEPLOYMENT_FILE: deploymentFile },
+      }),
+    );
+    assertOutputContains(unset, "FUNDING_WINDOW_SECONDS=86400");
+
+    const record = JSON.parse(readFileSync(deploymentFile, "utf8")) as DeploymentRecord;
+    assert.equal(record.pool, pool);
+  });
+
   it("deploy refuses to record a second pool while EXPECTED_POOL names the first", async () => {
     // The redeploy guard. Every other command reads EXPECTED_POOL as "the pool I mean"; on
     // `deploy` it used to be ignored, and the run would overwrite the record naming that pool
@@ -254,6 +298,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
           RPC_URL: chain.url,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: deploymentFile,
+          FUNDING_WINDOW_SECONDS: "86400",
           EXPECTED_POOL: pool,
         },
       }),
@@ -913,6 +958,9 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, "State: ToppedUp (3)");
     assertOutputContains(result, `Operator: ${operator.address}`);
     assertOutputContains(result, "Funding attempt: 2");
+    // Read back from the pool, not from the environment: the window a participant should
+    // check before funding is the one the deployed contract actually holds.
+    assertOutputContains(result, "Funding window (immutable): 86400s");
     assertOutputContains(result, `Validator pubkey: ${deposits.pubkey}`);
     assertOutputContains(result, "Top-up submitted: true");
     assertOutputContains(result, "Fee recipient forwarder: not configured");
@@ -1281,6 +1329,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
           RPC_URL: chain.url,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: raceDeploymentFile,
+          FUNDING_WINDOW_SECONDS: "86400",
         },
       }),
     );

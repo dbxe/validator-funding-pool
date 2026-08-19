@@ -14,9 +14,9 @@ import {
   defaultDepositContract,
   deploymentPath,
   envAddress,
-  envBigInt,
   readLocalBuildArtifacts,
   reportFatalError,
+  requireFundingWindowSeconds,
   VERIFIED_POOL,
   waitForSenderVerifiedReceipt,
   writeDeployment,
@@ -27,6 +27,11 @@ async function main() {
   // An argv check, so it costs nothing and runs before every other line: a stale artifact
   // would make the runtime-code check print a pass it did not earn.
   assertCompilationNotSkipped("deploy");
+  // Read before a single JSON-RPC request, exactly like `open-funding-attempt` reads its
+  // allocation: this is an input the operator supplied for THIS command, it has no defensible
+  // default, and the value becomes an immutable no later command can change. See
+  // `requireFundingWindowSeconds`.
+  const fundingWindowDuration = requireFundingWindowSeconds("deploy");
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
@@ -52,13 +57,16 @@ async function main() {
   );
 
   const operator = envAddress("OPERATOR", signer);
-  const fundingWindowDuration = envBigInt("FUNDING_WINDOW_SECONDS", 86_400n);
   const chainId = await publicClient.getChainId();
   await assertDeploymentCanonicity(
     chainId,
     { depositContract, withdrawalRequestPredeploy },
     { depositContractCodeHash, withdrawalRequestPredeployCodeHash },
   );
+
+  // Printed BEFORE the deployment, because after it the number is fixed forever. It is also
+  // printed by `status` and by `open-funding-attempt`, both read back from the pool.
+  console.log(`Funding window (immutable): ${fundingWindowDuration}s`);
 
   // sendDeploymentTransaction rather than deployContract: it surfaces the deployment
   // transaction hash, which is what the post-broadcast sender check needs. The address

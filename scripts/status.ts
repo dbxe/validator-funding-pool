@@ -41,6 +41,10 @@ async function main() {
   console.log(`State: ${formatPoolState(state)}`);
   console.log(`Operator: ${await pool.read.operator()}`);
   console.log(`Funding attempt: ${await pool.read.fundingAttempt()}`);
+  // The immutable, next to the deadline it produced. It is the bound on how long a listed
+  // participant who never funds can lock everyone else's capital, it was chosen once at
+  // deployment, and it is the number a participant should read off the pool before funding.
+  console.log(`Funding window (immutable): ${await pool.read.fundingWindowDuration()}s`);
   console.log(`Funding deadline: ${await pool.read.fundingDeadline()}`);
   console.log(`Balance: ${formatWei(balance)}`);
   console.log(`Gross proceeds: ${formatWei(await pool.read.grossPoolProceeds())}`);

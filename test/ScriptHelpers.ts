@@ -33,6 +33,7 @@ import {
   parseBigIntList,
   printPayoutRecipient,
   requireFundingAllocation,
+  requireFundingWindowSeconds,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
   warnOnPlaintextEndpoints,
@@ -1513,6 +1514,83 @@ describe("assertFundingWindowNotDeclared", function () {
     } finally {
       restoreEnv("FUNDING_WINDOW_SECONDS", original);
     }
+  });
+});
+
+describe("requireFundingWindowSeconds", function () {
+  const NAME = "FUNDING_WINDOW_SECONDS";
+
+  function withWindow<T>(value: string | undefined, run: () => T): T {
+    const original = process.env[NAME];
+    restoreEnv(NAME, value);
+    try {
+      return run();
+    } finally {
+      restoreEnv(NAME, original);
+    }
+  }
+
+  it("is fatal when unset or empty, and names the old default as the explicit form", function () {
+    for (const value of [undefined, ""]) {
+      assert.throws(
+        () => withWindow(value, () => requireFundingWindowSeconds("deploy")),
+        (error: Error) => {
+          assert.match(error.message, /deploy: FUNDING_WINDOW_SECONDS is unset or empty/);
+          // The reason it may not default: the value is permanent and it is the whole bound
+          // on how long a listed participant can lock everyone else's capital.
+          assert.match(error.message, /immutable fundingWindowDuration/);
+          assert.match(error.message, /lock everyone else's capital/);
+          assert.match(error.message, /Nothing has been deployed/);
+          assert.match(error.message, /FUNDING_WINDOW_SECONDS=86400/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("refuses a window below one hour, which no attempt could be funded within", function () {
+    for (const value of ["0", "1", "3599"]) {
+      assert.throws(
+        () => withWindow(value, () => requireFundingWindowSeconds("deploy")),
+        (error: Error) => {
+          assert.match(
+            error.message,
+            new RegExp(`FUNDING_WINDOW_SECONDS is ${value}, outside the 3600\\.\\.31536000 seconds`),
+          );
+          assert.match(error.message, /Below one hour the window is unusable/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("refuses a window above one year, up to the value that bricks every attempt", function () {
+    const uint256Max = (2n ** 256n - 1n).toString();
+    for (const value of ["31536001", uint256Max]) {
+      assert.throws(
+        () => withWindow(value, () => requireFundingWindowSeconds("deploy")),
+        (error: Error) => {
+          assert.match(error.message, /outside the 3600\.\.31536000 seconds/);
+          // The upper bound is not only about a lock that is too long: the deadline is
+          // checked arithmetic, so a window near the uint256 maximum reverts every attempt.
+          assert.match(error.message, /revert on overflow/);
+          assert.match(error.message, /1 ETH predeposit is already stranded/);
+          assert.match(error.message, /contracts\/ is frozen/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("accepts both bounds and the old default, and applies the canonical-decimal parser", function () {
+    for (const value of ["3600", "86400", "31536000"]) {
+      assert.equal(withWindow(value, () => requireFundingWindowSeconds("deploy")), BigInt(value));
+    }
+    // `0x15180` is 86400 and is not a form anyone means to type into a window.
+    assert.throws(
+      () => withWindow("0x15180", () => requireFundingWindowSeconds("deploy")),
+      /FUNDING_WINDOW_SECONDS "0x15180" is not a canonical unsigned decimal integer/,
+    );
   });
 });
 

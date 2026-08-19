@@ -1047,6 +1047,86 @@ export function assertFundingWindowNotDeclared(label: string) {
   );
 }
 
+/// The narrowest funding window `deploy` will accept, in seconds. One hour.
+///
+/// Below it the window is not a window: `openFundingAttempt` sets the deadline to
+/// `block.timestamp + fundingWindowDuration` and every participant has until then to read the
+/// review, decide, and — on the Ledger path — approve on a device. A pool deployed with sixty
+/// seconds has an attempt that expires before anyone can fund it, and the immutable cannot be
+/// changed afterwards.
+const MIN_FUNDING_WINDOW_SECONDS = 3_600n;
+
+/// The widest funding window `deploy` will accept, in seconds. One year.
+///
+/// Above it the window stops bounding anything: it exists so that a listed participant who
+/// never funds cannot lock everyone else's capital indefinitely (`SECURITY.md` §2,
+/// "Participants"), and a window measured in years is that lock. It is also the direction in
+/// which the contract breaks rather than merely disappoints — see
+/// `requireFundingWindowSeconds`.
+const MAX_FUNDING_WINDOW_SECONDS = 31_536_000n;
+
+/// The window `deploy` used to substitute silently when the variable was unset. Quoted in the
+/// error as the explicit form, so an operator who wants exactly what they used to get can type
+/// it rather than reverse-engineer it.
+const FORMER_DEFAULT_FUNDING_WINDOW_SECONDS = 86_400n;
+
+/// Reads the one deploy-time variable that decides how long everyone else's capital can sit
+/// idle. REQUIRED, and BOUNDED on both sides.
+///
+/// Required for `requireFundingAllocation`'s reason, which is the same reason
+/// `assertFundingWindowNotDeclared` refuses the variable next door in `open-funding-attempt`: a
+/// security-relevant input silently substituted is a pass reported for a decision that was
+/// never made. Here the decision is permanent. `fundingWindowDuration` is an `immutable` fixed
+/// by the constructor, `openFundingAttempt` takes no duration, and every attempt this pool ever
+/// opens gets `block.timestamp + fundingWindowDuration` — so the window is chosen once, before
+/// the participant set may even be decided, and the only way to change it is deploying a second
+/// pool, which strands the first pool's 1 ETH predeposit.
+///
+/// Bounded because the contract bounds almost nothing. Its constructor rejects zero and nothing
+/// else (`ValidatorFundingPool.sol:235`), and `contracts/` is frozen, so the refusal has to live
+/// here. The upper bound is not merely about a lock that is too long: the deadline is computed
+/// with CHECKED arithmetic under solidity 0.8 (`:318`), so a window near the uint256 maximum
+/// makes `openFundingAttempt` REVERT ON OVERFLOW — every attempt, forever, on a pool whose
+/// predeposit is already stranded and whose participants can never be listed. That failure is
+/// permanent and it happens after the 1 ETH is gone.
+export function requireFundingWindowSeconds(label: string): bigint {
+  const declared = process.env.FUNDING_WINDOW_SECONDS ?? "";
+  if (declared === "") {
+    throw new Error(
+      `${label}: FUNDING_WINDOW_SECONDS is unset or empty, and this command will not guess how ` +
+        `long a funding attempt may stay open. It used to default to ` +
+        `${FORMER_DEFAULT_FUNDING_WINDOW_SECONDS} seconds, and a default is exactly what this ` +
+        `input must not have: the value becomes the pool's immutable fundingWindowDuration, ` +
+        `every attempt this pool ever opens takes its deadline from it, and no command — this ` +
+        `one included — can change it afterwards. It is the whole bound on how long a listed ` +
+        `participant who never funds can lock everyone else's capital. Nothing has been ` +
+        `deployed. Set FUNDING_WINDOW_SECONDS, in seconds, between ` +
+        `${MIN_FUNDING_WINDOW_SECONDS} (one hour) and ${MAX_FUNDING_WINDOW_SECONDS} (one year). ` +
+        `For the old default, say so: FUNDING_WINDOW_SECONDS=` +
+        `${FORMER_DEFAULT_FUNDING_WINDOW_SECONDS}`,
+    );
+  }
+
+  const seconds = envBigInt("FUNDING_WINDOW_SECONDS");
+  if (seconds < MIN_FUNDING_WINDOW_SECONDS || seconds > MAX_FUNDING_WINDOW_SECONDS) {
+    throw new Error(
+      `${label}: FUNDING_WINDOW_SECONDS is ${seconds}, outside the ` +
+        `${MIN_FUNDING_WINDOW_SECONDS}..${MAX_FUNDING_WINDOW_SECONDS} seconds this command ` +
+        `accepts (one hour to one year). Nothing has been deployed. Below one hour the window ` +
+        `is unusable: an attempt would expire before the listed participants could read the ` +
+        `funding review and approve on a device. Above one year it bounds nothing — the window ` +
+        `exists so a listed participant who never funds cannot lock everyone else's capital ` +
+        `indefinitely — and it approaches the case where the pool is bricked outright: ` +
+        `openFundingAttempt computes block.timestamp + fundingWindowDuration in checked ` +
+        `arithmetic, so a window near the uint256 maximum makes every attempt revert on ` +
+        `overflow, permanently, on a pool whose 1 ETH predeposit is already stranded. The ` +
+        `contract itself accepts anything but zero and contracts/ is frozen, so this refusal ` +
+        `lives here`,
+    );
+  }
+  return seconds;
+}
+
 /// The single-participant form, spelled out in every error this pair raises. An operator who
 /// genuinely means "just me, the whole validator" has to type it, and typing it is the
 /// difference between a decision and a default.

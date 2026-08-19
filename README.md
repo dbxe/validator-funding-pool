@@ -454,6 +454,7 @@ Deploy:
 ```bash
 RPC_URL=http://localhost:8545 \
 PRIVATE_KEY=0x... \
+FUNDING_WINDOW_SECONDS=86400 \
 npm run deploy
 ```
 
@@ -513,7 +514,7 @@ Four variables are read by `npm run deploy` and by nothing else. Each becomes an
 - `DEPOSIT_CONTRACT`: deposit contract address. Defaults to mainnet's.
 - `WITHDRAWAL_REQUEST_PREDEPLOY`: EIP-7002 predeploy address. Defaults to mainnet's.
 - `OPERATOR`: operator address; defaults to the deployer.
-- `FUNDING_WINDOW_SECONDS`: the funding window, in seconds, baked into the pool at deploy time and immutable thereafter; defaults to `86400`. It is **not** per attempt: `openFundingAttempt` takes no duration, and every attempt this pool ever opens gets a deadline of `block.timestamp + fundingWindowDuration`. Choose it at deployment as a security decision — a short window bounds how long a listed participant who never funds can lock everyone else's capital ([`SECURITY.md`](SECURITY.md) §2, "Participants"). Setting it in `open-funding-attempt`'s environment is a fatal error rather than a silent no-op, and that command prints the pool's actual window next to the deadline it sets.
+- `FUNDING_WINDOW_SECONDS`: **required** by `npm run deploy`. The funding window, in seconds, baked into the pool at deploy time and immutable thereafter. It is **not** per attempt: `openFundingAttempt` takes no duration, and every attempt this pool ever opens gets a deadline of `block.timestamp + fundingWindowDuration`. Choose it at deployment as a security decision — a short window bounds how long a listed participant who never funds can lock everyone else's capital ([`SECURITY.md`](SECURITY.md) §2, "Participants"). Unset or empty is fatal naming the variable, before any RPC read; there is no default, because the one it used to have (`86400`) was a permanent choice nobody made, and the error quotes it as the explicit form to type. It is bounded to `3600`..`31536000` — one hour to one year. Below an hour an attempt expires before the listed participants could read the funding review and approve on a device; above a year it bounds nothing, and further up it stops being a bad window and becomes a brick, since the deadline is checked arithmetic and a window near the uint256 maximum makes every attempt revert on overflow forever, on a pool whose 1 ETH predeposit is already stranded. The contract accepts anything but zero and `contracts/` is frozen, so the bounds live in the command. `deploy` prints `Funding window (immutable): <n>s` before deploying, `status` prints it read back from the pool, and setting the variable in `open-funding-attempt`'s environment is a fatal error rather than a silent no-op — that command prints the pool's actual window next to the deadline it sets.
 
 ### Per-Command Variables
 
