@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 
@@ -546,11 +546,28 @@ export async function assertDeploymentMatchesPool(
     pool.read.withdrawalCredentials(),
     pool.read.fundingWindowDuration(),
   ]);
+  // The credentials are DERIVED from the pool's own address rather than taken from what
+  // the pool reports, and the derived value is what the returned config carries. Every
+  // capital path — deposit-data validation, both beacon credential comparisons — reads
+  // `liveConfig.withdrawalCredentials`, so after this line none of them can be steered by
+  // a contract that answers `withdrawalCredentials()` with someone else's address.
+  const derivedCredentials = deriveWithdrawalCredentials(deployment.pool);
+  if (withdrawalCredentials.toLowerCase() !== derivedCredentials.toLowerCase()) {
+    throw new Error(
+      `FATAL: the pool at ${deployment.pool} reports withdrawal credentials ` +
+        `${withdrawalCredentials}, but credentials owned by that pool are ${derivedCredentials} ` +
+        `(0x01 prefix, eleven zero bytes, the pool's own address — ` +
+        `ValidatorFundingPool._makeEth1WithdrawalCredentials). A contract whose credentials are ` +
+        `not derived from its own address does not receive this validator's consensus ` +
+        `withdrawals. Do not send capital to this address`,
+    );
+  }
+
   const liveConfig = {
     depositContract,
     withdrawalRequestPredeploy,
     operator,
-    withdrawalCredentials,
+    withdrawalCredentials: derivedCredentials,
     fundingWindowDuration,
   };
 
@@ -615,7 +632,13 @@ export async function assertDeploymentIntegrity(
   deployment: DeploymentRecord,
 ): Promise<PoolDeploymentConfig> {
   const chainId = await assertDeploymentChain(publicClient, deployment);
+  await assertHasCode(publicClient, deployment.pool, "pool");
   const liveConfig = await assertDeploymentMatchesPool(pool, deployment);
+  await assertPoolRuntimeCodeMatchesLocalBuild(
+    publicClient,
+    deployment.pool,
+    readLocalPoolBuildArtifacts(),
+  );
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
   if (deployment.feeRecipientForwarder !== undefined) {
@@ -712,6 +735,247 @@ export async function codeHash(
   label: string,
 ): Promise<Hex> {
   return keccak256(await assertHasCode(publicClient, address, label));
+}
+
+// ---------------------------------------------------------------------------
+// Pool authenticity
+//
+// Everything else in this file compares an operator-supplied deployment record
+// against the live contract that record names. Those two can agree perfectly and
+// still describe a pool nobody audited: the record is written by whoever ran
+// `deploy`, and the pool answers whatever its own code says. Neither side is
+// independent of the operator.
+//
+// The two checks below are the ones that are. The first derives the withdrawal
+// credentials from the pool's own address instead of asking the pool for them.
+// The second compares the pool's runtime code against the participant's OWN
+// local build of `contracts/ValidatorFundingPool.sol` — the audited source, in
+// the participant's checkout, compiled on the participant's machine.
+// ---------------------------------------------------------------------------
+
+/// The withdrawal credentials a pool at `poolAddress` must have: `bytes32((1 << 248) |
+/// uint160(poolAddress))`, i.e. the `0x01` prefix, eleven zero bytes, and the pool's own
+/// address. This is what the contract itself computes — `_makeEth1WithdrawalCredentials`
+/// at `contracts/ValidatorFundingPool.sol:669-673`, and identically
+/// `contracts/FeeRecipientForwarder.sol:20-32` when it validates its destination.
+///
+/// Deriving them locally is what makes them evidence. A pool that reports credentials
+/// belonging to some other address — a pool whose consensus withdrawals would pay someone
+/// else — is caught here, before any capital path can use the reported value.
+export function deriveWithdrawalCredentials(poolAddress: Address): Hex {
+  return `0x01${"00".repeat(11)}${asAddress(poolAddress).slice(2).toLowerCase()}` as Hex;
+}
+
+/// One range of bytes in a deployed runtime code that holds an immutable's value.
+interface ImmutableRange {
+  start: number;
+  length: number;
+}
+
+/// The parts of a Hardhat build artifact this verification reads. `immutableReferences`
+/// maps solc's AST id for each immutable to every byte range in the deployed bytecode
+/// where its value is written at construction time.
+export interface PoolBuildArtifact {
+  deployedBytecode: Hex;
+  immutableReferences?: Record<string, readonly ImmutableRange[]>;
+  buildInfoId?: string;
+}
+
+/// A local build artifact together with where it came from and which solidity build
+/// profile produced it.
+export interface PoolBuildCandidate {
+  source: string;
+  profile: string;
+  artifact: PoolBuildArtifact;
+}
+
+const ARTIFACTS_ROOT = "artifacts";
+const POOL_ARTIFACT_FILE = path.join(
+  ARTIFACTS_ROOT,
+  "contracts",
+  "ValidatorFundingPool.sol",
+  "ValidatorFundingPool.json",
+);
+
+/// Masks every immutable's byte range with zeroes.
+///
+/// Runtime code is identical across deployments of the same source and settings EXCEPT at
+/// these ranges, which hold constructor-supplied values: the deposit contract, the
+/// withdrawal-request predeploy, the operator, the funding window, and the pool's own
+/// withdrawal credentials. Masking them on BOTH sides is what lets a byte-for-byte
+/// comparison mean "same code" rather than "same deployment". Every other byte, including
+/// solc's trailing metadata hash, still has to match exactly.
+///
+/// The ranges come from the artifact and are applied to the artifact and the chain code
+/// alike, so a range the artifact does not declare is a range that must match.
+export function maskImmutableRanges(
+  code: Hex,
+  immutableReferences: Record<string, readonly ImmutableRange[]>,
+  what: string,
+): { masked: Hex; maskedBytes: number } {
+  const body = code.startsWith("0x") ? code.slice(2) : code;
+  if (!/^[0-9a-fA-F]*$/.test(body) || body.length % 2 !== 0) {
+    throw new Error(`${what} is not a whole number of hex-encoded bytes`);
+  }
+  const bytes = Buffer.from(body, "hex");
+
+  let maskedBytes = 0;
+  for (const [astId, ranges] of Object.entries(immutableReferences)) {
+    for (const range of ranges) {
+      const { start, length } = range;
+      if (
+        !Number.isInteger(start) ||
+        !Number.isInteger(length) ||
+        start < 0 ||
+        length < 0 ||
+        start + length > bytes.length
+      ) {
+        throw new Error(
+          `${what}: immutable reference ${astId} declares the byte range ` +
+            `[${start}, ${start + length}) which is outside the ${bytes.length}-byte code`,
+        );
+      }
+      bytes.fill(0, start, start + length);
+      maskedBytes += length;
+    }
+  }
+
+  return { masked: `0x${bytes.toString("hex")}` as Hex, maskedBytes };
+}
+
+/// Compares the pool's on-chain runtime code against the participant's own local build.
+///
+/// This is the check that is not circular: the deployment record and the live pool are
+/// both downstream of whoever deployed, but `artifacts/` is downstream of the audited
+/// source in this checkout. A pool that is not this contract fails here even when every
+/// record-to-pool comparison passes.
+///
+/// It is not a substitute for source verification. It proves the deployed code is the code
+/// this checkout builds; it says nothing about whether this checkout is the audited one.
+/// Verify the repository's provenance and the pool on Sourcify as well.
+export async function assertPoolRuntimeCodeMatchesLocalBuild(
+  publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
+  poolAddress: Address,
+  candidates: readonly PoolBuildCandidate[],
+): Promise<PoolBuildCandidate> {
+  if (candidates.length === 0) {
+    throw new Error(missingArtifactMessage([]));
+  }
+
+  const chainCode = await assertHasCode(publicClient, poolAddress, "pool");
+  const rejections: string[] = [];
+
+  for (const candidate of candidates) {
+    const artifactCode = candidate.artifact.deployedBytecode;
+    if (typeof artifactCode !== "string" || !/^0x[0-9a-fA-F]*$/.test(artifactCode)) {
+      throw new Error(
+        `${candidate.source} has no usable deployedBytecode; delete artifacts/ and run "npm run build"`,
+      );
+    }
+    if (artifactCode.length !== chainCode.length) {
+      rejections.push(
+        `${candidate.source} (profile ${candidate.profile}): ${(artifactCode.length - 2) / 2} bytes ` +
+          `of runtime code, chain has ${(chainCode.length - 2) / 2}`,
+      );
+      continue;
+    }
+
+    const references = candidate.artifact.immutableReferences ?? {};
+    const artifact = maskImmutableRanges(artifactCode, references, `${candidate.source} deployedBytecode`);
+    const chain = maskImmutableRanges(chainCode, references, `pool ${poolAddress} runtime code`);
+    if (artifact.masked.toLowerCase() === chain.masked.toLowerCase()) {
+      console.log(
+        `Pool runtime code matches the local build ${candidate.source} (solidity profile ` +
+          `${candidate.profile}); ${artifact.maskedBytes} immutable bytes masked, masked code hash ` +
+          keccak256(chain.masked),
+      );
+      return candidate;
+    }
+    rejections.push(
+      `${candidate.source} (profile ${candidate.profile}): masked code hash ` +
+        `${keccak256(artifact.masked)} != chain ${keccak256(chain.masked)}`,
+    );
+  }
+
+  throw new Error(
+    `FATAL: the pool at ${poolAddress} does not run the code this checkout builds. Its runtime ` +
+      `code matches no local build artifact, with all ${candidates.length === 1 ? "its" : "their"} ` +
+      `immutable ranges masked on both sides: ${rejections.join("; ")}. This is the check that the ` +
+      `deployment record cannot make for you — a record and a pool can agree with each other and ` +
+      `still describe a contract nobody audited. Do not send capital to this address. If the pool ` +
+      `was built with the other solidity profile, rebuild locally with "npm run build" (default) or ` +
+      `"npx hardhat compile --build-profile production" and re-run; hardhat keeps only the ` +
+      `last-built profile's artifacts, and POOL_ARTIFACT_FILES can add a saved copy of the other one`,
+  );
+}
+
+/// Collects the local build artifacts the pool's runtime code may match.
+///
+/// Hardhat 3 writes every build profile to the same `artifacts/` tree, so only the
+/// last-built profile is on disk. `POOL_ARTIFACT_FILES` takes a comma-separated list of
+/// additional artifact JSON files — a saved copy of the other profile's artifact — and can
+/// only ADD candidates, never replace the one hardhat just built.
+export function readLocalPoolBuildArtifacts(
+  buildOutput: string = POOL_ARTIFACT_FILE,
+): PoolBuildCandidate[] {
+  const candidates: PoolBuildCandidate[] = [];
+
+  // The build output is allowed to be absent only when something else supplies a
+  // candidate; an explicitly named `POOL_ARTIFACT_FILES` entry that is missing is always a
+  // mistake and is never quietly dropped.
+  if (existsSync(buildOutput)) candidates.push(readPoolBuildCandidate(buildOutput));
+  for (const file of extraPoolArtifactFiles()) {
+    if (!existsSync(file)) {
+      throw new Error(`POOL_ARTIFACT_FILES names ${file}, which does not exist`);
+    }
+    candidates.push(readPoolBuildCandidate(file));
+  }
+
+  if (candidates.length === 0) {
+    throw new Error(missingArtifactMessage([buildOutput]));
+  }
+  return candidates;
+}
+
+function readPoolBuildCandidate(file: string): PoolBuildCandidate {
+  const artifact = JSON.parse(readFileSync(file, "utf8")) as PoolBuildArtifact;
+  return { source: file, profile: describeBuildProfile(artifact), artifact };
+}
+
+function extraPoolArtifactFiles(): string[] {
+  const extra = process.env.POOL_ARTIFACT_FILES;
+  if (extra === undefined || extra === "") return [];
+  return extra
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+}
+
+function missingArtifactMessage(files: readonly string[]): string {
+  return (
+    `FATAL: no local build artifact for ValidatorFundingPool was found` +
+    `${files.length === 0 ? "" : ` (looked for ${files.join(", ")})`}. The pool's runtime code is ` +
+    `verified against the contract this checkout builds, and that comparison cannot be skipped: ` +
+    `run "npm run build" and re-run this command`
+  );
+}
+
+/// Names the solidity build profile that produced an artifact, by reading the optimizer
+/// settings out of the build-info file the artifact points at. Reported alongside a match
+/// so the participant knows which of `hardhat.config.ts`'s two profiles they just verified
+/// against. Purely descriptive: a wrong or missing label cannot make a mismatch pass.
+function describeBuildProfile(artifact: PoolBuildArtifact): string {
+  const buildInfoId = artifact.buildInfoId;
+  if (buildInfoId === undefined) return "unknown (artifact records no buildInfoId)";
+  const file = path.join(ARTIFACTS_ROOT, "build-info", `${buildInfoId}.json`);
+  if (!existsSync(file)) return `unknown (no build-info at ${file})`;
+
+  const buildInfo = JSON.parse(readFileSync(file, "utf8")) as {
+    input?: { settings?: { optimizer?: { enabled?: boolean; runs?: number } } };
+  };
+  const optimizer = buildInfo.input?.settings?.optimizer;
+  if (optimizer === undefined || optimizer.enabled !== true) return "default (optimizer disabled)";
+  return `production (optimizer enabled, runs ${optimizer.runs ?? "unset"})`;
 }
 
 export async function assertBeaconMatchesExecutionChain(

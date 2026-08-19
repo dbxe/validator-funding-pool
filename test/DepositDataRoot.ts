@@ -984,6 +984,9 @@ describe("beacon preflight checks", function () {
       },
     };
     const deployment = {
+      // WITHDRAWAL_CREDENTIALS are this pool address's own 0x01 credentials, which
+      // `assertDeploymentMatchesPool` now derives rather than trusts.
+      pool: "0x2222222222222222222222222222222222222222",
       depositContract,
       withdrawalRequestPredeploy,
       operator,
