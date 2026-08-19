@@ -501,7 +501,7 @@ The `PRIVATE_KEY=0x...` shown above is the development form. On mainnet, drop it
 
 Environment variables. Every numeric one — amounts, fees, windows, targets — must be a plain unsigned decimal integer: no `0x` prefix, no sign, no leading zeros, no separators, no surrounding whitespace. `0x20` is a parse error naming the variable, not thirty-two.
 
-Use `https://` for `RPC_URL` and `BEACON_NODE_URL` unless the node is on loopback. Over plaintext `http://` to any other host, everything a dishonest endpoint could do — described in [`SECURITY.md`](SECURITY.md) §2 — is available to anyone on the network path instead. Every command prints a loud warning when either URL is plaintext to a non-loopback host; it is a warning rather than a refusal because a LAN node over plain HTTP is a legitimate setup, and loopback is never warned about.
+Use `https://` for `RPC_URL` and `BEACON_NODE_URL` unless the node is on loopback. Over plaintext `http://` to any other host, everything a dishonest endpoint could do — described in [`SECURITY.md`](SECURITY.md) §2 — is available to anyone on the network path instead. Every command prints a loud warning when either URL is plaintext to a non-loopback host; it is a warning rather than a refusal because a LAN node over plain HTTP is a legitimate setup, and loopback is never warned about. The RPC URL it checks is the connection's own resolved endpoint, so an `RPC_URL` kept in the encrypted keystore — where it never reaches `process.env` — is checked exactly like an exported one.
 
 They divide into two classes, and the class matters more than any individual entry.
 

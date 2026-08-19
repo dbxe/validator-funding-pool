@@ -29,7 +29,7 @@ async function main() {
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  const signer = assertActiveSigner(connection, wallet.account.address, "commit-predeposit");
+  const signer = await assertActiveSigner(connection, wallet.account.address, "commit-predeposit");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
   });

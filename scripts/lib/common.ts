@@ -211,10 +211,25 @@ const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystemContrac
 };
 
 /// Minimal view of a resolved `network.create()` connection. Scripts pass the whole
-/// connection; only these two fields are read.
+/// connection; only these fields are read.
 export interface SignerConnection {
   networkName: string;
-  networkConfig: { ledgerAccounts?: readonly string[] };
+  networkConfig: ResolvedNetworkConfigView;
+}
+
+/// The part of Hardhat's resolved `NetworkConfig` these scripts read.
+///
+/// `url` is optional because it exists on `type: "http"` networks only — an
+/// `edr-simulated` network has no endpoint to resolve — and it is NOT a string. Hardhat 3
+/// resolves an http network's `url` into a `ResolvedConfigurationVariable`
+/// (`hardhat/dist/src/internal/builtin-plugins/network-manager/type-extensions/config.d.ts`
+/// line 165), whose `get()`/`getUrl()` is the only way to the value
+/// (`hardhat/dist/src/types/config.d.ts` lines 14-41). That indirection is the whole point:
+/// the value may live in the encrypted keystore rather than in `process.env`, and it is
+/// fetched — and cached — on first use.
+export interface ResolvedNetworkConfigView {
+  ledgerAccounts?: readonly string[];
+  url?: { getUrl: () => Promise<string> };
 }
 
 /// The receipt fields every post-broadcast check reads. `status` is `"success"` or
@@ -390,6 +405,37 @@ function isLoopbackHost(hostname: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
+/// The endpoint the connection will actually send JSON-RPC to, whatever it came from.
+///
+/// Reading `process.env.RPC_URL` here would check the wrong thing. `RPC_URL` is a
+/// `configVariable()` in `hardhat.config.ts`, and Hardhat resolves such a variable from the
+/// environment FIRST and only then runs the `configurationVariables` hook chain that the
+/// keystore plugin handles
+/// (`hardhat/dist/src/internal/core/configuration-variables.js`, `_getRawValue`, lines
+/// 77-92). So on the path this repository documents for mainnet — `RPC_URL` stored in the
+/// encrypted keystore, nothing exported — `process.env.RPC_URL` is `undefined` and the
+/// warning below could never fire for the endpoint every command was about to trust.
+///
+/// `getUrl()` is awaited rather than guessed at: the resolved value is cached on the
+/// variable after the first fetch (`BaseResolvedConfigurationVariable.get`, lines 19-24), so
+/// by `assertActiveSigner` — which runs after `getWalletClients()` has already made an
+/// `eth_accounts` request over this connection — the string is in hand with no second
+/// keystore prompt. On `status`, which calls this before its first request, the resolution
+/// is what the very next line would have triggered anyway.
+///
+/// Anything that goes wrong resolving it is swallowed: an unset `RPC_URL` or a value that is
+/// not a URL is not this function's business, and whatever consumes the endpoint fails on it
+/// there, loudly, a moment later. A warning must never be the thing that ends a run.
+async function resolvedEndpointUrl(connection: SignerConnection): Promise<string | undefined> {
+  const url = connection.networkConfig.url;
+  if (url === undefined) return undefined;
+  try {
+    return await url.getUrl();
+  } catch {
+    return undefined;
+  }
+}
+
 /// Warns, loudly, when either endpoint is plaintext `http:` to a non-loopback host.
 ///
 /// Not fatal: a node on the operator's own LAN over plain HTTP is a legitimate and common
@@ -398,9 +444,17 @@ function isLoopbackHost(hostname: string): boolean {
 /// state, and on the plain-transfer path turn one ordinary funding transfer into a donation
 /// — and over plaintext that entire capability belongs to anyone on the path, not just to
 /// whoever runs the endpoint. TLS is what limits it to the operator of the URL.
-export function warnOnPlaintextEndpoints() {
-  for (const name of ["RPC_URL", "BEACON_NODE_URL"] as const) {
-    const value = process.env[name];
+///
+/// The RPC endpoint comes from the resolved connection, not from `process.env` — see
+/// `resolvedEndpointUrl`. `BEACON_NODE_URL` is a plain environment variable everywhere in
+/// this repository (`requireBeaconNodeUrl` is the only reader, and it reads
+/// `process.env.BEACON_NODE_URL`), so for it the environment IS the resolved value.
+export async function warnOnPlaintextEndpoints(connection: SignerConnection) {
+  const endpoints = [
+    { name: "RPC_URL", value: await resolvedEndpointUrl(connection) },
+    { name: "BEACON_NODE_URL", value: process.env.BEACON_NODE_URL },
+  ] as const;
+  for (const { name, value } of endpoints) {
     if (value === undefined || value === "") continue;
     let url: URL;
     try {
@@ -619,12 +673,15 @@ export function formatPoolState(state: number | bigint): string {
 /// printed and nothing about it is asserted — an environment-supplied `PRIVATE_KEY` that
 /// outranks a keystore entry is exactly the case this catches, and it is invisible without
 /// a declaration to check against.
-export function assertActiveSigner(
+///
+/// It is `async` for one reason: the plaintext-endpoint warning it fires first has to await
+/// the connection's resolved RPC URL, which Hardhat hands over a promise.
+export async function assertActiveSigner(
   connection: SignerConnection,
   activeAddress: Address,
   label: string,
-): Address {
-  warnOnPlaintextEndpoints();
+): Promise<Address> {
+  await warnOnPlaintextEndpoints(connection);
   console.log(`${label} active signer: ${activeAddress} (network ${connection.networkName})`);
 
   const expectedSigner = process.env.EXPECTED_SIGNER ?? "";

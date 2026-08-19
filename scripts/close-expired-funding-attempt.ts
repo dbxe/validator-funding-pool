@@ -14,7 +14,7 @@ async function main() {
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
-  const signer = assertActiveSigner(
+  const signer = await assertActiveSigner(
     connection,
     wallet.account.address,
     "close-expired-funding-attempt",

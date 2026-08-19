@@ -14,9 +14,15 @@ async function main() {
   // Every other command reaches this through `assertActiveSigner`. `status` signs nothing,
   // so it calls it directly — a status read is exactly where an operator would notice that
   // the endpoint everything else trusts is plaintext.
-  warnOnPlaintextEndpoints();
+  //
+  // It runs after `network.create()` rather than before it because the URL it checks is the
+  // connection's resolved one, which may come from the encrypted keystore rather than the
+  // environment. Creating the connection sends no request; the resolution this forces is the
+  // one the first `eth_call` below would have forced anyway.
+  const connection = await network.create();
+  await warnOnPlaintextEndpoints(connection);
   const deployment = readDeployment();
-  const { viem } = await network.create();
+  const { viem } = connection;
   const publicClient = await viem.getPublicClient();
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
   // `status` reports the forwarder's balance and is the read-only command an operator runs to

@@ -31,6 +31,7 @@ import {
   parseBigIntList,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
+  warnOnPlaintextEndpoints,
   type PoolOutflow,
 } from "../scripts/lib/common.js";
 
@@ -418,17 +419,130 @@ describe("waitForSenderVerifiedReceipt", function () {
   });
 });
 
+describe("warnOnPlaintextEndpoints", function () {
+  /// A connection whose resolved `url` behaves exactly as Hardhat's
+  /// `ResolvedConfigurationVariable` does: the value is behind a promise, and it does NOT
+  /// come from `process.env`. That is the whole point of the fixture — the keystore path
+  /// this repository documents for mainnet leaves `process.env.RPC_URL` unset, so a check
+  /// that read the environment would see nothing to warn about.
+  function connectionWithUrl(resolved: string | (() => Promise<string>)) {
+    return {
+      networkName: "rpc",
+      networkConfig: {
+        url: {
+          getUrl: typeof resolved === "string" ? async () => resolved : resolved,
+        },
+      },
+    };
+  }
+
+  /// An `edr-simulated` network: a resolved config with no `url` at all.
+  const noUrl = { networkName: "hardhatMainnet", networkConfig: {} };
+
+  async function warningsFor(
+    connection: Parameters<typeof warnOnPlaintextEndpoints>[0],
+  ): Promise<string[]> {
+    const warn = captureWarn();
+    try {
+      await warnOnPlaintextEndpoints(connection);
+      return warn.lines;
+    } finally {
+      warn.restore();
+    }
+  }
+
+  function withoutEndpointEnv<T>(run: () => Promise<T>): Promise<T> {
+    const originalRpc = process.env.RPC_URL;
+    const originalBeacon = process.env.BEACON_NODE_URL;
+    delete process.env.RPC_URL;
+    delete process.env.BEACON_NODE_URL;
+    return run().finally(() => {
+      restoreEnv("RPC_URL", originalRpc);
+      restoreEnv("BEACON_NODE_URL", originalBeacon);
+    });
+  }
+
+  it("warns on a non-loopback plaintext RPC_URL that never appears in the environment", async function () {
+    await withoutEndpointEnv(async () => {
+      const lines = await warningsFor(connectionWithUrl("http://10.0.0.7:8545"));
+
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /WARNING: RPC_URL is plaintext http:\/\/ to 10\.0\.0\.7, which is not loopback/);
+      assert.match(lines[0], /Anyone on the network path/);
+      assert.match(lines[0], /SECURITY\.md §2/);
+      // The environment is not where the value came from, and the check still fired.
+      assert.equal(process.env.RPC_URL, undefined);
+    });
+  });
+
+  it("says nothing about an https RPC_URL, or about one on loopback", async function () {
+    await withoutEndpointEnv(async () => {
+      for (const url of [
+        "https://mainnet.example.com",
+        "http://localhost:8545",
+        "http://127.0.0.1:8545",
+        "http://127.10.20.30:8545",
+        "http://[::1]:8545",
+        "https://10.0.0.7:8545",
+      ]) {
+        assert.deepEqual(await warningsFor(connectionWithUrl(url)), [], url);
+      }
+    });
+  });
+
+  it("still reads BEACON_NODE_URL from the environment, which is where it lives", async function () {
+    await withoutEndpointEnv(async () => {
+      process.env.BEACON_NODE_URL = "http://10.0.0.9:5052";
+
+      const lines = await warningsFor(connectionWithUrl("https://mainnet.example.com"));
+
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /WARNING: BEACON_NODE_URL is plaintext http:\/\/ to 10\.0\.0\.9/);
+    });
+  });
+
+  it("warns about both endpoints when both are plaintext", async function () {
+    await withoutEndpointEnv(async () => {
+      process.env.BEACON_NODE_URL = "http://10.0.0.9:5052";
+
+      const lines = await warningsFor(connectionWithUrl("http://10.0.0.7:8545"));
+
+      assert.equal(lines.length, 2);
+      assert.match(lines[0], /RPC_URL is plaintext/);
+      assert.match(lines[1], /BEACON_NODE_URL is plaintext/);
+    });
+  });
+
+  it("is silent, and never throws, when the endpoint cannot be resolved or is not a URL", async function () {
+    await withoutEndpointEnv(async () => {
+      // A network with no endpoint at all.
+      assert.deepEqual(await warningsFor(noUrl), []);
+      // Hardhat's `getUrl()` rejects for an unset variable and for a value that is not a
+      // URL. A warning must not be the thing that ends a run.
+      assert.deepEqual(
+        await warningsFor(
+          connectionWithUrl(async () => {
+            throw new Error("Configuration variable RPC_URL not found");
+          }),
+        ),
+        [],
+      );
+      assert.deepEqual(await warningsFor(connectionWithUrl("")), []);
+    });
+  });
+});
+
 describe("assertActiveSigner", function () {
   const nonLedger = { networkName: "rpc", networkConfig: {} };
   const ledger = { networkName: "ledger", networkConfig: { ledgerAccounts: [SIGNER] } };
 
-  it("prints the active signer and the network on every connection", function () {
+  it("prints the active signer and the network on every connection", async function () {
     const original = process.env.EXPECTED_SIGNER;
     const log = captureLog();
     delete process.env.EXPECTED_SIGNER;
 
     try {
-      assert.equal(assertActiveSigner(nonLedger, SIGNER, "fund"), SIGNER);
+      assert.equal(await assertActiveSigner(nonLedger, SIGNER, "fund"), SIGNER);
       assert.deepEqual(log.lines, [`fund active signer: ${SIGNER} (network rpc)`]);
     } finally {
       log.restore();
@@ -436,7 +550,7 @@ describe("assertActiveSigner", function () {
     }
   });
 
-  it("requires LEDGER_ADDRESS on a Ledger-signing connection", function () {
+  it("requires LEDGER_ADDRESS on a Ledger-signing connection", async function () {
     const original = process.env.LEDGER_ADDRESS;
     const originalExpected = process.env.EXPECTED_SIGNER;
     const log = captureLog();
@@ -444,7 +558,7 @@ describe("assertActiveSigner", function () {
     delete process.env.EXPECTED_SIGNER;
 
     try {
-      assert.throws(
+      await assert.rejects(
         () => assertActiveSigner(ledger, SIGNER, "fund"),
         /fund is connected to a Ledger-signing network but LEDGER_ADDRESS is unset/,
       );
@@ -455,7 +569,7 @@ describe("assertActiveSigner", function () {
     }
   });
 
-  it("asserts nothing about the address when neither variable is declared", function () {
+  it("asserts nothing about the address when neither variable is declared", async function () {
     const originalExpected = process.env.EXPECTED_SIGNER;
     const originalLedger = process.env.LEDGER_ADDRESS;
     const log = captureLog();
@@ -463,7 +577,7 @@ describe("assertActiveSigner", function () {
     delete process.env.LEDGER_ADDRESS;
 
     try {
-      assert.equal(assertActiveSigner(nonLedger, OTHER_SIGNER, "claim"), OTHER_SIGNER);
+      assert.equal(await assertActiveSigner(nonLedger, OTHER_SIGNER, "claim"), OTHER_SIGNER);
     } finally {
       log.restore();
       restoreEnv("EXPECTED_SIGNER", originalExpected);
@@ -471,24 +585,24 @@ describe("assertActiveSigner", function () {
     }
   });
 
-  it("enforces EXPECTED_SIGNER on a network that signs with no device", function () {
+  it("enforces EXPECTED_SIGNER on a network that signs with no device", async function () {
     const original = process.env.EXPECTED_SIGNER;
     const log = captureLog();
     process.env.EXPECTED_SIGNER = SIGNER;
 
     try {
-      assert.equal(assertActiveSigner(nonLedger, SIGNER, "fund"), SIGNER);
+      assert.equal(await assertActiveSigner(nonLedger, SIGNER, "fund"), SIGNER);
       // Declared and active differ only in case: still the same account.
       assert.equal(
-        assertActiveSigner(nonLedger, SIGNER.toUpperCase().replace("0X", "0x") as Address, "fund").toLowerCase(),
+        (await assertActiveSigner(nonLedger, SIGNER.toUpperCase().replace("0X", "0x") as Address, "fund")).toLowerCase(),
         SIGNER,
       );
-      assert.throws(
+      await assert.rejects(
         () => assertActiveSigner(nonLedger, OTHER_SIGNER, "fund"),
         /fund would sign with .* not the declared EXPECTED_SIGNER/,
       );
       process.env.EXPECTED_SIGNER = "not-an-address";
-      assert.throws(
+      await assert.rejects(
         () => assertActiveSigner(nonLedger, SIGNER, "fund"),
         /EXPECTED_SIGNER not-an-address is not a 0x-prefixed 20-byte address/,
       );
@@ -498,7 +612,7 @@ describe("assertActiveSigner", function () {
     }
   });
 
-  it("enforces EXPECTED_SIGNER on the Ledger path too, alongside LEDGER_ADDRESS", function () {
+  it("enforces EXPECTED_SIGNER on the Ledger path too, alongside LEDGER_ADDRESS", async function () {
     const originalExpected = process.env.EXPECTED_SIGNER;
     const originalLedger = process.env.LEDGER_ADDRESS;
     const log = captureLog();
@@ -507,12 +621,12 @@ describe("assertActiveSigner", function () {
 
     try {
       // The device account is the one that would sign, and it is not the declared one.
-      assert.throws(
+      await assert.rejects(
         () => assertActiveSigner(ledger, SIGNER, "fund"),
         /not the declared EXPECTED_SIGNER/,
       );
       process.env.EXPECTED_SIGNER = SIGNER;
-      assert.equal(assertActiveSigner(ledger, SIGNER, "fund"), SIGNER);
+      assert.equal(await assertActiveSigner(ledger, SIGNER, "fund"), SIGNER);
     } finally {
       log.restore();
       restoreEnv("EXPECTED_SIGNER", originalExpected);
@@ -520,7 +634,7 @@ describe("assertActiveSigner", function () {
     }
   });
 
-  it("refuses to sign with an account that is not the Ledger account", function () {
+  it("refuses to sign with an account that is not the Ledger account", async function () {
     const original = process.env.LEDGER_ADDRESS;
     const originalExpected = process.env.EXPECTED_SIGNER;
     const log = captureLog();
@@ -528,11 +642,14 @@ describe("assertActiveSigner", function () {
     delete process.env.EXPECTED_SIGNER;
 
     try {
-      assert.throws(
+      await assert.rejects(
         () => assertActiveSigner(ledger, OTHER_SIGNER, "fund"),
         /fund would sign with .* not the Ledger account/,
       );
-      assert.equal(assertActiveSigner(ledger, SIGNER.toUpperCase().replace("0X", "0x") as Address, "fund").toLowerCase(), SIGNER);
+      assert.equal(
+        (await assertActiveSigner(ledger, SIGNER.toUpperCase().replace("0X", "0x") as Address, "fund")).toLowerCase(),
+        SIGNER,
+      );
     } finally {
       log.restore();
       restoreEnv("LEDGER_ADDRESS", original);
