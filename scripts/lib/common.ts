@@ -26,6 +26,7 @@ export const DEFAULT_DEPOSIT_DATA_FILE = "deposit-data.json";
 export const PREDEPOSIT_GWEI = 1_000_000_000n;
 export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
+export const PREDEPOSIT_WEI = PREDEPOSIT_GWEI * 1_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
 /// The settled state the credential confirmation reads, before the same credentials are
@@ -2241,6 +2242,28 @@ export function readPredepositAndTopUpDepositData(
     );
   }
   return { predeposit, topUp };
+}
+
+/// Requires the pool's own `PREDEPOSIT_WEI` to equal the local constant.
+///
+/// `commit-predeposit` used to send `{ value: await pool.read.PREDEPOSIT_WEI() }`, which
+/// let the amount of ETH the transaction carries be chosen by an RPC response. It was safe
+/// only because `assertDeploymentIntegrity` had already compared the pool's runtime code
+/// against the local build — an argument about a different check, made about a value on the
+/// capital path, one refactor away from not holding.
+///
+/// The amount is now the local constant and the chain's value is asserted against it. A
+/// divergence is fatal rather than followed: the audited contract declares
+/// `PREDEPOSIT_WEI = 1 ether`, so a pool reporting anything else is not that contract, and
+/// the deployment record names something other than what the operator thinks it does.
+export function assertContractPredepositWei(chainPredepositWei: bigint, label: string) {
+  if (chainPredepositWei === PREDEPOSIT_WEI) return;
+  throw new Error(
+    `${label}: the pool reports PREDEPOSIT_WEI ${formatWei(chainPredepositWei)}, but the audited ` +
+      `contract declares ${formatWei(PREDEPOSIT_WEI)}. Nothing has been sent. A pool that does ` +
+      `not agree on the predeposit amount is not the contract this checkout builds, so the ` +
+      `deployment record ${deploymentPath()} names something else; do not send capital to it`,
+  );
 }
 
 /// Requires the pool's committed pubkey to equal the local deposit-data file's predeposit

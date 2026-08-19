@@ -6,6 +6,7 @@ import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "
 import {
   assertActiveSigner,
   assertCommittedPubkeyMatchesLocal,
+  assertContractPredepositWei,
   assertDeployedAt,
   assertExpectedPool,
   assertFundingWasCredited,
@@ -17,6 +18,7 @@ import {
   fundViaPlainTransfer,
   optionalEnvBigInt,
   parseBigIntList,
+  PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
 } from "../scripts/lib/common.js";
 
@@ -898,6 +900,33 @@ describe("assertStillFundable", function () {
         assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
       ),
     );
+  });
+});
+
+describe("assertContractPredepositWei", function () {
+  const ONE_ETH = 1_000_000_000_000_000_000n;
+
+  it("accepts a pool that agrees with the audited contract's 1 ether", function () {
+    assert.equal(PREDEPOSIT_WEI, ONE_ETH);
+    assert.doesNotThrow(() => assertContractPredepositWei(ONE_ETH, "commit-predeposit"));
+  });
+
+  it("is fatal on any divergence, because the amount is no longer the chain's to choose", function () {
+    // The command sends the local constant. A pool reporting something else is not the
+    // contract this checkout builds, whatever else agreed.
+    for (const reported of [0n, 1n, ONE_ETH - 1n, ONE_ETH + 1n, 31n * ONE_ETH]) {
+      assert.throws(
+        () => assertContractPredepositWei(reported, "commit-predeposit"),
+        (error: Error) => {
+          assert.match(error.message, /^commit-predeposit: the pool reports PREDEPOSIT_WEI /);
+          assert.match(error.message, new RegExp(`${reported} wei`));
+          assert.match(error.message, new RegExp(`audited contract declares ${ONE_ETH} wei`));
+          assert.match(error.message, /Nothing has been sent/);
+          assert.match(error.message, /do not send capital to it/);
+          return true;
+        },
+      );
+    }
   });
 });
 

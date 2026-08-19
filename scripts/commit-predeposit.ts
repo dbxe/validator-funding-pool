@@ -4,9 +4,11 @@ import {
   assertActiveSigner,
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorAbsent,
+  assertContractPredepositWei,
   assertDeploymentIntegrity,
   asHex,
   PREDEPOSIT_GWEI,
+  PREDEPOSIT_WEI,
   readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
@@ -34,6 +36,10 @@ async function main() {
     throw new Error(`commit-predeposit must be signed by the operator ${liveConfig.operator}`);
   }
 
+  // The 1 ETH this command sends is the local constant, not the chain's answer; the chain's
+  // answer only has to agree with it. See `assertContractPredepositWei`.
+  assertContractPredepositWei(await pool.read.PREDEPOSIT_WEI(), "commit-predeposit");
+
   const expectedCredentials = liveConfig.withdrawalCredentials;
   const expectedPubkey = process.env.EXPECTED_PUBKEY ? asHex(process.env.EXPECTED_PUBKEY) : undefined;
   const chainForkVersion = await readBeaconGenesisForkVersion("commit-predeposit");
@@ -59,7 +65,7 @@ async function main() {
   console.log(`Submitting operator-funded predeposit: 1 ETH`);
   const hash = await pool.write.commitAndPredeposit(
     [predeposit.pubkey, predeposit.signature, predeposit.depositDataRoot, topUp.signature, topUp.depositDataRoot],
-    { value: await pool.read.PREDEPOSIT_WEI() },
+    { value: PREDEPOSIT_WEI },
   );
   const receipt = await waitForSenderVerifiedReceipt(
     publicClient,
