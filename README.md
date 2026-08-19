@@ -290,7 +290,7 @@ The `ledger` network configures no `accounts`, so no private key is read for it.
 
 ### Encrypted Keystore
 
-`hardhat-keystore` ships as a plugin dependency of `@nomicfoundation/hardhat-toolbox-viem`, so it is already available with no config change. The config resolves `RPC_URL` and `PRIVATE_KEY` through `configVariable()`, which reads the keystore before falling back to the environment.
+`hardhat-keystore` ships as a plugin dependency of `@nomicfoundation/hardhat-toolbox-viem`, so it is already available with no config change. The config resolves `RPC_URL` and `PRIVATE_KEY` through `configVariable()`, which consults the keystore only when the environment does not already supply the value.
 
 ```bash
 npx hardhat keystore set RPC_URL
@@ -304,8 +304,18 @@ Values are prompted for, encrypted with a password, and stored outside the repos
 
 Two behaviours to know:
 
-- The keystore takes precedence over the environment. A stale keystore entry shadows the `RPC_URL` you exported in your shell, with no warning. Use `npx hardhat keystore get RPC_URL` when a run targets the wrong chain.
-- The keystore is skipped entirely under CI, which falls back to environment variables.
+- **The environment outranks the keystore, not the other way around.** Hardhat reads `process.env[name]` first and, when it finds a string there, returns it and skips the `configurationVariables` hook chain entirely — so the keystore plugin is never consulted (`hardhat/dist/src/internal/core/configuration-variables.js`, `_getRawValue`, lines 77-84). An empty string counts as set, so even `export PRIVATE_KEY=` wins. A forgotten `export PRIVATE_KEY=...` or a sourced `.env` therefore silently outranks the key you stored, and the run signs with the plaintext key while you believe the keystore is in use.
+
+  Before any mainnet command, clear both in the shell that will run it and confirm the keystore still holds what you expect:
+
+  ```bash
+  unset PRIVATE_KEY RPC_URL
+  npx hardhat keystore get RPC_URL
+  npx hardhat keystore get PRIVATE_KEY
+  ```
+
+  `keystore get` reads the keystore directly and is unaffected by the environment, so it tells you what the keystore holds, not what a run would use. The `unset` is what makes the run use it.
+- The keystore is skipped entirely under CI, which falls back to environment variables (`@nomicfoundation/hardhat-keystore/dist/src/internal/hook-handlers/configuration-variables.js`, lines 17-19).
 
 A keystore protects a key at rest on a machine you already trust. It does not protect against a compromised machine: once you enter the password the plaintext key is in this process. Only a hardware wallet moves the key out of reach.
 
