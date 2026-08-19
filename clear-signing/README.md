@@ -18,11 +18,13 @@ Every pool deployment is a distinct contract at a distinct address. A descriptor
 
 ## Registry Submission
 
+The registry moved to Ethereum Foundation stewardship in May 2026 and now lives at `https://github.com/ethereum/clear-signing-erc7730-registry`. The old `LedgerHQ/clear-signing-erc7730-registry` URL redirects there. Anyone may submit; being the deployer is not required, and inclusion implies no audit or endorsement.
+
 The descriptor targets `specs/erc7730-v2.schema.json`, and `$schema` is the relative path registry files use, so the file drops into a registry checkout unchanged. It does not resolve from this repository.
 
-1. Replace the placeholder address with the deployed pool address and confirm `chainId`.
-2. Fork `https://github.com/LedgerHQ/clear-signing-erc7730-registry`.
-3. Copy the file to `registry/validator-funding-pool/calldata-ValidatorFundingPool.json`. One entity directory per pull request.
+1. Deploy the pool, then **verify it on Sourcify**. Registry CI checks Sourcify verification and will reject the pull request without it.
+2. Replace the placeholder address with the deployed pool address and confirm `chainId`.
+3. Fork the registry and copy the file to `registry/validator-funding-pool/calldata-ValidatorFundingPool.json`. One entity directory per pull request.
 4. Add the required test file at `registry/validator-funding-pool/testsv2/calldata-ValidatorFundingPool.tests.json`, following `specs/erc7730-tests-v2.schema.json`. It is not written here because it needs the real deployment address and real calldata samples.
 5. Lint before opening the pull request:
 
@@ -31,7 +33,9 @@ The descriptor targets `specs/erc7730-v2.schema.json`, and `$schema` is the rela
    erc7730 lint registry/validator-funding-pool/calldata-ValidatorFundingPool.json
    ```
 
-6. Open the pull request against the registry.
+6. Open the pull request. CI re-runs schema validation, checks the signature keys produce valid selectors, confirms Sourcify verification, and flags ABI mismatches. ABI-comparison findings are warnings; schema and selector failures are errors.
+
+Ledger's developer-portal reference pages still describe ERC-7730 v1 and will steer you into constructs that fail current CI — an `excluded` key, bare 4-byte selectors as format keys, and a format named `addressOrName`. None of those exist in v2. Treat `specs/erc7730-v2.schema.json` and `erc7730 lint` as the authority.
 
 ## Validation Status
 
