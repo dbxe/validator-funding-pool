@@ -841,6 +841,25 @@ const POOL_ARTIFACT_FILE = path.join(
   "ValidatorFundingPool.json",
 );
 
+/// The ceiling on how many bytes an artifact may declare immutable.
+///
+/// It exists because the ranges are taken from the CANDIDATE artifact and applied to the
+/// chain's code as well as to the artifact's. A candidate that declares most or all of the
+/// runtime immutable masks both sides to zeroes and then "matches" any contract at all —
+/// the comparison would be checking nothing while printing that it passed. A total that
+/// large is not a plausible immutable layout, so it is fatal rather than a match.
+///
+/// Sized from the real artifact, not from the number of immutables. solc emits one 32-byte
+/// range per *reference site*, and one immutable is read at several sites: this contract's
+/// five immutables produce 19 sites, 608 bytes, identically under both build profiles
+/// (`artifacts/contracts/ValidatorFundingPool.sol/ValidatorFundingPool.json`,
+/// `immutableReferences`; 16861 bytes of runtime under `default`, 10002 under
+/// `production`). 2048 is roughly three times the observed total, room for a contract with
+/// materially more immutable reads, and still far below the point where masking could hide
+/// a different contract — every unmasked byte, metadata hash included, must match exactly.
+const MAX_MASKED_IMMUTABLE_BYTES = 2048;
+const OBSERVED_POOL_IMMUTABLE_BYTES = 608;
+
 /// Masks every immutable's byte range with zeroes.
 ///
 /// Runtime code is identical across deployments of the same source and settings EXCEPT at
@@ -851,7 +870,10 @@ const POOL_ARTIFACT_FILE = path.join(
 /// solc's trailing metadata hash, still has to match exactly.
 ///
 /// The ranges come from the artifact and are applied to the artifact and the chain code
-/// alike, so a range the artifact does not declare is a range that must match.
+/// alike, so a range the artifact does not declare is a range that must match — and a range
+/// set that is too broad is a range set that checks nothing. Two plausibility bounds are
+/// enforced before a single byte is masked: solc emits disjoint ranges, so an overlapping
+/// set is rejected, and the total is capped at `MAX_MASKED_IMMUTABLE_BYTES`.
 export function maskImmutableRanges(
   code: Hex,
   immutableReferences: Record<string, readonly ImmutableRange[]>,
@@ -863,7 +885,7 @@ export function maskImmutableRanges(
   }
   const bytes = Buffer.from(body, "hex");
 
-  let maskedBytes = 0;
+  const declared: { astId: string; start: number; length: number }[] = [];
   for (const [astId, ranges] of Object.entries(immutableReferences)) {
     for (const range of ranges) {
       const { start, length } = range;
@@ -879,10 +901,40 @@ export function maskImmutableRanges(
             `[${start}, ${start + length}) which is outside the ${bytes.length}-byte code`,
         );
       }
-      bytes.fill(0, start, start + length);
-      maskedBytes += length;
+      declared.push({ astId, start, length });
     }
   }
+
+  const ordered = [...declared].sort((left, right) => left.start - right.start);
+  for (let i = 1; i < ordered.length; ++i) {
+    const previous = ordered[i - 1];
+    const current = ordered[i];
+    if (current.start < previous.start + previous.length) {
+      throw new Error(
+        `${what}: immutable references ${previous.astId} ` +
+          `[${previous.start}, ${previous.start + previous.length}) and ${current.astId} ` +
+          `[${current.start}, ${current.start + current.length}) overlap. solc emits disjoint ` +
+          `ranges for distinct immutables, so this artifact's immutable layout is implausible; ` +
+          `masking it would zero out more of the code than the immutables occupy. Delete ` +
+          `artifacts/ and run "npm run build"`,
+      );
+    }
+  }
+
+  const maskedBytes = declared.reduce((total, range) => total + range.length, 0);
+  if (maskedBytes > MAX_MASKED_IMMUTABLE_BYTES) {
+    throw new Error(
+      `${what}: the immutable ranges cover ${maskedBytes} of the ${bytes.length} bytes of code, ` +
+        `above the ${MAX_MASKED_IMMUTABLE_BYTES}-byte ceiling. A real build of ` +
+        `ValidatorFundingPool declares ${OBSERVED_POOL_IMMUTABLE_BYTES} bytes under either ` +
+        `solidity profile, so this artifact's immutable layout is implausible. The ranges are ` +
+        `masked on the chain's code too: a range set this broad would zero out the very bytes the ` +
+        `comparison exists to check and match any contract at all. Delete artifacts/ and run ` +
+        `"npm run build"`,
+    );
+  }
+
+  for (const { start, length } of declared) bytes.fill(0, start, start + length);
 
   return { masked: `0x${bytes.toString("hex")}` as Hex, maskedBytes };
 }
@@ -949,50 +1001,32 @@ export async function assertPoolRuntimeCodeMatchesLocalBuild(
       `still describe a contract nobody audited. Do not send capital to this address. If the pool ` +
       `was built with the other solidity profile, rebuild locally with "npm run build" (default) or ` +
       `"npx hardhat compile --build-profile production" and re-run; hardhat keeps only the ` +
-      `last-built profile's artifacts, and POOL_ARTIFACT_FILES can add a saved copy of the other one`,
+      `last-built profile's artifacts, so verifying against the other one means rebuilding`,
   );
 }
 
 /// Collects the local build artifacts the pool's runtime code may match.
 ///
-/// Hardhat 3 writes every build profile to the same `artifacts/` tree, so only the
-/// last-built profile is on disk. `POOL_ARTIFACT_FILES` takes a comma-separated list of
-/// additional artifact JSON files — a saved copy of the other profile's artifact — and can
-/// only ADD candidates, never replace the one hardhat just built.
+/// There is exactly one source: the hardhat build output in this checkout. No environment
+/// variable adds a candidate. An added candidate controls both sides of the comparison —
+/// its `deployedBytecode` is what the chain code is compared against AND its
+/// `immutableReferences` decide which bytes are ignored on both sides — so an
+/// externally-supplied artifact can always be made to match, which makes the whole check
+/// decorative. Hardhat 3 writes every build profile to the same `artifacts/` tree, so
+/// verifying against the profile that is not on disk means rebuilding with that profile and
+/// re-running; that is what the mismatch error says.
 export function readLocalPoolBuildArtifacts(
   buildOutput: string = POOL_ARTIFACT_FILE,
 ): PoolBuildCandidate[] {
-  const candidates: PoolBuildCandidate[] = [];
-
-  // The build output is allowed to be absent only when something else supplies a
-  // candidate; an explicitly named `POOL_ARTIFACT_FILES` entry that is missing is always a
-  // mistake and is never quietly dropped.
-  if (existsSync(buildOutput)) candidates.push(readPoolBuildCandidate(buildOutput));
-  for (const file of extraPoolArtifactFiles()) {
-    if (!existsSync(file)) {
-      throw new Error(`POOL_ARTIFACT_FILES names ${file}, which does not exist`);
-    }
-    candidates.push(readPoolBuildCandidate(file));
-  }
-
-  if (candidates.length === 0) {
+  if (!existsSync(buildOutput)) {
     throw new Error(missingArtifactMessage([buildOutput]));
   }
-  return candidates;
+  return [readPoolBuildCandidate(buildOutput)];
 }
 
 function readPoolBuildCandidate(file: string): PoolBuildCandidate {
   const artifact = JSON.parse(readFileSync(file, "utf8")) as PoolBuildArtifact;
   return { source: file, profile: describeBuildProfile(artifact), artifact };
-}
-
-function extraPoolArtifactFiles(): string[] {
-  const extra = process.env.POOL_ARTIFACT_FILES;
-  if (extra === undefined || extra === "") return [];
-  return extra
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "");
 }
 
 function missingArtifactMessage(files: readonly string[]): string {

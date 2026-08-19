@@ -66,16 +66,6 @@ function codeReader(code: Hex | undefined) {
   return { getCode: async (_args: { address: Address }) => code };
 }
 
-function silently<T>(run: () => T): T {
-  const originalLog = console.log;
-  console.log = () => {};
-  try {
-    return run();
-  } finally {
-    console.log = originalLog;
-  }
-}
-
 async function silentlyAsync<T>(run: () => Promise<T>): Promise<T> {
   const originalLog = console.log;
   console.log = () => {};
@@ -353,14 +343,20 @@ describe("pool authenticity", async function () {
     );
   });
 
-  it("refuses an explicitly named POOL_ARTIFACT_FILES entry that does not exist", function () {
+  it("reads only the hardhat build output; no environment variable adds a candidate", function () {
     const original = process.env.POOL_ARTIFACT_FILES;
     process.env.POOL_ARTIFACT_FILES = path.join("artifacts", "saved-production.json");
 
     try {
+      // The variable is gone. A named file — existing or not — changes nothing, and the
+      // one candidate is still the build output in this checkout.
+      const candidates = readLocalPoolBuildArtifacts();
+      assert.equal(candidates.length, 1);
+      assert.equal(candidates[0].source, POOL_ARTIFACT_FILE);
+
       assert.throws(
-        () => readLocalPoolBuildArtifacts(),
-        /POOL_ARTIFACT_FILES names .*saved-production.json, which does not exist/,
+        () => readLocalPoolBuildArtifacts(path.join("artifacts", "nowhere", "Pool.json")),
+        /no local build artifact for ValidatorFundingPool was found/,
       );
     } finally {
       if (original === undefined) delete process.env.POOL_ARTIFACT_FILES;
@@ -384,12 +380,101 @@ describe("pool authenticity", async function () {
       /sample is not a whole number of hex-encoded bytes/,
     );
     assert.equal(
-      silently(() => maskImmutableRanges(code, { "1": [{ start: 0, length: 10 }] }, "sample").masked),
-      `0x${"00".repeat(10)}`,
-    );
-    assert.equal(
       maskImmutableRanges(code, { "1": [{ start: 2, length: 2 }] }, "sample").maskedBytes,
       2,
+    );
+  });
+
+  it("rejects overlapping immutable ranges", function () {
+    const code = `0x${"ab".repeat(64)}` as Hex;
+
+    const overlapping: Record<string, readonly { start: number; length: number }[]>[] = [
+      { "1": [{ start: 0, length: 32 }], "2": [{ start: 31, length: 4 }] },
+      { "1": [{ start: 10, length: 8 }, { start: 12, length: 2 }] },
+      // Identical ranges declared twice are the degenerate overlap.
+      { "1": [{ start: 4, length: 4 }], "2": [{ start: 4, length: 4 }] },
+    ];
+    for (const references of overlapping) {
+      assert.throws(
+        () => maskImmutableRanges(code, references, "sample"),
+        (error: Error) => {
+          assert.match(error.message, /sample: immutable references .* overlap/);
+          assert.match(error.message, /implausible/);
+          return true;
+        },
+      );
+    }
+
+    // Adjacent, non-overlapping ranges are the normal case and stay accepted.
+    assert.equal(
+      maskImmutableRanges(code, { "1": [{ start: 0, length: 32 }], "2": [{ start: 32, length: 32 }] }, "sample")
+        .maskedBytes,
+      64,
+    );
+  });
+
+  it("rejects an artifact whose immutable ranges exceed the masking budget", function () {
+    const code = `0x${"ab".repeat(4_000)}` as Hex;
+
+    // The whole-code mask: the candidate declares every byte immutable, which would zero
+    // both sides and match any contract at all. It used to be accepted.
+    assert.throws(
+      () => maskImmutableRanges(code, { "1": [{ start: 0, length: 4_000 }] }, "sample"),
+      (error: Error) => {
+        assert.match(error.message, /the immutable ranges cover 4000 of the 4000 bytes of code/);
+        assert.match(error.message, /above the 2048-byte ceiling/);
+        assert.match(error.message, /implausible/);
+        return true;
+      },
+    );
+
+    // The budget is a total, not a per-range bound: many small disjoint ranges add up.
+    const many = Array.from({ length: 65 }, (_unused, index) => ({ start: index * 32, length: 32 }));
+    assert.throws(
+      () => maskImmutableRanges(code, { "1": many }, "sample"),
+      /cover 2080 of the 4000 bytes of code, above the 2048-byte ceiling/,
+    );
+    assert.equal(
+      maskImmutableRanges(code, { "1": many.slice(0, 64) }, "sample").maskedBytes,
+      2_048,
+    );
+  });
+
+  it("leaves the real artifact's immutable layout comfortably inside both bounds", function () {
+    const artifact = localArtifact();
+    const { maskedBytes } = maskImmutableRanges(
+      artifact.deployedBytecode,
+      artifact.immutableReferences ?? {},
+      "local artifact",
+    );
+
+    // The budget is sized against this number, so record it: solc emits one 32-byte range
+    // per reference site, not one per immutable, and the five immutables are read at 19
+    // sites under both build profiles.
+    assert.equal(maskedBytes, 608);
+    assert.equal(maskedBytes % 32, 0);
+  });
+
+  it("refuses a candidate that masks the whole runtime instead of matching it", async function () {
+    const { poolA } = await networkHelpers.loadFixture(twoPoolsFixture);
+    const chainCode = (await publicClient.getCode({ address: poolA.address })) as Hex;
+    const length = toBytes(chainCode).length;
+
+    // The authenticity hole this test exists for: a candidate artifact controls BOTH the
+    // bytecode it is compared against and the ranges the comparison is allowed to ignore.
+    // Declaring the entire runtime immutable masks the chain's code to zeroes too, so
+    // completely unrelated bytecode "matches". It must be fatal, not a pass.
+    const impostor = {
+      deployedBytecode: toHex(Buffer.alloc(length, 0x5b)),
+      immutableReferences: { "1": [{ start: 0, length }] },
+    };
+
+    await assert.rejects(
+      assertPoolRuntimeCodeMatchesLocalBuild(publicClient, poolA.address, candidateOf(impostor)),
+      (error: Error) => {
+        assert.match(error.message, /above the 2048-byte ceiling/);
+        return true;
+      },
     );
   });
 
