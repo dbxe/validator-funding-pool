@@ -1,0 +1,163 @@
+{
+  "$schema": "../../specs/erc7730-v2.schema.json",
+  "$comment": "PLACEHOLDER DEPLOYMENT. context.contract.deployments[0].address is the zero address because no mainnet pool has been deployed. Replace it with the pool address from deployments/latest.json before submitting to any registry. A descriptor bound to the wrong address renders one pool's labels over another pool's calldata and is worse than blind signing.",
+  "context": {
+    "$id": "ValidatorFundingPool",
+    "contract": {
+      "deployments": [
+        {
+          "chainId": 1,
+          "address": "0x0000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "Validator Funding Pool",
+    "contractName": "ValidatorFundingPool"
+  },
+  "display": {
+    "formats": {
+      "fund()": {
+        "intent": "Fund validator pool",
+        "interpolatedIntent": "Fund validator pool with {@.value}",
+        "fields": [
+          {
+            "label": "Amount",
+            "format": "amount",
+            "path": "@.value",
+            "visible": "always"
+          }
+        ]
+      },
+      "claim()": {
+        "intent": "Claim pool proceeds to your own address",
+        "fields": []
+      },
+      "claimTo(address recipient)": {
+        "intent": "Claim pool proceeds to another address",
+        "interpolatedIntent": "Claim all pool proceeds to {recipient}",
+        "fields": [
+          {
+            "label": "Proceeds paid to",
+            "format": "addressName",
+            "params": {
+              "types": ["eoa", "wallet", "contract"],
+              "sources": ["local", "ens"]
+            },
+            "path": "#.recipient",
+            "visible": "always"
+          }
+        ]
+      },
+      "refund()": {
+        "intent": "Withdraw refund to your own address",
+        "fields": []
+      },
+      "refundTo(address recipient)": {
+        "intent": "Withdraw refund to another address",
+        "interpolatedIntent": "Withdraw the full refund to {recipient}",
+        "fields": [
+          {
+            "label": "Refund paid to",
+            "format": "addressName",
+            "params": {
+              "types": ["eoa", "wallet", "contract"],
+              "sources": ["local", "ens"]
+            },
+            "path": "#.recipient",
+            "visible": "always"
+          }
+        ]
+      },
+      "requestExit(uint256 maxFee)": {
+        "intent": "Request validator exit",
+        "interpolatedIntent": "Request validator exit, paying at most {maxFee}",
+        "fields": [
+          {
+            "label": "Max exit fee",
+            "format": "amount",
+            "path": "#.maxFee",
+            "visible": "always"
+          },
+          {
+            "label": "ETH sent",
+            "format": "amount",
+            "path": "@.value",
+            "visible": "always"
+          }
+        ]
+      },
+      "commitAndPredeposit(bytes pubkey, bytes predepositSignature_, bytes32 predepositDataRoot_, bytes topUpSignature_, bytes32 topUpDepositDataRoot_)": {
+        "intent": "Commit validator and submit predeposit",
+        "fields": [
+          {
+            "label": "Predeposit",
+            "format": "amount",
+            "path": "@.value",
+            "visible": "always"
+          },
+          {
+            "label": "Validator pubkey",
+            "format": "raw",
+            "path": "#.pubkey",
+            "visible": "always"
+          },
+          {
+            "label": "Predeposit data root",
+            "format": "raw",
+            "path": "#.predepositDataRoot_",
+            "visible": "always"
+          },
+          {
+            "label": "Top-up data root",
+            "format": "raw",
+            "path": "#.topUpDepositDataRoot_",
+            "visible": "always"
+          },
+          {
+            "label": "Predeposit signature",
+            "format": "raw",
+            "path": "#.predepositSignature_",
+            "visible": "never"
+          },
+          {
+            "label": "Top-up signature",
+            "format": "raw",
+            "path": "#.topUpSignature_",
+            "visible": "never"
+          }
+        ]
+      },
+      "openFundingAttempt(address[] participants, uint256[] fundingTargets)": {
+        "intent": "Open funding attempt",
+        "fields": [
+          {
+            "label": "Participant",
+            "format": "addressName",
+            "params": {
+              "types": ["eoa", "wallet", "contract"],
+              "sources": ["local", "ens"]
+            },
+            "path": "#.participants.[]",
+            "visible": "always"
+          },
+          {
+            "label": "Funding target",
+            "format": "amount",
+            "path": "#.fundingTargets.[]",
+            "visible": "always"
+          }
+        ]
+      },
+      "topUpValidator()": {
+        "intent": "Submit the 31 ETH validator top-up",
+        "fields": []
+      },
+      "closeExpiredFundingAttempt()": {
+        "intent": "Close the expired funding attempt",
+        "fields": []
+      }
+    }
+  }
+}
