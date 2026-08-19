@@ -8,9 +8,31 @@ const LEDGER_NETWORK = "ledger";
 
 /// Network selected for this process, mirroring Hardhat's own precedence: the
 /// `--network` CLI option wins over the `HARDHAT_NETWORK` environment variable.
+///
+/// Both CLI spellings must be recognised. Hardhat's own argv preprocessing splits
+/// `--option=value` into two arguments before any option is matched
+/// (`hardhat/dist/src/internal/cli/parser.js` `parseRawArguments`, lines 137-147),
+/// so `--network=ledger` selects the ledger network just as `--network ledger`
+/// does. Scanning only for the bare `--network` token missed that spelling and
+/// let the `LEDGER_ADDRESS` guard below be bypassed.
+///
+/// A `--network` with no usable value (`--network` as the last argument, or
+/// `--network=`) is treated identically: the CLI option is present and therefore
+/// wins over `HARDHAT_NETWORK`, but it names no network. Hardhat rejects both
+/// spellings on its own before any task runs.
 function selectedNetwork(): string | undefined {
-  const flagIndex = process.argv.indexOf("--network");
-  if (flagIndex !== -1) return process.argv[flagIndex + 1];
+  const NETWORK_FLAG = "--network";
+  for (let i = 0; i < process.argv.length; ++i) {
+    const argument = process.argv[i];
+    if (argument === NETWORK_FLAG) {
+      const value = process.argv[i + 1];
+      return value === undefined || value === "" ? undefined : value;
+    }
+    if (argument.startsWith(`${NETWORK_FLAG}=`)) {
+      const value = argument.slice(NETWORK_FLAG.length + 1);
+      return value === "" ? undefined : value;
+    }
+  }
   return process.env.HARDHAT_NETWORK;
 }
 
@@ -61,6 +83,19 @@ const config: HardhatUserConfig = {
       chainType: "l1",
       url: configVariable("RPC_URL"),
       accounts: [configVariable("PRIVATE_KEY")],
+    },
+    // Read-only path. Hardhat resolves an http network's `accounts` array on the
+    // connection's first JSON-RPC request
+    // (`hardhat/dist/src/internal/builtin-plugins/network-manager/request-handlers/handlers-array.js`
+    // line 55, reached from `hook-handlers/network.js` line 23), so the `rpc`
+    // network cannot answer a single `eth_call` without a resolvable
+    // `PRIVATE_KEY`. Omitting `accounts` entirely leaves it at Hardhat's
+    // `"remote"` default, which resolves no configuration variable at all, so
+    // `status` works for a Ledger-only operator who has no private key anywhere.
+    read: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("RPC_URL"),
     },
     // Hardware-wallet path. No `accounts` entry: the signing key never reaches
     // this process, and the Ledger plugin supplies the account and signature at

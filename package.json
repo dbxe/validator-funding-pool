@@ -20,7 +20,7 @@
     "claim": "hardhat run scripts/claim.ts --network rpc",
     "request-exit": "hardhat run scripts/request-exit.ts --network rpc",
     "sweep": "hardhat run scripts/sweep.ts --network rpc",
-    "status": "hardhat run scripts/status.ts --network rpc",
+    "status": "hardhat run scripts/status.ts --network read",
     "deploy:ledger": "hardhat run scripts/deploy.ts --network ledger",
     "deploy-forwarder:ledger": "hardhat run scripts/deploy-forwarder.ts --network ledger",
     "commit-predeposit:ledger": "hardhat run scripts/commit-predeposit.ts --network ledger",
