@@ -1733,16 +1733,27 @@ function assertBeaconSyncingResponseShape(
   return data as BeaconSyncingResponse["data"];
 }
 
-/// Builds a beacon API URL that PRESERVES any path component of `BEACON_NODE_URL`.
+/// Builds a beacon API URL that preserves BOTH the path component and the query of
+/// `BEACON_NODE_URL`.
 ///
-/// `new URL("/eth/v1/...", base)` is root-anchored and silently discards the base's path,
-/// so a hosted endpoint of the form `https://host/eth-beacon-node/<key>` was rewritten to
-/// `https://host/eth/v1/...` — a different endpoint, on which every preflight would have
-/// been deciding from whatever that URL happened to answer. Appending relative to a base
-/// with a trailing slash keeps the prefix.
+/// Two ways to lose the endpoint, and both were live. `new URL("/eth/v1/...", base)` is
+/// root-anchored and silently discards the base's path, so a hosted endpoint of the form
+/// `https://host/eth-beacon-node/<key>` was rewritten to `https://host/eth/v1/...`.
+/// Resolving a relative reference against a base ALSO discards the base's query, so
+/// `https://host/prefix?apikey=<key>` lost the credential that makes the request work at
+/// all — and a provider that authenticates by query parameter answers 401 or 404, which the
+/// positive-absence check is explicitly written not to read as "the pubkey is free".
+///
+/// So the base is parsed first and the route is appended to its `pathname`, leaving
+/// `searchParams` in place for route parameters like `id` to merge into. Only the fragment
+/// is dropped: it is never sent to a server, and carrying it would put it after the query
+/// of a URL it does not belong to.
 export function beaconApiUrl(beaconNodeUrl: string, pathname: string): URL {
-  const base = beaconNodeUrl.endsWith("/") ? beaconNodeUrl : `${beaconNodeUrl}/`;
-  return new URL(pathname.replace(/^\/+/, ""), base);
+  const url = new URL(beaconNodeUrl);
+  url.hash = "";
+  const prefix = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+  url.pathname = `${prefix}${pathname.replace(/^\/+/, "")}`;
+  return url;
 }
 
 async function fetchBeaconJson<T>(beaconNodeUrl: string, pathname: string, label: string): Promise<T> {

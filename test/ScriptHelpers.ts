@@ -8,6 +8,7 @@ import {
   assertDeployedAt,
   assertFundingWasCredited,
   assertStillFundable,
+  beaconApiUrl,
   envBigInt,
   fundViaPlainTransfer,
   optionalEnvBigInt,
@@ -939,6 +940,60 @@ describe("unsigned decimal environment values", function () {
       () => parseBigIntList("1,,2", "FUNDING_TARGETS_GWEI"),
       /FUNDING_TARGETS_GWEI entry 1 "" is not a canonical unsigned decimal integer/,
     );
+  });
+});
+
+describe("beaconApiUrl", function () {
+  const ROUTE = "/eth/v1/beacon/states/head/validators";
+
+  it("keeps a path prefix, with or without a trailing slash, and on a bare host", function () {
+    assert.equal(
+      beaconApiUrl("https://host/eth-beacon-node/deadbeef", ROUTE).href,
+      "https://host/eth-beacon-node/deadbeef/eth/v1/beacon/states/head/validators",
+    );
+    assert.equal(
+      beaconApiUrl("https://host/eth-beacon-node/deadbeef/", ROUTE).href,
+      "https://host/eth-beacon-node/deadbeef/eth/v1/beacon/states/head/validators",
+    );
+    for (const base of ["https://host", "https://host/"]) {
+      assert.equal(
+        beaconApiUrl(base, ROUTE).href,
+        "https://host/eth/v1/beacon/states/head/validators",
+      );
+    }
+  });
+
+  it("keeps the base's query, which is where hosted endpoints put the API key", function () {
+    const url = beaconApiUrl("https://host/prefix?apikey=deadbeef", ROUTE);
+
+    assert.equal(url.pathname, "/prefix/eth/v1/beacon/states/head/validators");
+    assert.equal(url.searchParams.get("apikey"), "deadbeef");
+    assert.equal(url.href, "https://host/prefix/eth/v1/beacon/states/head/validators?apikey=deadbeef");
+  });
+
+  it("merges a route parameter into the base's query rather than replacing it", function () {
+    const url = beaconApiUrl("https://host/prefix?apikey=deadbeef&team=ops", ROUTE);
+    url.searchParams.set("id", "0xabc");
+
+    assert.equal(url.searchParams.get("apikey"), "deadbeef");
+    assert.equal(url.searchParams.get("team"), "ops");
+    assert.equal(url.searchParams.get("id"), "0xabc");
+  });
+
+  it("keeps a query on a bare host too, and drops only the fragment", function () {
+    assert.equal(
+      beaconApiUrl("https://host?apikey=deadbeef", ROUTE).href,
+      "https://host/eth/v1/beacon/states/head/validators?apikey=deadbeef",
+    );
+    assert.equal(
+      beaconApiUrl("https://host/prefix?apikey=deadbeef#note", ROUTE).href,
+      "https://host/prefix/eth/v1/beacon/states/head/validators?apikey=deadbeef",
+    );
+  });
+
+  it("rejects a base that is not a URL instead of composing a wrong one", function () {
+    assert.throws(() => beaconApiUrl("beacon.example", ROUTE));
+    assert.throws(() => beaconApiUrl("", ROUTE));
   });
 });
 
