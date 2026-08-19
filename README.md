@@ -59,9 +59,9 @@ These values are not private. Deposit data is designed to be publishable and bec
 
 Repository scripts read the authoritative `genesis_fork_version` from the connected beacon node, require both deposit-data entries to declare that value, and use it to verify deposit roots and BLS signatures. `fund.ts` performs this chain check before looking up the validator, compares the local deposit-data file to the on-chain commitment before sending ETH, prints the current funding attempt, allocation, and operator target percentage, and supports optional expected-value checks for participants who want an extra local guardrail. Scripts that use withdrawal credentials read them from the live pool and compare them to the deployment record before relying on either value.
 
-Beacon confirmation is mandatory in the supported repository scripts on every path that puts capital at risk: `commit-predeposit`, `fund`, and `top-up`. These paths require `BEACON_NODE_URL` with no bypass. Before both participant funding and the operator top-up, credentials are confirmed at finalized state and re-confirmed at head; head state must also show exactly the fresh 1 ETH predeposit: a 1,000,000,000 Gwei balance, no slashing, and activation, activation-eligibility, exit, and withdrawable epochs all equal to `FAR_FUTURE_EPOCH`. These checks use the consensus fields rather than the Beacon API status label.
+Beacon confirmation is mandatory in the supported repository scripts on every path that puts capital at risk: `commit-predeposit`, `fund`, and `top-up`. These paths require `BEACON_NODE_URL`, and no environment variable waives any part of it. `fund` and `top-up` run the identical preflight. Credentials are confirmed at a settled state and re-confirmed at head; head state must also show a fresh predeposit: no slashing, activation, activation-eligibility, exit, and withdrawable epochs all equal to `FAR_FUTURE_EPOCH`, and a balance of at least the 1,000,000,000 Gwei predeposit. These checks use the consensus fields rather than the Beacon API status label.
 
-`top-up` alone has an emergency two-variable override for mutable head-state anomalies. Setting both `UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY=1` and `I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY=1` waives only the balance, slashing, activation-epoch, and exit-epoch assertions so a validator externally funded into an anomalous state cannot permanently trap pool funds. It cannot waive beacon availability or health, chain fork identity, or withdrawal-credential confirmation at finalized or head state. `fund` has no override.
+A head balance *above* 1 ETH is the one condition an operator resolves rather than a hard failure, and only once every other assertion has passed. The script prints why the excess is harmless and then requires an interactive typed confirmation: the operator types the exact observed balance in Gwei on a terminal. No environment variable, flag, or acknowledgement string substitutes for it, and a non-interactive stdin fails instead of proceeding. The confirmation waives nothing — credentials at both states, the slashing flag, all four epochs, and the 1 ETH balance floor stay fatal on both legs — and the confirmed run's final log line names the confirmed excess balance instead of reporting a plain pass. See [Hard Failure On Excess Predeposit Balance](#hard-failure-on-excess-predeposit-balance).
 
 The `request-exit` recovery path deliberately treats its beacon preflight as advisory: without `BEACON_NODE_URL`, it warns and proceeds so an unavailable beacon API cannot disable the escape hatch. With a beacon URL, `request-exit.ts` uses head state and beacon spec constants to check that the validator is active, unexited, unslashed, and old enough for consensus to honor an EIP-7002 full-exit request.
 
@@ -121,6 +121,18 @@ An immutable operator-weight floor was rejected because funding composition is d
 
 `request-exit` deliberately does not require beacon API availability. Its preflight warns and proceeds when `BEACON_NODE_URL` is absent because the downside is a potentially wasted EIP-7002 request fee, while refusing would let an unavailable beacon endpoint disable the participants' recovery path during an emergency. Capital-entry paths fail closed; the escape hatch preserves liveness.
 
+### Environment-Variable Anomaly Override
+
+The top-up preflight used to accept a two-variable override that waived every mutable head-state assertion: balance, slashing, and all four epochs. It was removed rather than narrowed. An operator reaching for it is, by construction, about to send 31 ETH to a validator whose consensus state says something is wrong, and the preflight cannot tell a validator that was externally funded apart from one that was compromised. A waiver that broad is not an escape hatch, it is a way to lose the check exactly when it matters. The one condition that genuinely needed a way forward is handled below, and handled as a confirmation rather than a waiver.
+
+### Hard Failure On Excess Predeposit Balance
+
+Requiring the head balance to equal exactly 1 ETH turned a permissionless deposit into a brick. Anyone can deposit to the committed pubkey, and the deposit contract's 1 ETH minimum is the entire griefing cost. Before this change, one such deposit during the funding window raised the balance above 1,000,000,000 Gwei and hard-failed every subsequent `fund` and `top-up` preflight, with no supported way to finish the attempt and the operator's predeposit stranded.
+
+Excess balance is harmless to custody. Withdrawal credentials are written once, when the validator is created, and a deposit for an existing pubkey only increases balance; every withdrawal, partial or full, pays the execution address in those credentials, which is the pool. What extra deposits change is activation timing and economics, not ownership — an uncredited external top-up that the pool distributes pro rata to its own participants, never back to the depositor.
+
+So the resolution is an operator confirmation covering exactly the condition verified harmless, with everything else still fatal. A new environment variable was rejected for the same reason the old override was deleted: it converts a human judgement about one specific validator into a value that lives in a shell profile and applies to every run. Typing the observed balance on a terminal cannot be set once and forgotten.
+
 ## Accounting Model
 
 - The operator's `1 ETH` predeposit is credited to the operator's final economic weight.
@@ -179,6 +191,8 @@ This design intentionally avoids deposit-log scanning. A log scan can catch some
 
 Only ETH sent through the pool is credited as participant funding. A third party can deposit directly to the same validator pubkey through the deposit contract after the pool credentials are locked. That does not change the validator withdrawal credentials, so it is not a theft path against pool participants, but it can affect validator activation timing, partial withdrawals, and reconciliation. Treat direct deposits as uncredited external top-ups or donations.
 
+A direct deposit before top-up raises the head balance above the 1 ETH predeposit, which the `fund` and `top-up` preflights surface as an interactive typed confirmation rather than a failure. See [Hard Failure On Excess Predeposit Balance](#hard-failure-on-excess-predeposit-balance).
+
 ### EIP-7002 Exit Attempts
 
 EIP-7002 requests accepted by the execution-layer predeploy can still be ignored by consensus-layer processing. The contract records attempts and allows retries. Request fees are paid by the caller, not from pool proceeds. `request-exit.ts` checks head beacon state before submitting, including the active status, `exit_epoch`, slashing flag, and `SHARD_COMMITTEE_PERIOD` age requirement, but the Solidity contract cannot enforce those consensus-state predicates.
@@ -202,6 +216,8 @@ Future Ethereum staking features may require contract changes or may simply be u
 | Operator never predeposits | Participants cannot fund. |
 | Predeposit never appears in beacon state with pool credentials | Participants should not fund. |
 | Participant funds without beacon confirmation | The contract cannot prove the predeposit fixed pool credentials; this is an unsafe operational bypass. |
+| Third party deposits to the committed pubkey before top-up | Credentials and custody are unaffected; `fund` and `top-up` require an interactive typed confirmation of the observed balance before proceeding. |
+| Validator shows any other head-state anomaly | `fund` and `top-up` fail closed; no environment variable can waive it. |
 | Funding attempt expires before top-up | Anyone can close it; active funding becomes refundable. |
 | Participant does not withdraw refund | Operator can still open a new attempt; old refund is excluded from proceeds. |
 | Operator disappears before top-up | Participants recover active funding after deadline close/refund; operator predeposit remains at risk. |
@@ -295,9 +311,7 @@ Environment variables:
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
 - `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, funding and top-up preflights, and the advisory exit preflight; required by `commit-predeposit`, `fund`, and `top-up`.
-- `BEACON_CONFIRMATION_STATE_ID`: optional beacon state id for withdrawal-credential confirmation; defaults to `finalized`. Mutable top-up and exit checks use head state.
-- `UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY`: set to `1` only for an operator top-up that must waive mutable head-state balance, slashing, activation, or exit anomalies.
-- `I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY`: must also be `1` to acknowledge the narrow top-up anomaly override; it never waives beacon availability, health, fork identity, or withdrawal-credential checks.
+- `BEACON_CONFIRMATION_STATE_ID`: beacon state id for withdrawal-credential confirmation; must be `finalized` (the default) or `justified`, and any other value is fatal. `head` is rejected because it would collapse the two-state confirmation into a single head read. Mutable fresh-predeposit and exit checks always use head state.
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.
 
 ## License
