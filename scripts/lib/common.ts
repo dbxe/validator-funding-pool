@@ -170,7 +170,7 @@ interface FeeRecipientForwarderReader {
   };
 }
 
-interface CanonicalSystemContracts {
+export interface CanonicalSystemContracts {
   depositContract: Address;
   depositContractCodeHash: Hex;
   withdrawalRequestPredeploy: Address;
@@ -200,7 +200,15 @@ interface CanonicalSystemContracts {
 // constants to match what is observed on chain: doing so silently downgrades the canonicity pin
 // to a consistency check and defeats the layer entirely. Re-derive from the sources above and
 // change a value only when the upstream artifact itself has changed.
-const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystemContracts>> = {
+//
+// Exported for the tests, and only for them. Nothing else imports it: the pin is applied by
+// `assertDeploymentCanonicity` alone. What the export buys is that every OTHER copy of these
+// hashes in this repository — the two end-to-end fixtures, and the literals the command tests
+// assert the deployment record against — can be compared against this table by a unit test
+// rather than by a person reading two files side by side. Those copies exist on purpose, so
+// that the harness proves it is running the real system contracts; a copy that silently drifts
+// from the pin proves nothing at all.
+export const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystemContracts>> = {
   1: {
     depositContract: DEFAULT_DEPOSIT_CONTRACT,
     depositContractCodeHash: "0x6c029a231254fadb724d63be769f75eedd66362df034a3e663252b49d062a666",

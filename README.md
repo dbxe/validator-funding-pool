@@ -443,7 +443,7 @@ npm test
 npm run test:e2e
 ```
 
-It takes about forty seconds and needs nothing but this checkout. Each case runs a command exactly as `package.json` runs it, as a real child process with a controlled environment, against a local `hardhat node` and a deterministic mock beacon node that the harness starts and tears down itself. The local chain carries the real mainnet deposit contract and the real EIP-7002 predeploy at their real mainnet addresses, and refuses to start unless both hash to the code hashes `scripts/lib/common.ts` pins for mainnet.
+It takes about forty seconds and needs nothing but this checkout. Each case runs a command exactly as `package.json` runs it, as a real child process with a controlled environment, against a local `hardhat node` and a deterministic mock beacon node that the harness starts and tears down itself. The local chain carries the real mainnet deposit contract and the real EIP-7002 predeploy at their real mainnet addresses, and refuses to start unless each hashes to the expectation its own `test-e2e/fixtures/*.json` records — derived from the upstream artifact rather than imported from the pin, so the harness states independently what it is running. `npm test` closes the loop: `test/CanonicalSystemContracts.ts` requires those fixture expectations, the literals the command tests hold the deployment record to, and `CANONICAL_SYSTEM_CONTRACTS` in `scripts/lib/common.ts` to be the same values, so a copy that drifts fails the unit suite instead of leaving a harness that proves nothing.
 
 It is kept out of `npm test` on purpose, so the unit suite stays fast enough to run constantly. Run both before proposing a change to anything in `scripts/`.
 

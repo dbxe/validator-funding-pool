@@ -16,6 +16,11 @@ import {
 } from "../scripts/lib/common.js";
 import { buildDepositData, writeDepositDataFile, type GeneratedDepositData } from "./deposit-data.js";
 import {
+  // The canonical mainnet hashes as literals, held to `CANONICAL_SYSTEM_CONTRACTS` by
+  // `test/CanonicalSystemContracts.ts`. Asserting the deployment record carries exactly
+  // these is what proves the chain under test runs the real system contracts and not a mock.
+  CANONICAL_DEPOSIT_CONTRACT_CODE_HASH,
+  CANONICAL_PREDEPLOY_CODE_HASH,
   DEPOSIT_CONTRACT_ADDRESS,
   LOCAL_CHAIN_ID,
   LocalChain,
@@ -66,15 +71,6 @@ const TARGET_GWEI = 16_000_000_000n;
 const TARGET_WEI = parseEther("16");
 const OPERATOR_REMAINING_WEI = TARGET_WEI - PREDEPOSIT_WEI;
 const TOP_UP_WEI = parseEther("31");
-
-/// The canonical mainnet code hashes, repeated here as literals on purpose. They are what
-/// `scripts/lib/common.ts` pins, and asserting the deployment record carries exactly these
-/// is what proves the chain under test is running the real system contracts and not a mock
-/// standing in for them.
-const CANONICAL_DEPOSIT_CODE_HASH =
-  "0x6c029a231254fadb724d63be769f75eedd66362df034a3e663252b49d062a666";
-const CANONICAL_PREDEPLOY_CODE_HASH =
-  "0x0345a365d2f4c5975b9f1599abe0a2ee76b7a3a731bc68781bd04c84e4858f50";
 
 const CANONICITY_WARNING =
   `WARNING: no canonical system-contract pin is recorded for chainId ${LOCAL_CHAIN_ID}`;
@@ -208,7 +204,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     // The canonicity pin exists only for mainnet, so an unrecognised chain id must WARN and
     // fall back to record-to-pool consistency. Asserted, not suppressed.
     assertOutputContains(result, CANONICITY_WARNING);
-    assertOutputContains(result, `Deposit contract code hash: ${CANONICAL_DEPOSIT_CODE_HASH}`);
+    assertOutputContains(result, `Deposit contract code hash: ${CANONICAL_DEPOSIT_CONTRACT_CODE_HASH}`);
     assertOutputContains(
       result,
       `Withdrawal request predeploy code hash: ${CANONICAL_PREDEPLOY_CODE_HASH}`,
@@ -227,7 +223,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(record.chainId, LOCAL_CHAIN_ID);
     assert.equal(record.depositContract, DEFAULT_DEPOSIT_CONTRACT);
     assert.equal(record.withdrawalRequestPredeploy, DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY);
-    assert.equal(record.depositContractCodeHash, CANONICAL_DEPOSIT_CODE_HASH);
+    assert.equal(record.depositContractCodeHash, CANONICAL_DEPOSIT_CONTRACT_CODE_HASH);
     assert.equal(record.withdrawalRequestPredeployCodeHash, CANONICAL_PREDEPLOY_CODE_HASH);
     assert.equal(record.operator.toLowerCase(), operator.address.toLowerCase());
     assert.equal(record.fundingWindowDuration, "86400");

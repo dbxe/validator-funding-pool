@@ -35,6 +35,32 @@ export const DEPOSIT_CONTRACT_ADDRESS: Address = "0x00000000219ab540356cBB839Cbe
 export const WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS: Address =
   "0x00000961Ef480Eb55e80D19ad83579A64c007002";
 
+/// The canonical mainnet runtime code hashes, written out as literals a second time.
+///
+/// They are deliberately NOT imported from `scripts/lib/common.ts`: a harness that took the
+/// pin from the thing it is testing would agree with any value the pin happened to hold, and
+/// the whole point of installing the real system contracts here is to state independently
+/// what the chain under test is running. The command tests assert the deployment record
+/// carries exactly these, which is what makes the record's hashes evidence.
+///
+/// `test/CanonicalSystemContracts.ts` is what keeps the two statements honest: it requires
+/// these literals, the two `test-e2e/fixtures/*.json` expectations, and
+/// `CANONICAL_SYSTEM_CONTRACTS[1]` to be the same four values. A copy that drifts is a copy
+/// that proves nothing, and it fails the unit suite rather than passing quietly.
+export const CANONICAL_DEPOSIT_CONTRACT_CODE_HASH: Hex =
+  "0x6c029a231254fadb724d63be769f75eedd66362df034a3e663252b49d062a666";
+export const CANONICAL_PREDEPLOY_CODE_HASH: Hex =
+  "0x0345a365d2f4c5975b9f1599abe0a2ee76b7a3a731bc68781bd04c84e4858f50";
+
+/// Where the two upstream-derived fixtures live, so the unit test can read exactly the files
+/// this harness installs from.
+export const DEPOSIT_CONTRACT_FIXTURE_FILE = "deposit-contract.json";
+export const WITHDRAWAL_REQUEST_PREDEPLOY_FIXTURE_FILE = "withdrawal-request-predeploy.json";
+
+export function fixturePath(name: string): string {
+  return path.join(REPO_ROOT, "test-e2e", "fixtures", name);
+}
+
 /// Storage slots the beacon deposit contract's constructor initialises: `branch[32]` at
 /// 0..31, `deposit_count` at 32, and `zero_hashes[32]` at 33..64. `hardhat_setCode` copies
 /// code and not storage, so these are copied across explicitly after the real creation
@@ -206,7 +232,7 @@ export class LocalChain {
     const deployer = this.accounts[0];
     const wallet = this.walletFor(deployer);
 
-    const deposit = readFixture<DepositContractFixture>("deposit-contract.json");
+    const deposit = readFixture<DepositContractFixture>(DEPOSIT_CONTRACT_FIXTURE_FILE);
     const deploymentHash = await wallet.deployContract({
       abi: [],
       bytecode: deposit.creationBytecode,
@@ -231,7 +257,7 @@ export class LocalChain {
       await this.rpc("hardhat_setStorageAt", [DEPOSIT_CONTRACT_ADDRESS, key, value]);
     }
 
-    const predeploy = readFixture<PredeployFixture>("withdrawal-request-predeploy.json");
+    const predeploy = readFixture<PredeployFixture>(WITHDRAWAL_REQUEST_PREDEPLOY_FIXTURE_FILE);
     assertFixtureRuntime(predeploy.runtimeBytecode, predeploy, "EIP-7002 withdrawal request predeploy");
     await this.rpc("hardhat_setCode", [
       WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
@@ -269,7 +295,7 @@ function assertFixtureRuntime(
 }
 
 function readFixture<T>(name: string): T {
-  return JSON.parse(readFileSync(path.join(REPO_ROOT, "test-e2e", "fixtures", name), "utf8")) as T;
+  return JSON.parse(readFileSync(fixturePath(name), "utf8")) as T;
 }
 
 async function freePort(): Promise<number> {
