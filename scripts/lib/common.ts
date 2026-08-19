@@ -567,10 +567,16 @@ export function envBigInt(name: string, fallback?: bigint): bigint {
   return parseUnsignedDecimal(value, name);
 }
 
-export function envNumber(name: string, fallback: number): number {
+/// A declare-and-verify pin: absent when the variable is unset or empty, and otherwise
+/// parsed exactly as `envBigInt` parses an amount. Nothing here may fall back to a value —
+/// the whole point of a pin is that the operator said what they expect — so an unparseable
+/// declaration is fatal rather than silently ignored. `BigInt("")` is `0n` and `BigInt` on
+/// its own accepts `"0x20"`, so the difference is not cosmetic: an expected attempt of
+/// `"0x3"` compared as three would have read as a pass.
+export function optionalEnvBigInt(name: string): bigint | undefined {
   const value = process.env[name];
-  if (value === undefined || value === "") return fallback;
-  return Number(value);
+  if (value === undefined || value === "") return undefined;
+  return envBigInt(name);
 }
 
 export function parseAddressList(value: string): Address[] {

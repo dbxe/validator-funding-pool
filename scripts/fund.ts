@@ -11,6 +11,7 @@ import {
   envBigInt,
   formatWei,
   fundViaPlainTransfer,
+  optionalEnvBigInt,
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
   readDeployment,
@@ -136,13 +137,13 @@ async function printAndCheckFundingReview(pool: any, caller: string) {
   const participantCount = Number(await pool.read.participantCount());
   const operator = (await pool.read.operator()) as string;
 
-  const expectedAttempt = process.env.EXPECTED_FUNDING_ATTEMPT;
-  if (expectedAttempt !== undefined && BigInt(expectedAttempt) !== fundingAttempt) {
+  const expectedAttempt = optionalEnvBigInt("EXPECTED_FUNDING_ATTEMPT");
+  if (expectedAttempt !== undefined && expectedAttempt !== fundingAttempt) {
     throw new Error(`Funding attempt ${fundingAttempt} != EXPECTED_FUNDING_ATTEMPT ${expectedAttempt}`);
   }
 
-  const expectedDeadlineBefore = process.env.EXPECTED_DEADLINE_BEFORE;
-  if (expectedDeadlineBefore !== undefined && fundingDeadline > BigInt(expectedDeadlineBefore)) {
+  const expectedDeadlineBefore = optionalEnvBigInt("EXPECTED_DEADLINE_BEFORE");
+  if (expectedDeadlineBefore !== undefined && fundingDeadline > expectedDeadlineBefore) {
     throw new Error(`Funding deadline ${fundingDeadline} is after EXPECTED_DEADLINE_BEFORE ${expectedDeadlineBefore}`);
   }
 
@@ -172,13 +173,13 @@ async function printAndCheckFundingReview(pool: any, caller: string) {
   }
   console.log(`Operator target: ${formatWei(operatorTarget)} (${formatPercent(operatorTarget)})`);
 
-  const expectedMyTargetGwei = process.env.EXPECTED_MY_TARGET_GWEI;
-  if (expectedMyTargetGwei !== undefined && callerTarget !== BigInt(expectedMyTargetGwei) * GWEI) {
+  const expectedMyTargetGwei = optionalEnvBigInt("EXPECTED_MY_TARGET_GWEI");
+  if (expectedMyTargetGwei !== undefined && callerTarget !== expectedMyTargetGwei * GWEI) {
     throw new Error(`Caller target ${formatWei(callerTarget)} != EXPECTED_MY_TARGET_GWEI ${expectedMyTargetGwei}`);
   }
 
-  const expectedOperatorTargetGwei = process.env.EXPECTED_OPERATOR_TARGET_GWEI;
-  if (expectedOperatorTargetGwei !== undefined && operatorTarget !== BigInt(expectedOperatorTargetGwei) * GWEI) {
+  const expectedOperatorTargetGwei = optionalEnvBigInt("EXPECTED_OPERATOR_TARGET_GWEI");
+  if (expectedOperatorTargetGwei !== undefined && operatorTarget !== expectedOperatorTargetGwei * GWEI) {
     throw new Error(
       `Operator target ${formatWei(operatorTarget)} != EXPECTED_OPERATOR_TARGET_GWEI ${expectedOperatorTargetGwei}`,
     );

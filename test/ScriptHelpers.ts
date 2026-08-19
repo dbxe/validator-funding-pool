@@ -10,6 +10,7 @@ import {
   assertStillFundable,
   envBigInt,
   fundViaPlainTransfer,
+  optionalEnvBigInt,
   parseBigIntList,
   waitForSenderVerifiedReceipt,
 } from "../scripts/lib/common.js";
@@ -797,6 +798,32 @@ describe("unsigned decimal environment values", function () {
       }
     } finally {
       restoreEnv("AMOUNT_WEI", original);
+    }
+  });
+
+  it("applies the same parser to a declare-and-verify pin, with no fallback", function () {
+    const original = process.env.EXPECTED_FUNDING_ATTEMPT;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_FUNDING_ATTEMPT", value);
+        assert.equal(optionalEnvBigInt("EXPECTED_FUNDING_ATTEMPT"), undefined);
+      }
+
+      // `BigInt` accepted every one of these; each compares unequal to the number the
+      // operator meant, and `""` was `0n`.
+      for (const value of rejected.filter((entry) => entry !== "")) {
+        process.env.EXPECTED_FUNDING_ATTEMPT = value;
+        assert.throws(
+          () => optionalEnvBigInt("EXPECTED_FUNDING_ATTEMPT"),
+          /EXPECTED_FUNDING_ATTEMPT ".*" is not a canonical unsigned decimal integer/,
+        );
+      }
+
+      process.env.EXPECTED_FUNDING_ATTEMPT = "3";
+      assert.equal(optionalEnvBigInt("EXPECTED_FUNDING_ATTEMPT"), 3n);
+    } finally {
+      restoreEnv("EXPECTED_FUNDING_ATTEMPT", original);
     }
   });
 
