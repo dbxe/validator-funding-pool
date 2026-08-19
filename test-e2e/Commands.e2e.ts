@@ -820,10 +820,12 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       `Refunded to ${participant.address.toLowerCase()} in block `,
     );
     // And the receipt's own Refunded event, where `recipient` is a topic, says who was paid.
+    // The receipt's decoded topic is checksummed, and the assertion says so rather than
+    // lowercasing it: the confirmation line is what the operator compares.
     assertOutputContains(
       result,
       `refund recipient confirmed from the receipt: the pool emitted Refunded paying ` +
-        `${TARGET_WEI} wei (16 ETH) to ${participant.address.toLowerCase()}`,
+        `${TARGET_WEI} wei (16 ETH) to ${participant.address}`,
     );
 
     assert.equal(await readPool<bigint>("refundableWeiOf", [participant.address]), 0n);
@@ -1316,7 +1318,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(
       result,
       `claim recipient confirmed from the receipt: the pool emitted Claimed paying ` +
-        `${formatWei(claimable)} to ${operator.address.toLowerCase()}`,
+        `${formatWei(claimable)} to ${operator.address}`,
     );
     assert.equal(await readPool<bigint>("claimable", [operator.address]), 0n);
   });
