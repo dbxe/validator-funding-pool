@@ -280,6 +280,8 @@ Every write action has one: `deploy:ledger`, `deploy-forwarder:ledger`, `commit-
 
 There are separate entries rather than one command with a network flag because Hardhat rejects a repeated `--network` option, so `npm run fund -- --network ledger` cannot work while `npm run fund` pins `--network rpc`. An environment-selected network is worse: the pinned `--network rpc` silently wins over `HARDHAT_NETWORK`, so a Ledger user who set the variable would sign with the plaintext key instead. Two explicit entries cannot be confused for each other.
 
+The plugin locates `LEDGER_ADDRESS` by walking `m/44'/60'/<index>'/0/0` for indices `0` through `20` and asking the device for each address, so the first command of a session is slow and the device must stay unlocked throughout. An account on a different derivation scheme, such as the legacy `m/44'/60'/0'/<index>`, is not found; set `ledgerOptions.derivationFunction` on the `ledger` network for that case.
+
 The `ledger` network configures no `accounts`, so no private key is read for it. `LEDGER_ADDRESS` is a public address, not a secret, and is read from the environment rather than the keystore; the `ledger` network refuses to load without it.
 
 `eth_accounts` on the `ledger` network returns the node's accounts followed by the Ledger account. Every script signs with the first. Point `RPC_URL` at a node that exposes no unlocked accounts — any public provider, or your own node with the `personal`/`accounts` namespace disabled — or the scripts will sign with a node account instead of the device.
