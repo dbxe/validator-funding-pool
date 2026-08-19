@@ -5,7 +5,9 @@ import {
   assertActiveSigner,
   assertCompilationNotSkipped,
   assertDeploymentIntegrity,
+  assertPayoutReachedRecipient,
   formatWei,
+  printPayoutRecipient,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -36,11 +38,23 @@ async function main() {
     return;
   }
 
+  // See claim.ts: the recipient is printed while it is still a decision, and checked after
+  // mining against the pool's own event.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
+  printPayoutRecipient("refund", deployment.pool, signer, recipient, refundable);
   const hash = recipient.toLowerCase() === signer.toLowerCase()
     ? await pool.write.refund()
     : await pool.write.refundTo([recipient]);
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "refund");
+  assertPayoutReachedRecipient(
+    receipt,
+    deployment.pool,
+    "Refunded",
+    signer,
+    recipient,
+    refundable,
+    "refund",
+  );
   console.log(`Refunded to ${recipient} in block ${receipt.blockNumber}`);
 }
 

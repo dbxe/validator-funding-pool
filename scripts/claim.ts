@@ -5,7 +5,9 @@ import {
   assertActiveSigner,
   assertCompilationNotSkipped,
   assertDeploymentIntegrity,
+  assertPayoutReachedRecipient,
   formatWei,
+  printPayoutRecipient,
   readDeployment,
   reportFatalError,
   waitForSenderVerifiedReceipt,
@@ -38,11 +40,27 @@ async function main() {
     return;
   }
 
+  // Printed BEFORE the transaction is composed, which is the only moment at which the
+  // recipient is still a decision. On the Ledger path the address goes into calldata the
+  // device does not render, and README.md's mitigation ladder tells the operator to compare
+  // it against an independently derived one right here.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
+  printPayoutRecipient("claim", deployment.pool, signer, recipient, claimable);
   const hash = recipient.toLowerCase() === signer.toLowerCase()
     ? await pool.write.claim()
     : await pool.write.claimTo([recipient]);
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "claim");
+  // And checked after mining against the pool's own event, where `recipient` is a topic:
+  // the receipt is the next and last place the address can be verified at all.
+  assertPayoutReachedRecipient(
+    receipt,
+    deployment.pool,
+    "Claimed",
+    signer,
+    recipient,
+    claimable,
+    "claim",
+  );
   console.log(`Claimed to ${recipient} in block ${receipt.blockNumber}`);
 }
 

@@ -35,6 +35,7 @@ import {
   assertActiveSignerPrinted,
   assertOutputContains,
   assertOutputLacks,
+  assertOutputOrder,
   expectFailure,
   expectSuccess,
   runCommand,
@@ -752,7 +753,27 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       result,
       `Refundable for ${participant.address.toLowerCase()}: ${TARGET_WEI} wei (16 ETH)`,
     );
-    assertOutputContains(result, `Refunded to ${participant.address.toLowerCase()} in block `);
+    // The self path: the payout goes to the signing account, so the no-argument `refund()`
+    // is used and no recipient address goes into calldata at all. It is still printed, and
+    // printed BEFORE the transaction — the mined line is a report, not something to compare.
+    assertOutputContains(result, `refund pool: ${pool}`);
+    assertOutputContains(
+      result,
+      "refund pays the signing account itself, so the no-argument refund() is used and no " +
+        "recipient address goes into calldata",
+    );
+    assertOutputLacks(result, "REFUND IS REDIRECTED");
+    assertOutputOrder(
+      result,
+      `refund recipient: ${participant.address.toLowerCase()}`,
+      `Refunded to ${participant.address.toLowerCase()} in block `,
+    );
+    // And the receipt's own Refunded event, where `recipient` is a topic, says who was paid.
+    assertOutputContains(
+      result,
+      `refund recipient confirmed from the receipt: the pool emitted Refunded paying ` +
+        `${TARGET_WEI} wei (16 ETH) to ${participant.address.toLowerCase()}`,
+    );
 
     assert.equal(await readPool<bigint>("refundableWeiOf", [participant.address]), 0n);
     const after = await chain.publicClient.getBalance({ address: participant.address });
@@ -1106,6 +1127,73 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(await chain.publicClient.getBalance({ address: pool }), poolBefore + rewards);
   });
 
+  it("claim redirected says, before signing, that the device will not render the recipient", async () => {
+    // The swept rewards are pool proceeds, so both participants now have something to claim —
+    // which is what makes this the first point in the run where a real payout can be
+    // redirected. `claimTo(address)` carries the recipient as an ABI argument, and a Ledger
+    // renders the pool as the destination and `0` as the value: the address below is the one
+    // thing the operator has to compare, and it has to be printed before the approval.
+    const claimable = await readPool<bigint>("claimable", [participant.address]);
+    assert.ok(claimable > 0n, "the sweep left the participant nothing to claim");
+    const before = await chain.publicClient.getBalance({ address: outsider.address });
+
+    const result = expectSuccess(
+      await runCommand({ script: "claim", env: asParticipant({ RECIPIENT: outsider.address }) }),
+    );
+
+    assertOutputContains(result, `claim pool: ${pool}`);
+    assertOutputContains(result, `claim amount: ${formatWei(claimable)}`);
+    assertOutputContains(
+      result,
+      `CLAIM IS REDIRECTED: EVERY WEI GOES TO ${outsider.address}, NOT TO THE SIGNING ACCOUNT ` +
+        participant.address.toLowerCase(),
+    );
+    assertOutputContains(result, "A Ledger will NOT render it");
+    assertOutputOrder(
+      result,
+      `claim recipient: ${outsider.address}`,
+      `Claimed to ${outsider.address} in block `,
+    );
+    // And the mined receipt's own Claimed event, where `recipient` is a topic, is the next
+    // and last place that address can be checked at all.
+    assertOutputContains(
+      result,
+      `claim recipient confirmed from the receipt: the pool emitted Claimed paying ` +
+        `${formatWei(claimable)} to ${outsider.address}`,
+    );
+
+    assert.equal(await readPool<bigint>("claimable", [participant.address]), 0n);
+    assert.equal(
+      await chain.publicClient.getBalance({ address: outsider.address }),
+      before + claimable,
+    );
+  });
+
+  it("claim to the signing account itself carries no recipient in calldata", async () => {
+    const claimable = await readPool<bigint>("claimable", [operator.address]);
+    assert.ok(claimable > 0n, "the sweep left the operator nothing to claim");
+
+    const result = expectSuccess(await runCommand({ script: "claim", env: asOperator() }));
+
+    assertOutputContains(
+      result,
+      "claim pays the signing account itself, so the no-argument claim() is used and no " +
+        "recipient address goes into calldata",
+    );
+    assertOutputLacks(result, "CLAIM IS REDIRECTED");
+    assertOutputOrder(
+      result,
+      `claim recipient: ${operator.address.toLowerCase()}`,
+      `Claimed to ${operator.address.toLowerCase()} in block `,
+    );
+    assertOutputContains(
+      result,
+      `claim recipient confirmed from the receipt: the pool emitted Claimed paying ` +
+        `${formatWei(claimable)} to ${operator.address.toLowerCase()}`,
+    );
+    assert.equal(await readPool<bigint>("claimable", [operator.address]), 0n);
+  });
+
   it("sweep refuses an empty forwarder before anything is broadcast", async () => {
     const result = expectFailure(await runCommand({ script: "sweep", env: asOperator() }));
 
@@ -1301,6 +1389,109 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(
       await chain.publicClient.getBalance({ address: racePool }),
       parseEther("1"),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // 15. A redirected refund, on a pool of its own
+  //
+  // `refund` reaches the redirected branch only with a refundable balance, and a refundable
+  // balance exists only after a funding attempt expires with something funded into it. The
+  // first pool's one refundable balance is spent by the self-path case above, so this takes a
+  // pool of its own — a partial funding, an expired window, and a close.
+  // -------------------------------------------------------------------------
+
+  it("refund redirected carries the same pre-signing notice as claim", async () => {
+    const refundDeploymentFile = path.join(workdir, "deployment-redirected-refund.json");
+    const refundDepositDataFile = path.join(workdir, "deposit-data-redirected-refund.json");
+    const refundEnv = (extra: Record<string, string | undefined> = {}) => ({
+      RPC_URL: chain.url,
+      BEACON_NODE_URL: beacon.url,
+      DEPLOYMENT_FILE: refundDeploymentFile,
+      DEPOSIT_DATA_FILE: refundDepositDataFile,
+      PRIVATE_KEY: operator.privateKey,
+      ...extra,
+    });
+
+    expectSuccess(
+      await runCommand({
+        script: "deploy",
+        env: {
+          RPC_URL: chain.url,
+          PRIVATE_KEY: operator.privateKey,
+          DEPLOYMENT_FILE: refundDeploymentFile,
+          FUNDING_WINDOW_SECONDS: "3600",
+        },
+      }),
+    );
+    const record = JSON.parse(readFileSync(refundDeploymentFile, "utf8")) as DeploymentRecord;
+    const refundPool = record.pool;
+    const refundCredentials = deriveWithdrawalCredentials(refundPool);
+    const refundDeposits = buildDepositData(9, refundCredentials, GENESIS_FORK_VERSION as Hex);
+    writeDepositDataFile(refundDepositDataFile, refundDeposits);
+    beacon.setValidator(refundDeposits.pubkey, absentValidator());
+
+    expectSuccess(await runCommand({ script: "commit-predeposit", env: refundEnv() }));
+    beacon.setValidator(refundDeposits.pubkey, freshPredepositValidator(refundCredentials));
+
+    expectSuccess(
+      await runCommand({
+        script: "open-funding-attempt",
+        env: refundEnv({
+          PARTICIPANTS: operator.address,
+          FUNDING_TARGETS_GWEI: `${VALIDATOR_DEPOSIT_GWEI}`,
+        }),
+      }),
+    );
+
+    const partial = parseEther("2");
+    expectSuccess(
+      await runCommand({
+        script: "fund",
+        env: refundEnv({ FUND_VIA_TRANSFER: "0", AMOUNT_WEI: partial.toString() }),
+      }),
+    );
+
+    // The window expires with the attempt only partly funded, which is what turns the funded
+    // ETH into a refundable balance.
+    const deadline = (await chain.publicClient.readContract({
+      address: refundPool,
+      abi: POOL_ABI,
+      functionName: "fundingDeadline",
+    })) as bigint;
+    await chain.setNextBlockTimestamp(deadline + 1n);
+    await chain.mine();
+    expectSuccess(
+      await runCommand({ script: "close-expired-funding-attempt", env: refundEnv() }),
+    );
+
+    const before = await chain.publicClient.getBalance({ address: outsider.address });
+    const result = expectSuccess(
+      await runCommand({ script: "refund", env: refundEnv({ RECIPIENT: outsider.address }) }),
+    );
+
+    assertOutputContains(result, `refund pool: ${refundPool}`);
+    assertOutputContains(result, `refund amount: ${formatWei(partial)}`);
+    assertOutputContains(
+      result,
+      `REFUND IS REDIRECTED: EVERY WEI GOES TO ${outsider.address}, NOT TO THE SIGNING ACCOUNT ` +
+        operator.address.toLowerCase(),
+    );
+    assertOutputContains(result, "A Ledger will NOT render it");
+    assertOutputOrder(
+      result,
+      `refund recipient: ${outsider.address}`,
+      `Refunded to ${outsider.address} in block `,
+    );
+    assertOutputContains(
+      result,
+      `refund recipient confirmed from the receipt: the pool emitted Refunded paying ` +
+        `${formatWei(partial)} to ${outsider.address}`,
+    );
+
+    assert.equal(
+      await chain.publicClient.getBalance({ address: outsider.address }),
+      before + partial,
     );
   });
 });

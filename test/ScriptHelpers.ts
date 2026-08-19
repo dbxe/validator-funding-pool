@@ -19,6 +19,7 @@ import {
   assertFundingWasCredited,
   assertFundingWindowNotDeclared,
   assertFreshDeploymentMatchesExpectedPool,
+  assertPayoutReachedRecipient,
   assertStillFundable,
   assertSweepWasCredited,
   beaconApiUrl,
@@ -26,9 +27,11 @@ import {
   describeFatalError,
   envBigInt,
   formatPoolState,
+  formatWei,
   fundViaPlainTransfer,
   optionalEnvBigInt,
   parseBigIntList,
+  printPayoutRecipient,
   requireFundingAllocation,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
@@ -855,6 +858,212 @@ describe("assertFundingWasCredited", function () {
         /emitted no ParticipantFunded for .* at all/,
       );
     }
+  });
+});
+
+describe("the payout recipient, printed and then proven", function () {
+  // Encoded independently of the implementation, from the event declarations in
+  // `contracts/ValidatorFundingPool.sol:154` and `:132`.
+  const PAYOUT_EVENTS = [
+    {
+      type: "event",
+      name: "Claimed",
+      inputs: [
+        { name: "participant", type: "address", indexed: true },
+        { name: "recipient", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+    {
+      type: "event",
+      name: "Refunded",
+      inputs: [
+        { name: "participant", type: "address", indexed: true },
+        { name: "recipient", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+    // An event the check must skip rather than choke on.
+    {
+      type: "event",
+      name: "PoolToppedUp",
+      inputs: [],
+    },
+  ] as const;
+
+  const RECIPIENT = "0x4444444444444444444444444444444444444444" as Address;
+  const AMOUNT = 5_000n;
+
+  function paid(
+    eventName: "Claimed" | "Refunded",
+    participant: Address,
+    recipient: Address,
+    amount: bigint,
+    address: Address = POOL,
+  ) {
+    return {
+      address,
+      topics: encodeEventTopics({
+        abi: PAYOUT_EVENTS,
+        eventName,
+        args: { participant, recipient },
+      }) as Hex[],
+      data: encodeAbiParameters([{ type: "uint256" }], [amount]),
+    };
+  }
+
+  const poolToppedUp = {
+    address: POOL,
+    topics: encodeEventTopics({ abi: PAYOUT_EVENTS, eventName: "PoolToppedUp" }) as Hex[],
+    data: "0x" as Hex,
+  };
+
+  it("prints the pool, the recipient, and the amount before anything is signed", function () {
+    const log = captureLog();
+    const warn = captureWarn();
+    try {
+      printPayoutRecipient("claim", POOL, SIGNER, SIGNER, AMOUNT);
+      assert.deepEqual(log.lines, [
+        `claim pool: ${POOL}`,
+        `claim recipient: ${SIGNER}`,
+        `claim amount: ${formatWei(AMOUNT)}`,
+        "claim pays the signing account itself, so the no-argument claim() is used and no " +
+          "recipient address goes into calldata",
+      ]);
+      // The self path has no unverifiable argument, so it gets no warning.
+      assert.deepEqual(warn.lines, []);
+    } finally {
+      warn.restore();
+      log.restore();
+    }
+  });
+
+  it("warns loudly about the address a device will not render, when redirected", function () {
+    const log = captureLog();
+    const warn = captureWarn();
+    try {
+      printPayoutRecipient("refund", POOL, SIGNER, RECIPIENT, AMOUNT);
+      assert.deepEqual(log.lines.slice(0, 3), [
+        `refund pool: ${POOL}`,
+        `refund recipient: ${RECIPIENT}`,
+        `refund amount: ${formatWei(AMOUNT)}`,
+      ]);
+      assert.equal(warn.lines.length, 1);
+      assert.match(warn.lines[0], /REFUND IS REDIRECTED: EVERY WEI GOES TO/);
+      assert.match(warn.lines[0], new RegExp(RECIPIENT));
+      assert.match(warn.lines[0], /A Ledger will NOT render it/);
+      assert.match(warn.lines[0], /before you approve on the device/);
+    } finally {
+      warn.restore();
+      log.restore();
+    }
+  });
+
+  it("confirms a payout that reached the intended recipient", function () {
+    const log = captureLog();
+    try {
+      assertPayoutReachedRecipient(
+        { logs: [poolToppedUp, paid("Claimed", SIGNER, RECIPIENT, AMOUNT)] },
+        POOL,
+        "Claimed",
+        SIGNER,
+        RECIPIENT,
+        AMOUNT,
+        "claim",
+      );
+      assert.equal(log.lines.length, 1);
+      assert.match(log.lines[0], /claim recipient confirmed from the receipt/);
+      assert.match(log.lines[0], new RegExp(RECIPIENT));
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("is fatal, naming both addresses, when the receipt paid somebody else", function () {
+    assert.throws(
+      () =>
+        assertPayoutReachedRecipient(
+          { logs: [paid("Claimed", SIGNER, OTHER_SIGNER, AMOUNT)] },
+          POOL,
+          "Claimed",
+          SIGNER,
+          RECIPIENT,
+          AMOUNT,
+          "claim",
+        ),
+      (error: Error) => {
+        assert.match(error.message, /FATAL PAYOUT REDIRECTED/);
+        assert.match(error.message, new RegExp(`intended to pay ${RECIPIENT}`));
+        assert.match(error.message, new RegExp(`went to ${OTHER_SIGNER}`));
+        assert.match(error.message, /DETECTS a substituted recipient, it cannot prevent one/);
+        return true;
+      },
+    );
+  });
+
+  it("reports an amount that moved between the read and the transaction, and does not fail", function () {
+    const log = captureLog();
+    try {
+      assertPayoutReachedRecipient(
+        { logs: [paid("Claimed", SIGNER, SIGNER, AMOUNT + 1n)] },
+        POOL,
+        "Claimed",
+        SIGNER,
+        SIGNER,
+        AMOUNT,
+        "claim",
+      );
+      assert.equal(log.lines.length, 2);
+      assert.match(log.lines[1], /paid 5001 wei .*, not the 5000 wei/);
+      assert.match(log.lines[1], /the contract pays the balance as it stands/);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("requires exactly one payout event of the right name, from the pool, for this signer", function () {
+    for (const logs of [
+      // The other payout event entirely: a refund receipt cannot confirm a claim.
+      [paid("Refunded", SIGNER, RECIPIENT, AMOUNT)],
+      // Somebody else's payout in the same block.
+      [paid("Claimed", OTHER_SIGNER, RECIPIENT, AMOUNT)],
+      // Right event, right addresses — emitted by a contract that is not the pool.
+      [paid("Claimed", SIGNER, RECIPIENT, AMOUNT, OTHER_SIGNER)],
+      [],
+    ]) {
+      assert.throws(
+        () =>
+          assertPayoutReachedRecipient(
+            { logs },
+            POOL,
+            "Claimed",
+            SIGNER,
+            RECIPIENT,
+            AMOUNT,
+            "claim",
+          ),
+        /emitted no Claimed event for/,
+      );
+    }
+
+    assert.throws(
+      () =>
+        assertPayoutReachedRecipient(
+          {
+            logs: [
+              paid("Claimed", SIGNER, RECIPIENT, AMOUNT),
+              paid("Claimed", SIGNER, RECIPIENT, AMOUNT),
+            ],
+          },
+          POOL,
+          "Claimed",
+          SIGNER,
+          RECIPIENT,
+          AMOUNT,
+          "claim",
+        ),
+      /emitted 2 Claimed events for/,
+    );
   });
 });
 

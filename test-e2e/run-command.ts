@@ -136,6 +136,29 @@ export function assertOutputLacks(result: CommandResult, needle: string) {
   );
 }
 
+/// Requires both lines to be present AND `first` to come before `second` in the interleaved
+/// output a terminal shows.
+///
+/// Order is the whole point for anything printed so it can be compared before an approval:
+/// the same line after the transaction is a report, not a check.
+export function assertOutputOrder(result: CommandResult, first: string, second: string) {
+  const firstAt = result.output.indexOf(first);
+  const secondAt = result.output.indexOf(second);
+  assert.ok(
+    firstAt >= 0,
+    `${result.commandLine} output does not contain ${JSON.stringify(first)}:\n${result.output}`,
+  );
+  assert.ok(
+    secondAt >= 0,
+    `${result.commandLine} output does not contain ${JSON.stringify(second)}:\n${result.output}`,
+  );
+  assert.ok(
+    firstAt < secondAt,
+    `${result.commandLine} printed ${JSON.stringify(first)} AFTER ` +
+      `${JSON.stringify(second)}:\n${result.output}`,
+  );
+}
+
 /// The print-always invariant: every command that signs prints which account it is about to
 /// sign with, on every network, before anything else happens.
 export function assertActiveSignerPrinted(result: CommandResult, script: string, signer: string) {

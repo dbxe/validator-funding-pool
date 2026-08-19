@@ -385,9 +385,9 @@ A Ledger clear-signs a zero-calldata ETH transfer: destination address, amount, 
 | Fund via transfer | `npm run fund:ledger` | none | Clear-signed: pool address and amount |
 | Fund via calldata | `FUND_VIA_TRANSFER=0 npm run fund:ledger` | `fund()` | Blind-signed; destination and value shown |
 | Claim to self | `npm run claim:ledger` | `claim()` | Blind-signed; destination shown; value `0` |
-| Claim redirected | `RECIPIENT=0x... npm run claim:ledger` | `claimTo(address)` | Blind-signed; destination shown; value `0`; recipient not shown |
+| Claim redirected | `RECIPIENT=0x... npm run claim:ledger` | `claimTo(address)` | Blind-signed; destination shown; value `0`; recipient **not** shown — the script prints it before signing and checks it against the receipt after |
 | Refund to self | `npm run refund:ledger` | `refund()` | Blind-signed; destination shown; value `0` |
-| Refund redirected | `RECIPIENT=0x... npm run refund:ledger` | `refundTo(address)` | Blind-signed; destination shown; value `0`; recipient not shown |
+| Refund redirected | `RECIPIENT=0x... npm run refund:ledger` | `refundTo(address)` | Blind-signed; destination shown; value `0`; recipient **not** shown — the script prints it before signing and checks it against the receipt after |
 | Request exit | `npm run request-exit:ledger` | `requestExit(uint256)` | Blind-signed; destination shown; value is `MAX_FEE_WEI`, the maximum fee sent, not the fee charged |
 | Commit predeposit | `npm run commit-predeposit:ledger` | `commitAndPredeposit(...)` | Blind-signed; destination shown; value `1 ETH` |
 | Open funding attempt | `npm run open-funding-attempt:ledger` | `openFundingAttempt(address[],uint256[])` | Blind-signed; destination shown; value `0` |
@@ -411,8 +411,9 @@ Mitigations, in order:
 
 1. Prefer the no-argument variants. `claim()` and `refund()` both exist and always pay `msg.sender`, which is the device's own account. There is no unverifiable address to corrupt. `claim.ts` and `refund.ts` use them whenever `RECIPIENT` is unset or equals the signing account, so leaving `RECIPIENT` unset is the safe default.
 2. Reach for `claimTo` / `refundTo` only when the signing account genuinely cannot receive ETH.
-3. When you must redirect, derive the recipient independently on a second machine and compare it against the address the script prints before you approve on the device. This detects a tampered env file; it does not detect a tampered signing host.
-4. An ERC-7730 descriptor (see below) lets wallets that support it render the recipient. It does not help the Hardhat Ledger path, which requests no descriptor resolution.
+3. When you must redirect, derive the recipient independently on a second machine and compare it against the address the script prints before you approve on the device. `claim` and `refund` print it *before* they compose the transaction — `claim pool: <address>`, `claim recipient: <address>`, `claim amount: <wei>`, followed on the redirected path by a multi-line notice saying in as many words that this address rides in calldata the device will not render and must be compared now. This detects a tampered env file; it does not detect a tampered signing host, which composed that printed line too.
+4. Read the confirmation after mining. `assertPayoutReachedRecipient` decodes the pool's own `Claimed` / `Refunded` event out of the receipt — `recipient` is an indexed topic on both — and the command fails, naming the intended address and the actual one, if they differ. It is the same detection-not-prevention shape as the funding credit check: the ETH has already moved, and what it converts is a silent redirection into a named failure.
+5. An ERC-7730 descriptor (see below) lets wallets that support it render the recipient. It does not help the Hardhat Ledger path, which requests no descriptor resolution.
 
 ### ERC-7730 Clear-Signing Descriptor
 
@@ -533,7 +534,7 @@ Four variables are read by `npm run deploy` and by nothing else. Each becomes an
 - `EXPECTED_OPERATOR_TARGET_GWEI`: optional `fund` check for the operator's current-attempt target.
 - `EXPECTED_DEADLINE_BEFORE`: optional `fund` check requiring the funding deadline to be at or before this Unix timestamp.
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
-- `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
+- `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`. Unset, both commands call the no-argument `claim()` / `refund()`, which pay `msg.sender` and put no address in calldata at all. Set, they call `claimTo(address)` / `refundTo(address)`, and that address is an ABI argument no hardware wallet renders — so both commands print the pool, the recipient, and the amount before composing the transaction, with a loud notice on the redirected path, and both re-check the recipient against the pool's own `Claimed` / `Refunded` event in the mined receipt. See "The `claimTo` And `refundTo` Wart".
 - `MAX_FEE_WEI`: optional cap on the EIP-7002 exit request fee for `request-exit`, and the value the transaction carries. Defaults to twice the fee read immediately before sending, so an ordinary fee uptick between the read and inclusion does not revert `ExitFeeTooHigh`. Only the live fee is forwarded to the predeploy; the rest is refunded in the same transaction. A value below the currently observed fee is rejected before signing.
 - `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, funding and top-up preflights, and the advisory exit preflight; required by `commit-predeposit`, `fund`, and `top-up`.
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.

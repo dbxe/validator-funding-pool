@@ -3105,6 +3105,167 @@ export function assertFundingWasCredited(
   );
 }
 
+/// The two pool events that record a payout leaving the pool, with the address that was
+/// paid. `ValidatorFundingPool.sol:154` and `:132`, emitted at `:482` and `:463`;
+/// `claimTo`/`refundTo` — and the
+/// no-argument `claim()`/`refund()` that call them with `msg.sender` — emit exactly one each.
+///
+/// `recipient` is an event topic, so the receipt states where the ETH actually went. That is
+/// what makes it the check for the `claimTo`/`refundTo` wart: the recipient is an ABI
+/// argument the device does not render, so nothing before the broadcast can confirm it, and
+/// the mined receipt is the first place the chain says who was paid.
+const POOL_PAYOUT_EVENTS_ABI = [
+  {
+    type: "event",
+    name: "Claimed",
+    inputs: [
+      { name: "participant", type: "address", indexed: true },
+      { name: "recipient", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "Refunded",
+    inputs: [
+      { name: "participant", type: "address", indexed: true },
+      { name: "recipient", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+/// Which of the two payout paths a command is on. The event name is the contract's, and it
+/// is what the receipt is searched for.
+export type PayoutEventName = (typeof POOL_PAYOUT_EVENTS_ABI)[number]["name"];
+
+/// Announces where a payout is about to go, BEFORE the transaction is composed.
+///
+/// `claim` and `refund` used to print the destination only after mining — `Claimed to <x> in
+/// block <n>` — which is the one moment at which it is no longer a decision. On the Ledger
+/// path that is the whole exposure of the `claimTo`/`refundTo` wart (`README.md`): the
+/// recipient is an ABI argument, so the device renders the pool as the destination and `0` as
+/// the value while the address that receives every wei sits in calldata it does not show.
+/// `README.md`'s mitigation ladder tells the operator to derive the recipient independently
+/// and compare it against "the address the script prints before you approve on the device" —
+/// and until this printed, there was no such address.
+///
+/// The redirected case gets the loud form, because it is the only one with an unverifiable
+/// argument: paying `msg.sender` needs no address in calldata at all, and the device's own
+/// account is the destination by construction.
+export function printPayoutRecipient(
+  label: string,
+  poolAddress: Address,
+  signer: Address,
+  recipient: Address,
+  amount: bigint,
+) {
+  console.log(`${label} pool: ${poolAddress}`);
+  console.log(`${label} recipient: ${recipient}`);
+  console.log(`${label} amount: ${formatWei(amount)}`);
+  if (recipient.toLowerCase() === signer.toLowerCase()) {
+    console.log(
+      `${label} pays the signing account itself, so the no-argument ${label}() is used and no ` +
+        `recipient address goes into calldata`,
+    );
+    return;
+  }
+  console.warn(
+    `\n${label.toUpperCase()} IS REDIRECTED: EVERY WEI GOES TO ${recipient}, NOT TO THE ` +
+      `SIGNING ACCOUNT ${signer}.\n` +
+      `  RECIPIENT is set, so this run calls ${label}To(address) and that address travels as an ` +
+      `ABI ARGUMENT inside calldata.\n` +
+      `  A Ledger will NOT render it: the device shows the pool ${poolAddress} as the ` +
+      `destination and 0 as the value, and nothing on its screen mentions the address above.\n` +
+      `  Compare the address above against the one you derived independently NOW, before you ` +
+      `approve on the device. Once approved there is nothing left to check — the mined ` +
+      `receipt's own event is the next and last place the recipient can be verified.\n` +
+      `  Unset RECIPIENT to pay the signing account with no unverifiable argument at all.\n`,
+  );
+}
+
+/// Requires the mined payout receipt to prove the ETH went where the command said it would.
+///
+/// The `assertFundingWasCredited` pattern, applied to the other end of the pool. A successful
+/// receipt from the right sender says a transaction executed; the pool's own `Claimed` /
+/// `Refunded` event says who was paid, and `recipient` is a topic on it. That is the only
+/// independent statement of the recipient that exists anywhere in the flow: before the
+/// broadcast the address is an unrendered ABI argument, and afterwards the balance it landed
+/// in is somebody else's to read.
+///
+/// Detection, not prevention — the ETH has moved. What it converts is a silent redirection
+/// into a named failure carrying both addresses.
+///
+/// The amount is REPORTED rather than asserted. `claim()` pays `claimable(msg.sender)` and
+/// `refund()` pays `refundableWeiOf(msg.sender)` as they stand when the transaction executes,
+/// and a claim can legitimately be larger than the figure printed a moment earlier because
+/// fresh proceeds arrived in between. A difference is said out loud; only the recipient is
+/// fatal.
+export function assertPayoutReachedRecipient(
+  receipt: { logs: readonly ObservedLog[] },
+  poolAddress: Address,
+  eventName: PayoutEventName,
+  participant: Address,
+  intendedRecipient: Address,
+  printedAmount: bigint,
+  label: string,
+): void {
+  const payouts: { recipient: Address; amount: bigint }[] = [];
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== poolAddress.toLowerCase()) continue;
+    let decoded: ReturnType<typeof decodeEventLog<typeof POOL_PAYOUT_EVENTS_ABI>>;
+    try {
+      decoded = decodeEventLog({
+        abi: POOL_PAYOUT_EVENTS_ABI,
+        data: log.data,
+        topics: log.topics as [Hex, ...Hex[]],
+      });
+    } catch {
+      // Every other pool event is another command's business.
+      continue;
+    }
+    if (decoded.eventName !== eventName) continue;
+    if (decoded.args.participant.toLowerCase() !== participant.toLowerCase()) continue;
+    payouts.push({ recipient: decoded.args.recipient, amount: decoded.args.amount });
+  }
+
+  if (payouts.length !== 1) {
+    throw new Error(
+      `FATAL: ${label} transaction succeeded but the pool at ${poolAddress} emitted ` +
+        `${payouts.length === 0 ? `no ${eventName} event` : `${payouts.length} ${eventName} events`}` +
+        ` for ${participant}. The contract emits exactly one ` +
+        `per payout, so this transaction did not do what the command is for. The ETH may ` +
+        `already have moved: run "npm run status" and reconcile this account's balance before ` +
+        `re-running ${label}`,
+    );
+  }
+
+  const [payout] = payouts;
+  if (payout.recipient.toLowerCase() !== intendedRecipient.toLowerCase()) {
+    throw new Error(
+      `FATAL PAYOUT REDIRECTED: ${label} intended to pay ${intendedRecipient}, but the pool's ` +
+        `own ${eventName} event in this transaction's receipt says ${formatWei(payout.amount)} ` +
+        `went to ${payout.recipient}. The transaction is already on chain: this check DETECTS a ` +
+        `substituted recipient, it cannot prevent one. The recipient travels as an ABI argument ` +
+        `no hardware wallet renders, so a host that rewrote it between this command and the ` +
+        `signature produces exactly this. Treat the machine that ran this command as ` +
+        `compromised, and do not sign anything else from it`,
+    );
+  }
+
+  console.log(
+    `${label} recipient confirmed from the receipt: the pool emitted ${eventName} paying ` +
+      `${formatWei(payout.amount)} to ${payout.recipient}`,
+  );
+  if (payout.amount !== printedAmount) {
+    console.log(
+      `${label} paid ${formatWei(payout.amount)}, not the ${formatWei(printedAmount)} this ` +
+        `command read before broadcasting: the contract pays the balance as it stands when the ` +
+        `transaction executes, and it moved in between`,
+    );
+  }
+}
+
 /// `FeeRecipientForwarder.sol:13`. `sweep()` emits it with the whole balance it is about to
 /// forward, immediately before the transfer, so a receipt carrying it states the amount the
 /// forwarder actually sent — a fact that does not come from a fresh read of the endpoint.
@@ -3146,24 +3307,7 @@ export interface PoolOutflow {
 /// out of the pool's own balance, so it is a real outflow; its event carries no amount because
 /// the amount is a constant (`ValidatorFundingPool.sol:393`).
 const POOL_OUTFLOW_EVENTS_ABI = [
-  {
-    type: "event",
-    name: "Claimed",
-    inputs: [
-      { name: "participant", type: "address", indexed: true },
-      { name: "recipient", type: "address", indexed: true },
-      { name: "amount", type: "uint256", indexed: false },
-    ],
-  },
-  {
-    type: "event",
-    name: "Refunded",
-    inputs: [
-      { name: "participant", type: "address", indexed: true },
-      { name: "recipient", type: "address", indexed: true },
-      { name: "amount", type: "uint256", indexed: false },
-    ],
-  },
+  ...POOL_PAYOUT_EVENTS_ABI,
   {
     type: "event",
     name: "ValidatorTopUpSubmitted",
