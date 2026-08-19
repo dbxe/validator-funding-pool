@@ -76,8 +76,11 @@ function ledgerAccounts(): string[] {
 /// `SensitiveString`, and a chain id is public. Unset leaves the field off
 /// entirely, which is what keeps devnet and testnet runs working — the handler is
 /// installed only when the field is present.
-function expectedChainId(): number | undefined {
-  const declared = process.env.EXPECTED_CHAIN_ID ?? "";
+/// Exported for the unit test in `test/HardhatConfig.ts`. The config module builds a plain
+/// object on import and starts nothing, so a test may import it; the parser is separated from
+/// the environment read so the test can drive both sides of the boundary below without
+/// touching `process.env` or defeating the module cache.
+export function parseExpectedChainId(declared: string): number | undefined {
   if (declared === "") return undefined;
   if (!/^[1-9][0-9]*$/.test(declared)) {
     throw new Error(
@@ -86,7 +89,28 @@ function expectedChainId(): number | undefined {
         `Mainnet is EXPECTED_CHAIN_ID=1`,
     );
   }
-  return Number(declared);
+  // Hardhat's `chainId` field is a `number`, so the declaration has to survive the conversion
+  // to one. Above `Number.MAX_SAFE_INTEGER` it does not: `Number("9007199254740993")` is
+  // 9007199254740992, and the pin would then be installed for a chain id the operator did not
+  // declare — silently, which is the one thing a declare-and-verify pin may never be. The
+  // round trip back to a string is the check; `Number.isSafeInteger` is stated alongside it
+  // because it is what the round trip is really asserting, and the regex above has already
+  // ruled out every other spelling that could round-trip differently.
+  const chainId = Number(declared);
+  if (!Number.isSafeInteger(chainId) || String(chainId) !== declared) {
+    throw new Error(
+      `EXPECTED_CHAIN_ID ${declared} is above Number.MAX_SAFE_INTEGER ` +
+        `(${Number.MAX_SAFE_INTEGER}) and cannot be represented exactly. Hardhat's chainId ` +
+        `field is a number, so pinning it would pin ${chainId} instead — a different chain ` +
+        `id than the one declared, with nothing said about the difference. Refusing rather ` +
+        `than pinning something you did not declare. Mainnet is EXPECTED_CHAIN_ID=1`,
+    );
+  }
+  return chainId;
+}
+
+function expectedChainId(): number | undefined {
+  return parseExpectedChainId(process.env.EXPECTED_CHAIN_ID ?? "");
 }
 
 const config: HardhatUserConfig = {
