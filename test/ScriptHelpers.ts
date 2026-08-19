@@ -12,6 +12,7 @@ import {
   assertCommittedPubkeyMatchesLocalIfReadable,
   assertContractPredepositWei,
   assertDeployedAt,
+  assertDeploymentRecordShape,
   assertExpectedForwarder,
   assertExpectedForwarderRecorded,
   assertFreshForwarderMatchesExpectedForwarder,
@@ -492,9 +493,30 @@ describe("warnOnPlaintextEndpoints", function () {
         "http://127.10.20.30:8545",
         "http://[::1]:8545",
         "https://10.0.0.7:8545",
+        "wss://mainnet.example.com",
+        "ws://127.0.0.1:8546",
       ]) {
         assert.deepEqual(await warningsFor(connectionWithUrl(url)), [], url);
       }
+    });
+  });
+
+  it("warns about ws:// too, and names the scheme it saw", async function () {
+    // A WebSocket endpoint is as plaintext as an http one and viem's transports take it, so
+    // a `ws://` RPC_URL used to pass this check in silence. The message names the scheme
+    // rather than asserting http, and points at wss rather than https.
+    await withoutEndpointEnv(async () => {
+      const lines = await warningsFor(connectionWithUrl("ws://10.0.0.7:8546"));
+
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /WARNING: RPC_URL is plaintext ws:\/\/ to 10\.0\.0\.7/);
+      assert.match(lines[0], /Use wss:\/\//);
+      assert.doesNotMatch(lines[0], /Use https:\/\//);
+
+      process.env.BEACON_NODE_URL = "ws://10.0.0.9:5052";
+      const beacon = await warningsFor(connectionWithUrl("https://mainnet.example.com"));
+      assert.equal(beacon.length, 1);
+      assert.match(beacon[0], /WARNING: BEACON_NODE_URL is plaintext ws:\/\/ to 10\.0\.0\.9/);
     });
   });
 
@@ -2360,6 +2382,104 @@ describe("assertExpectedPubkey", function () {
     } finally {
       restoreEnv("EXPECTED_PUBKEY", original);
     }
+  });
+});
+
+describe("assertDeploymentRecordShape", function () {
+  const FILE = "deployments/latest.json";
+  const HASH = `0x${"ab".repeat(32)}`;
+
+  function validRecord(): Record<string, unknown> {
+    return {
+      chainId: 1,
+      pool: POOL,
+      depositContract: SIGNER,
+      depositContractCodeHash: HASH,
+      withdrawalRequestPredeploy: OTHER_SIGNER,
+      withdrawalRequestPredeployCodeHash: HASH,
+      operator: SIGNER,
+      fundingWindowDuration: "86400",
+      withdrawalCredentials: `0x01${"00".repeat(11)}${POOL.slice(2)}`,
+    };
+  }
+
+  it("accepts a record the commands wrote, with and without a forwarder", function () {
+    assert.doesNotThrow(() => assertDeploymentRecordShape(validRecord(), FILE));
+    assert.doesNotThrow(() =>
+      assertDeploymentRecordShape({ ...validRecord(), feeRecipientForwarder: SIGNER }, FILE),
+    );
+    // Returned unchanged: the check narrows a parse, it does not rewrite one.
+    assert.deepEqual(assertDeploymentRecordShape(validRecord(), FILE), validRecord());
+  });
+
+  it("refuses anything that is not a JSON object at all", function () {
+    for (const value of [null, 42, "0x", [], undefined]) {
+      assert.throws(
+        () => assertDeploymentRecordShape(value, FILE),
+        new RegExp(`The deployment record ${FILE} is .*, not a JSON object`),
+      );
+    }
+  });
+
+  it("names the field and what it found, for every field a check later reads", function () {
+    const cases: [string, unknown, RegExp][] = [
+      ["chainId", "1", /has chainId "1", which is not a positive integer/],
+      ["chainId", 0, /has chainId 0, which is not a positive integer/],
+      ["chainId", 1.5, /has chainId 1.5, which is not a positive integer/],
+      ["pool", "0x1234", /has pool "0x1234", which is not a 0x-prefixed 20-byte address/],
+      ["operator", undefined, /has operator <missing>, which is not a 0x-prefixed 20-byte address/],
+      [
+        "depositContractCodeHash",
+        "0xabcd",
+        /has depositContractCodeHash "0xabcd", which is not a 32-byte 0x-prefixed hex string/,
+      ],
+      [
+        "withdrawalCredentials",
+        null,
+        /has withdrawalCredentials null, which is not a 32-byte 0x-prefixed hex string/,
+      ],
+      [
+        "fundingWindowDuration",
+        86_400,
+        /has fundingWindowDuration 86400, which is not a string/,
+      ],
+      // The same canonical-decimal parser every amount goes through: "0x15180" is 86400 and
+      // is not the form anything here writes.
+      [
+        "fundingWindowDuration",
+        "0x15180",
+        /fundingWindowDuration "0x15180" is not a canonical unsigned decimal integer/,
+      ],
+    ];
+
+    for (const [field, value, expected] of cases) {
+      assert.throws(
+        () => assertDeploymentRecordShape({ ...validRecord(), [field]: value }, FILE),
+        expected,
+        `${field}=${JSON.stringify(value)}`,
+      );
+    }
+  });
+
+  it("refuses a null forwarder outright, which no undefined comparison would have caught", function () {
+    assert.throws(
+      () => assertDeploymentRecordShape({ ...validRecord(), feeRecipientForwarder: null }, FILE),
+      (error: Error) => {
+        assert.match(error.message, /has feeRecipientForwarder: null/);
+        assert.match(error.message, /null is neither/);
+        assert.match(error.message, /as if it were an address/);
+        return true;
+      },
+    );
+    // An explicit `undefined` is the same as an absent field, which is what the record looks
+    // like before `deploy-forwarder` runs.
+    assert.doesNotThrow(() =>
+      assertDeploymentRecordShape({ ...validRecord(), feeRecipientForwarder: undefined }, FILE),
+    );
+    assert.throws(
+      () => assertDeploymentRecordShape({ ...validRecord(), feeRecipientForwarder: "0x00" }, FILE),
+      /has feeRecipientForwarder "0x00", which is not a 0x-prefixed 20-byte address/,
+    );
   });
 });
 

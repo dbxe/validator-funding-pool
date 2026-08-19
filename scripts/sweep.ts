@@ -43,6 +43,12 @@ async function main() {
     address: deployment.feeRecipientForwarder,
   });
   const poolBalanceBefore = await publicClient.getBalance({ address: deployment.pool });
+  // The two addresses this transaction is about, before it is composed. `sweep` calls the
+  // forwarder and the ETH lands in the pool, and neither address appeared in the output until
+  // after the fact; on the Ledger path the device shows the forwarder as the destination, so
+  // this is the line to compare it against.
+  console.log(`sweep forwarder: ${deployment.feeRecipientForwarder}`);
+  console.log(`sweep pool: ${deployment.pool}`);
   console.log(`Forwarder pending balance: ${formatWei(forwarderBalanceBefore)}`);
   console.log(`Pool balance before: ${formatWei(poolBalanceBefore)}`);
 
@@ -73,9 +79,12 @@ async function main() {
       readPoolOutflowsInBlock(publicClient, deployment.pool, receipt.blockNumber),
     ]);
 
-  console.log(`Swept in block ${receipt.blockNumber}`);
-  console.log(`Forwarder pending balance after: ${formatWei(forwarderBalanceAfter)}`);
-  console.log(`Pool balance after: ${formatWei(poolAfterSweep)}`);
+  // The credit check first, and every success-shaped line below it. `Swept in block <n>` reads
+  // as "it worked" and it says only that a transaction was mined — which is exactly what a
+  // sweep that landed somewhere other than the pool also produces. Every other command in this
+  // repository prints its success line downstream of the check that earns it
+  // (`waitForSenderVerifiedReceipt`, `assertFundingWasCredited`), and this one printed three
+  // above it.
   assertSweepWasCredited(
     receipt,
     deployment.feeRecipientForwarder,
@@ -89,6 +98,9 @@ async function main() {
     },
     "sweep",
   );
+  console.log(`Swept in block ${receipt.blockNumber}`);
+  console.log(`Forwarder pending balance after: ${formatWei(forwarderBalanceAfter)}`);
+  console.log(`Pool balance after: ${formatWei(poolAfterSweep)}`);
 }
 
 main().catch((error) => reportFatalError(error, "sweep"));

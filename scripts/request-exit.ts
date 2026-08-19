@@ -66,6 +66,10 @@ async function main() {
     );
   }
 
+  // The address this transaction goes to, before it is composed. On the Ledger path the
+  // device shows the destination and nothing else legible, so this is the line to compare it
+  // against.
+  console.log(`request-exit pool: ${deployment.pool}`);
   console.log(`Requesting full exit for ${pubkey}`);
   console.log(`EIP-7002 fee: ${formatWei(fee)}`);
   console.log(`Max fee sent: ${formatWei(maxFee)} (the excess above the fee charged is refunded)`);

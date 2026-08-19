@@ -1229,8 +1229,14 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       "FeeRecipientForwarder runtime code matches the local build artifacts/contracts/" +
         "FeeRecipientForwarder.sol/FeeRecipientForwarder.json",
     );
+    // The two addresses the transaction is about, printed before it is composed.
+    assertOutputOrder(result, `sweep forwarder: ${forwarder}`, "Swept in block ");
+    assertOutputOrder(result, `sweep pool: ${pool}`, "Swept in block ");
     assertOutputContains(result, `Forwarder pending balance: ${formatWei(rewards)}`);
     assertOutputContains(result, "Swept in block ");
+    // And the success-shaped lines below the check that earns them: "Swept in block <n>" says
+    // a transaction was mined, which is exactly what a sweep landing elsewhere also produces.
+    assertOutputOrder(result, "sweep credit confirmed:", "Swept in block ");
     // The receipt's own Swept log and the pool's balance across the sweep's own block, not
     // the transaction's success: a sweep that succeeds and lands elsewhere looks identical
     // until these two are compared.

@@ -450,7 +450,12 @@ async function resolvedEndpointUrl(connection: SignerConnection): Promise<string
   }
 }
 
-/// Warns, loudly, when either endpoint is plaintext `http:` to a non-loopback host.
+/// The URL schemes that carry JSON-RPC in the clear. `ws:` is as plaintext as `http:` and
+/// viem's transports accept it; a WebSocket `RPC_URL` was passing this check silently.
+const PLAINTEXT_PROTOCOLS = new Set(["http:", "ws:"]);
+
+/// Warns, loudly, when either endpoint is plaintext — `http:` or `ws:` — to a non-loopback
+/// host.
 ///
 /// Not fatal: a node on the operator's own LAN over plain HTTP is a legitimate and common
 /// setup, and refusing it would push people toward worse workarounds. But `SECURITY.md` §2
@@ -477,15 +482,17 @@ export async function warnOnPlaintextEndpoints(connection: SignerConnection) {
       // Not this function's business: whatever consumes the value fails on it there.
       continue;
     }
-    if (url.protocol !== "http:" || isLoopbackHost(url.hostname)) continue;
+    if (!PLAINTEXT_PROTOCOLS.has(url.protocol) || isLoopbackHost(url.hostname)) continue;
     console.warn(
-      `\nWARNING: ${name} is plaintext http:// to ${url.hostname}, which is not loopback.\n` +
+      `\nWARNING: ${name} is plaintext ${url.protocol}// to ${url.hostname}, which is not ` +
+        `loopback.\n` +
         `  Anyone on the network path — not merely whoever runs that endpoint — can read every ` +
         `request and rewrite every response.\n` +
         `  That is the full lying-endpoint capability described in SECURITY.md §2: false ` +
         `validator state, false pool state, and on the plain-transfer funding path a single ` +
         `ordinary transfer turned into a donation.\n` +
-        `  Use https://, or a node reached over loopback or an SSH tunnel.\n`,
+        `  Use ${url.protocol === "ws:" ? "wss://" : "https://"}, or a node reached over ` +
+          `loopback or an SSH tunnel.\n`,
     );
   }
 }
@@ -1238,7 +1245,98 @@ export function writeDeployment(record: DeploymentRecord) {
 export function readDeployment(): DeploymentRecord {
   const file = deploymentPath();
   console.log(`Deployment record: ${file}`);
-  return JSON.parse(readFileSync(file, "utf8")) as DeploymentRecord;
+  return assertDeploymentRecordShape(JSON.parse(readFileSync(file, "utf8")), file);
+}
+
+/// Validates the record's shape once, at the parse boundary, before any check reads a field.
+///
+/// `JSON.parse(...) as DeploymentRecord` is a claim, not a check: the annotation is erased and
+/// the file is whatever is on disk. Every consumer then assumed its fields — `deployment.pool`
+/// is `.toLowerCase()`d by the `EXPECTED_POOL` pin, `BigInt(deployment.fundingWindowDuration)`
+/// is parsed by the immutables comparison, the code hashes are compared as strings — so a
+/// truncated, hand-edited, or wrong-shaped record failed somewhere downstream with a
+/// TypeError about a property, on a command whose whole job is to be precise about which pool
+/// it is acting on. This is the beacon shape validation's reasoning applied to the one local
+/// file that selects the SUBJECT of every check.
+///
+/// `feeRecipientForwarder` gets its own case because `null` is the shape a hand-edited record
+/// most plausibly grows, and `null !== undefined`: every "does this record name a forwarder"
+/// test in this file is `!== undefined`, so a null would have been carried into
+/// `assertForwarderAuthenticity` and `getBalance` as if it were an address.
+export function assertDeploymentRecordShape(value: unknown, file: string): DeploymentRecord {
+  const record = requireRecordObject(value, file);
+
+  const chainId = record.chainId;
+  if (typeof chainId !== "number" || !Number.isInteger(chainId) || chainId <= 0) {
+    throw new Error(
+      `The deployment record ${file} has chainId ${describeBeaconValue(chainId)}, which is not a ` +
+        `positive integer. It is compared against the connected chain on every command`,
+    );
+  }
+
+  for (const field of ["pool", "depositContract", "withdrawalRequestPredeploy", "operator"] as const) {
+    requireRecordAddress(record[field], field, file);
+  }
+  for (const field of [
+    "depositContractCodeHash",
+    "withdrawalRequestPredeployCodeHash",
+    "withdrawalCredentials",
+  ] as const) {
+    requireRecordHex(record[field], 32, field, file);
+  }
+
+  const fundingWindowDuration = record.fundingWindowDuration;
+  if (typeof fundingWindowDuration !== "string") {
+    throw new Error(
+      `The deployment record ${file} has fundingWindowDuration ` +
+        `${describeBeaconValue(fundingWindowDuration)}, which is not a string. It is written as ` +
+        `a decimal string and compared against the pool's immutable`,
+    );
+  }
+  parseUnsignedDecimal(fundingWindowDuration, `${file} fundingWindowDuration`);
+
+  if ("feeRecipientForwarder" in record && record.feeRecipientForwarder !== undefined) {
+    if (record.feeRecipientForwarder === null) {
+      throw new Error(
+        `The deployment record ${file} has feeRecipientForwarder: null. A record either names a ` +
+          `fee-recipient forwarder or omits the field; null is neither, and it would have been ` +
+          `carried into the forwarder checks as if it were an address, because every test for ` +
+          `"this record names a forwarder" compares against undefined. Delete the field, or set ` +
+          `it to the forwarder's address`,
+      );
+    }
+    requireRecordAddress(record.feeRecipientForwarder, "feeRecipientForwarder", file);
+  }
+
+  return record as unknown as DeploymentRecord;
+}
+
+function requireRecordObject(value: unknown, file: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(
+      `The deployment record ${file} is ${describeBeaconValue(value)}, not a JSON object. It ` +
+        `names the pool every check in this command is made about`,
+    );
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireRecordAddress(value: unknown, field: string, file: string): void {
+  if (typeof value !== "string" || !isAddress(value, { strict: false })) {
+    throw new Error(
+      `The deployment record ${file} has ${field} ${describeBeaconValue(value)}, which is not a ` +
+        `0x-prefixed 20-byte address`,
+    );
+  }
+}
+
+function requireRecordHex(value: unknown, bytes: number, field: string, file: string): void {
+  if (typeof value !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${bytes * 2}}$`).test(value)) {
+    throw new Error(
+      `The deployment record ${file} has ${field} ${describeBeaconValue(value)}, which is not a ` +
+        `${bytes}-byte 0x-prefixed hex string`,
+    );
+  }
 }
 
 /// A declare-and-verify pin on the pool the deployment record names.
