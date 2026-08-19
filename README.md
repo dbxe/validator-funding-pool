@@ -283,6 +283,18 @@ Future Ethereum staking features may require contract changes or may simply be u
 | ETH is forced into the pool | It follows the forced-ETH rules above; no sender rescue exists. |
 | Forwarder receives ETH before pool top-up | Funds remain in the forwarder until a permissionless sweep succeeds; they are stranded if the pool never tops up. |
 
+### What A Failure Prints
+
+Every command that fails exits `1` and prints a short block on stderr: a header naming the command, then the walked cause chain's messages with the decoded contract error — `FundingStillOpen()`, `FundingCapExceeded()` — on the line directly under the header. A check this repository makes itself prints its whole message, because the message is the instruction.
+
+The complete error object, with the contract ABI, every stack frame, and the raw cause chain, is one variable away:
+
+```bash
+DEBUG=1 npm run fund
+```
+
+Reach for it when the summary is not enough. Nothing is filtered out of the summary that changes what happened — only how much of it you have to read to see it.
+
 ## Defaults
 
 - Ethereum deposit contract: `0x00000000219ab540356cBB839Cbe05303d7705Fa`
@@ -413,6 +425,20 @@ npm install
 npm run build
 npm test
 ```
+
+### End-To-End Command Tests
+
+`npm test` covers the contract and the helpers the commands are built from. The commands themselves — the order in which a script calls those helpers, which branch it takes, and the lines it prints — are covered separately:
+
+```bash
+npm run test:e2e
+```
+
+It takes about forty seconds and needs nothing but this checkout. Each case runs a command exactly as `package.json` runs it, as a real child process with a controlled environment, against a local `hardhat node` and a deterministic mock beacon node that the harness starts and tears down itself. The local chain carries the real mainnet deposit contract and the real EIP-7002 predeploy at their real mainnet addresses, and refuses to start unless both hash to the code hashes `scripts/lib/common.ts` pins for mainnet.
+
+It is kept out of `npm test` on purpose, so the unit suite stays fast enough to run constantly. Run both before proposing a change to anything in `scripts/`.
+
+`SECURITY.md` §5 lists what the harness covers and the two paths it does not: the Ledger hardware paths, and the true mid-flight top-up race.
 
 Deploy:
 
