@@ -1519,8 +1519,9 @@ export async function assertForwarderAuthenticity(
   publicClient: DeploymentPublicClient,
   forwarder: Address,
   poolAddress: Address,
+  pinSite: ForwarderPinSite = "record",
 ): Promise<void> {
-  assertExpectedForwarder(forwarder);
+  assertExpectedForwarder(forwarder, pinSite);
   await assertHasCode(publicClient, forwarder, VERIFIED_FORWARDER.role);
   const forwarderPool = (await publicClient.readContract({
     address: forwarder,
@@ -1573,20 +1574,30 @@ export function assertExpectedForwarderRecorded(
         `not be set for it`,
     );
   }
-  assertExpectedForwarder(deployment.feeRecipientForwarder);
+  assertExpectedForwarder(deployment.feeRecipientForwarder, "record");
 }
 
-/// A declare-and-verify pin on the forwarder the deployment record names.
+/// Where the address being compared against `EXPECTED_FORWARDER` came from.
+///
+/// The message has to say. `"record"` is the ordinary site — the address the deployment
+/// record names, checked before anything is sent — and its wording ("the deployment record
+/// names X", "Nothing has been sent") is only true there. `deploy-forwarder` calls the same
+/// authenticity check a second time on an address it has just DEPLOYED, where no record named
+/// it and a transaction has already landed, and the record wording was simply false.
+export type ForwarderPinSite = "record" | "fresh-deployment";
+
+/// A declare-and-verify pin on a fee-recipient forwarder address.
 ///
 /// The same shape as `assertExpectedPool`, for the same reason: `DEPLOYMENT_FILE` selects the
 /// record, and the record names the forwarder as freely as it names the pool. Unset or empty
 /// declares nothing; a value that is not an address is fatal naming the variable; a mismatch
-/// is fatal before anything is sent. Reach it through `assertExpectedForwarderRecorded` when
-/// the record may name no forwarder, which is the case this one cannot see.
-export function assertExpectedForwarder(forwarderAddress: Address) {
+/// is fatal. Reach it through `assertExpectedForwarderRecorded` when the record may name no
+/// forwarder, which is the case this one cannot see.
+export function assertExpectedForwarder(forwarderAddress: Address, site: ForwarderPinSite) {
   const expectedForwarder = declaredExpectedForwarder();
   if (expectedForwarder === undefined) return;
-  if (forwarderAddress.toLowerCase() !== expectedForwarder.toLowerCase()) {
+  if (forwarderAddress.toLowerCase() === expectedForwarder.toLowerCase()) return;
+  if (site === "record") {
     throw new Error(
       `The deployment record ${deploymentPath()} names fee-recipient forwarder ` +
         `${forwarderAddress}, not the declared EXPECTED_FORWARDER ${expectedForwarder}. Nothing ` +
@@ -1594,6 +1605,45 @@ export function assertExpectedForwarder(forwarderAddress: Address) {
         `forwarder you mean and re-run`,
     );
   }
+  throw new Error(
+    `deploy-forwarder: EXPECTED_FORWARDER is declared as ${expectedForwarder}, but the forwarder ` +
+      `this run just deployed is at ${forwarderAddress}. A declaration names a forwarder that ` +
+      `already exists, so a fresh deployment cannot satisfy it. The deployment transaction is ` +
+      `already on chain and the record has NOT been written, so the forwarder at ` +
+      `${forwarderAddress} is deployed and unrecorded. This should have been refused before ` +
+      `anything was sent — see assertFreshForwarderMatchesExpectedForwarder`,
+  );
+}
+
+/// Refuses `deploy-forwarder` outright while `EXPECTED_FORWARDER` is declared, BEFORE the
+/// deployment transaction is composed.
+///
+/// `assertFreshDeploymentMatchesExpectedPool`'s reasoning, applied to the sidecar: a
+/// declaration names a forwarder that already exists, and a fresh deployment cannot be it. Left
+/// unchecked, a run with the variable still in the environment deploys a second forwarder and
+/// overwrites the record naming the declared one — and the record's `feeRecipientForwarder` is
+/// what `sweep` calls and what an operator configured their validator client's `fee_recipient`
+/// to, so the ETH keeps arriving at the forwarder the record no longer names.
+///
+/// It refuses PRE-BROADCAST, unlike the pool's guard, because it can: the pool's is a
+/// comparison against an address that only exists once the creation transaction is composed,
+/// while this one needs no address at all. A declaration is present or it is not, and a present
+/// one cannot be satisfied by anything this command does. That difference is worth the two
+/// separate functions: refusing before the transaction leaves nothing deployed and unrecorded.
+export function assertFreshForwarderMatchesExpectedForwarder() {
+  const expectedForwarder = declaredExpectedForwarder();
+  if (expectedForwarder === undefined) return;
+  throw new Error(
+    `deploy-forwarder: EXPECTED_FORWARDER is declared as ${expectedForwarder}, and this command ` +
+      `deploys a NEW forwarder. A declaration names a forwarder that already exists, so nothing ` +
+      `this command can produce will satisfy it: the address does not exist until the ` +
+      `deployment transaction is sent. Nothing has been sent. Either this run was meant to ` +
+      `replace the forwarder at ${expectedForwarder} — in which case unset EXPECTED_FORWARDER, ` +
+      `and note that the record's forwarder is what "npm run sweep" calls and what the ` +
+      `validator client's fee_recipient was configured to, so rewards keep arriving at the old ` +
+      `address until that setting is changed too — or EXPECTED_FORWARDER was left over from a ` +
+      `command against the forwarder you already have, and the command you meant is not this one`,
+  );
 }
 
 export async function assertFeeRecipientForwarderMatchesDeployment(

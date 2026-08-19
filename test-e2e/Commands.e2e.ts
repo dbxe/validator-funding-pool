@@ -1119,6 +1119,31 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, `Immutable pool destination: ${pool}`);
   });
 
+  it("deploy-forwarder refuses while EXPECTED_FORWARDER is declared, before broadcasting", async () => {
+    // The record now names the forwarder the declaration would name, so every existing check
+    // passes — and the run would deploy a SECOND forwarder and overwrite the record naming
+    // the declared one. The validator client's fee_recipient still points at the old address,
+    // so the rewards would keep arriving somewhere the record no longer mentions.
+    const result = expectFailure(
+      await runCommand({
+        script: "deploy-forwarder",
+        env: asOperator({ EXPECTED_FORWARDER: forwarder }),
+      }),
+    );
+
+    assertReadableFailure(
+      result,
+      "deploy-forwarder",
+      `deploy-forwarder: EXPECTED_FORWARDER is declared as ${forwarder}, and this command ` +
+        "deploys a NEW forwarder.",
+    );
+    // Refused from the environment, before the record is read or anything is sent.
+    assertOutputLacks(result, `Deployment record: ${deploymentFile}`);
+    assertOutputLacks(result, "Fee recipient forwarder deployed:");
+    const record = JSON.parse(readFileSync(deploymentFile, "utf8")) as DeploymentRecord;
+    assert.equal(record.feeRecipientForwarder, forwarder);
+  });
+
   it("a declared EXPECTED_FORWARDER the record does not name stops the command dead", async () => {
     const result = expectFailure(
       await runCommand({

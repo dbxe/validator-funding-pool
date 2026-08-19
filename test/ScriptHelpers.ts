@@ -14,6 +14,7 @@ import {
   assertDeployedAt,
   assertExpectedForwarder,
   assertExpectedForwarderRecorded,
+  assertFreshForwarderMatchesExpectedForwarder,
   assertExpectedPool,
   assertExpectedPubkey,
   assertFundingWasCredited,
@@ -1603,8 +1604,8 @@ describe("assertExpectedForwarder", function () {
     try {
       for (const value of [undefined, ""]) {
         restoreEnv("EXPECTED_FORWARDER", value);
-        assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER));
-        assert.doesNotThrow(() => assertExpectedForwarder(OTHER_SIGNER));
+        assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER, "record"));
+        assert.doesNotThrow(() => assertExpectedForwarder(OTHER_SIGNER, "record"));
       }
     } finally {
       restoreEnv("EXPECTED_FORWARDER", original);
@@ -1616,9 +1617,9 @@ describe("assertExpectedForwarder", function () {
 
     try {
       process.env.EXPECTED_FORWARDER = FORWARDER.toUpperCase().replace("0X", "0x");
-      assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER));
+      assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER, "record"));
       assert.throws(
-        () => assertExpectedForwarder(OTHER_SIGNER),
+        () => assertExpectedForwarder(OTHER_SIGNER, "record"),
         (error: Error) => {
           assert.match(error.message, new RegExp(`names fee-recipient forwarder ${OTHER_SIGNER}`));
           assert.match(error.message, /declared EXPECTED_FORWARDER/);
@@ -1639,10 +1640,92 @@ describe("assertExpectedForwarder", function () {
       for (const value of ["not-an-address", "0x1234", FORWARDER.slice(0, -1), "0"]) {
         process.env.EXPECTED_FORWARDER = value;
         assert.throws(
-          () => assertExpectedForwarder(FORWARDER),
+          () => assertExpectedForwarder(FORWARDER, "record"),
           new RegExp(`EXPECTED_FORWARDER ${value} is not a 0x-prefixed 20-byte address`),
         );
       }
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("says something site-accurate about an address this run just deployed", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = FORWARDER;
+      assert.throws(
+        () => assertExpectedForwarder(OTHER_SIGNER, "fresh-deployment"),
+        (error: Error) => {
+          // No record named this address and a transaction HAS been sent, so neither the
+          // record clause nor "Nothing has been sent" may appear.
+          assert.match(error.message, /the forwarder this run just deployed is/);
+          assert.match(error.message, /a fresh deployment cannot satisfy it/);
+          assert.match(error.message, /deployed and unrecorded/);
+          assert.doesNotMatch(error.message, /Nothing has been sent/);
+          assert.doesNotMatch(error.message, /the deployment record .* names/);
+          return true;
+        },
+      );
+      // The matching case is silent at either site.
+      assert.doesNotThrow(() => assertExpectedForwarder(FORWARDER, "fresh-deployment"));
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+});
+
+describe("assertFreshForwarderMatchesExpectedForwarder", function () {
+  const FORWARDER = "0x4444444444444444444444444444444444444444" as Address;
+
+  it("asserts nothing when the pin is unset or empty", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_FORWARDER", value);
+        assert.doesNotThrow(() => assertFreshForwarderMatchesExpectedForwarder());
+      }
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("refuses any declaration, because a fresh deployment can never be one", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = FORWARDER;
+      assert.throws(
+        () => assertFreshForwarderMatchesExpectedForwarder(),
+        (error: Error) => {
+          assert.match(
+            error.message,
+            new RegExp(`^deploy-forwarder: EXPECTED_FORWARDER is declared as ${FORWARDER}`),
+          );
+          assert.match(error.message, /deploys a NEW forwarder/);
+          // Pre-broadcast, which is the whole difference from the pool's guard.
+          assert.match(error.message, /Nothing has been sent/);
+          // And the consequence an operator has to act on if they meant it: the old address
+          // is still what the validator client pays.
+          assert.match(error.message, /fee_recipient was configured to/);
+          return true;
+        },
+      );
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("is fatal for a malformed declaration rather than ignoring it", function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = "0x1234";
+      assert.throws(
+        () => assertFreshForwarderMatchesExpectedForwarder(),
+        /EXPECTED_FORWARDER 0x1234 is not a 0x-prefixed 20-byte address/,
+      );
     } finally {
       restoreEnv("EXPECTED_FORWARDER", original);
     }
