@@ -27,8 +27,16 @@ export const TOP_UP_GWEI = 31_000_000_000n;
 export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
-const DEFAULT_CONFIRMATION_STATE_ID = "finalized";
-const ALLOWED_CONFIRMATION_STATE_IDS = ["finalized", "justified"];
+/// The settled state the credential confirmation reads, before the same credentials are
+/// re-confirmed at head. Fixed, with no environment variable behind it.
+///
+/// It used to be selectable through `BEACON_CONFIRMATION_STATE_ID`, restricted to
+/// `finalized` or `justified`. The only thing that flag ever bought over the default was
+/// `justified` — roughly one epoch, some six minutes of freshness — on a confirmation that
+/// happens once per validator lifecycle and is followed by a head read anyway. That is not
+/// worth a variable on the security surface: every configurable input is one more thing an
+/// auditor has to reason about, and one more thing an operator can be talked into setting.
+const CONFIRMATION_STATE_ID = "finalized";
 const HEAD_STATE_ID = "head";
 const UINT64_MAX = 2n ** 64n - 1n;
 const FAR_FUTURE_EPOCH = UINT64_MAX.toString();
@@ -1294,7 +1302,7 @@ async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
   const preflight = await readBeaconValidatorPreflight(
     beaconNodeUrl,
     pubkey,
-    confirmationStateId(label),
+    CONFIRMATION_STATE_ID,
     label,
   );
   assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
@@ -1868,19 +1876,6 @@ function requireBeaconNodeUrl(label: string): string {
     throw new Error(`${label} requires BEACON_NODE_URL for mandatory beacon confirmation`);
   }
   return beaconNodeUrl;
-}
-
-// Credential confirmation reads a settled state and is then re-confirmed at head. Allowing "head"
-// here would collapse those two reads into one, so the state id is restricted to settled states.
-function confirmationStateId(label: string): string {
-  const stateId = process.env.BEACON_CONFIRMATION_STATE_ID ?? DEFAULT_CONFIRMATION_STATE_ID;
-  if (!ALLOWED_CONFIRMATION_STATE_IDS.includes(stateId)) {
-    throw new Error(
-      `${label} BEACON_CONFIRMATION_STATE_ID ${stateId} is not allowed; use one of ` +
-        ALLOWED_CONFIRMATION_STATE_IDS.join(", "),
-    );
-  }
-  return stateId;
 }
 
 function printBeaconPreflight(label: string, preflight: BeaconValidatorPreflight) {

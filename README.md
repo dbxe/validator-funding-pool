@@ -489,7 +489,6 @@ Use `https://` for `RPC_URL` and `BEACON_NODE_URL` unless the node is on loopbac
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`.
 - `MAX_FEE_WEI`: optional cap on the EIP-7002 exit request fee for `request-exit`, and the value the transaction carries. Defaults to twice the fee read immediately before sending, so an ordinary fee uptick between the read and inclusion does not revert `ExitFeeTooHigh`. Only the live fee is forwarded to the predeploy; the rest is refunded in the same transaction. A value below the currently observed fee is rejected before signing.
 - `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, funding and top-up preflights, and the advisory exit preflight; required by `commit-predeposit`, `fund`, and `top-up`.
-- `BEACON_CONFIRMATION_STATE_ID`: beacon state id for withdrawal-credential confirmation; must be `finalized` (the default) or `justified`, and any other value is fatal. `head` is rejected because it would collapse the two-state confirmation into a single head read. Mutable fresh-predeposit and exit checks always use head state.
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.
 
 ## License

@@ -35,11 +35,15 @@ const WITHDRAWAL_CREDENTIALS = "0x0100000000000000000000002222222222222222222222
 const OTHER_WITHDRAWAL_CREDENTIALS =
   "0x0100000000000000000000003333333333333333333333333333333333333333" as Hex;
 const FAR_FUTURE_EPOCH = "18446744073709551615";
-// Both variables were deleted from the codebase. They are referenced here only to prove that
-// setting them changes nothing.
+// All three variables were deleted from the codebase. They are referenced here only to prove
+// that setting them changes nothing. `BEACON_CONFIRMATION_STATE_ID` is the newest of them: it
+// used to select the settled state for the credential confirmation, and it is set to the
+// nonsense value "1" alongside the others precisely because nothing reads it any more — a
+// variable that is silently ignored has to be shown to be ignored.
 const DELETED_OVERRIDE_VARS = [
   "UNSAFE_ALLOW_TOPUP_VALIDATOR_ANOMALY",
   "I_UNDERSTAND_TOPUP_VALIDATOR_ANOMALY",
+  "BEACON_CONFIRMATION_STATE_ID",
 ] as const;
 // The fund and top-up legs run the identical fresh-predeposit preflight; every case below is
 // exercised against both.
@@ -879,35 +883,20 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("restricts BEACON_CONFIRMATION_STATE_ID to settled states", async function () {
+  it("always confirms at finalized, whatever the deleted BEACON_CONFIRMATION_STATE_ID says", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
     const originalStateId = process.env.BEACON_CONFIRMATION_STATE_ID;
     process.env.BEACON_NODE_URL = "http://beacon.example";
 
     try {
-      for (const stateId of ["head", "justified-ish", "0x1234", ""]) {
-        process.env.BEACON_CONFIRMATION_STATE_ID = stateId;
-        installBeaconMock({});
-        try {
-          await assert.rejects(
-            assertBeaconValidatorReadyForFunding(
-              PUBKEY,
-              WITHDRAWAL_CREDENTIALS,
-              "fund-test",
-              refusingReader(),
-            ),
-            new RegExp(
-              `fund-test BEACON_CONFIRMATION_STATE_ID ${stateId} is not allowed; ` +
-                `use one of finalized, justified`,
-            ),
-          );
-        } finally {
-          restoreFetch();
-        }
-      }
-
-      for (const stateId of ["finalized", "justified"]) {
-        process.env.BEACON_CONFIRMATION_STATE_ID = stateId;
+      // The variable is gone. `head` in particular was the one value the old allowlist
+      // existed to refuse, because it would have collapsed the settled read and the head
+      // read into one; `justified` was the only value the flag ever bought over the
+      // default. Neither can do anything now, and a silently ignored variable has to be
+      // provably inert rather than assumed so — so this asserts on the requests that were
+      // actually made, not merely that the preflight passed.
+      for (const stateId of [undefined, "head", "justified", "0x1234", ""]) {
+        restoreEnv("BEACON_CONFIRMATION_STATE_ID", stateId);
         const calls = installBeaconMock({});
         const log = captureLog();
         try {
@@ -921,8 +910,17 @@ describe("beacon preflight checks", function () {
           log.restore();
           restoreFetch();
         }
-        assert(calls.includes(`/eth/v1/beacon/states/${stateId}/validators/${PUBKEY}`));
+
+        assert(
+          calls.includes(`/eth/v1/beacon/states/finalized/validators/${PUBKEY}`),
+          `settled read did not hit finalized with BEACON_CONFIRMATION_STATE_ID=${stateId}`,
+        );
         assert(calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
+        // And no read went anywhere the variable named.
+        assert.deepEqual(
+          calls.filter((call) => call.includes("/states/justified/") || call.includes("/states/0x1234/")),
+          [],
+        );
       }
     } finally {
       restoreFetch();
