@@ -18,6 +18,7 @@ import {
   assertExpectedPubkey,
   assertFundingWasCredited,
   assertFundingWindowNotDeclared,
+  assertFreshDeploymentMatchesExpectedPool,
   assertStillFundable,
   assertSweepWasCredited,
   beaconApiUrl,
@@ -1706,6 +1707,58 @@ describe("assertExpectedPool", function () {
           new RegExp(`EXPECTED_POOL ${value} is not a 0x-prefixed 20-byte address`),
         );
       }
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
+  });
+});
+
+describe("assertFreshDeploymentMatchesExpectedPool", function () {
+  it("asserts nothing when the pin is unset or empty", function () {
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      for (const value of [undefined, ""]) {
+        restoreEnv("EXPECTED_POOL", value);
+        assert.doesNotThrow(() => assertFreshDeploymentMatchesExpectedPool(POOL));
+      }
+    } finally {
+      restoreEnv("EXPECTED_POOL", original);
+    }
+  });
+
+  it("refuses to record a new pool while a different one is declared", function () {
+    // `deploy` writes the record every other command's EXPECTED_POOL is checked against. A
+    // declaration still in the environment says the operator means the pool they already
+    // have, and this run was about to replace its record with a second pool's.
+    const original = process.env.EXPECTED_POOL;
+
+    try {
+      process.env.EXPECTED_POOL = POOL;
+      assert.throws(
+        () => assertFreshDeploymentMatchesExpectedPool(OTHER_SIGNER),
+        (error: Error) => {
+          assert.match(error.message, new RegExp(`^deploy: EXPECTED_POOL is declared as ${POOL}`));
+          assert.match(error.message, new RegExp(`deployed a NEW pool at ${OTHER_SIGNER}`));
+          assert.match(error.message, /stranded the existing pool's 1 ETH predeposit/);
+          assert.match(error.message, /The record has NOT been written/);
+          return true;
+        },
+      );
+
+      // The declared address itself is not refused: the check is a comparison, not a ban on
+      // running `deploy` with the variable set.
+      assert.doesNotThrow(() => assertFreshDeploymentMatchesExpectedPool(POOL));
+      assert.doesNotThrow(() =>
+        assertFreshDeploymentMatchesExpectedPool(POOL.toUpperCase().replace("0X", "0x") as Address),
+      );
+
+      // And a declaration that cannot be parsed is fatal here too.
+      process.env.EXPECTED_POOL = "0x1234";
+      assert.throws(
+        () => assertFreshDeploymentMatchesExpectedPool(POOL),
+        /EXPECTED_POOL 0x1234 is not a 0x-prefixed 20-byte address/,
+      );
     } finally {
       restoreEnv("EXPECTED_POOL", original);
     }

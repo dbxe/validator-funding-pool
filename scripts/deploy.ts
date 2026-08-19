@@ -6,6 +6,7 @@ import {
   assertDeploymentCanonicity,
   assertDeploymentMatchesPool,
   assertDeploymentSystemCodeHashes,
+  assertFreshDeploymentMatchesExpectedPool,
   assertHasCode,
   assertRuntimeCodeMatchesLocalBuild,
   codeHash,
@@ -70,6 +71,10 @@ async function main() {
     "deploy",
   );
   assertDeployedAt(deploymentReceipt.contractAddress, pool.address, "ValidatorFundingPool");
+  // The redeploy guard. Every other command treats `EXPECTED_POOL` as "the pool I mean"; this
+  // one would otherwise ignore it and overwrite the record naming that pool with a new one.
+  // Checked before `writeDeployment`, so a refusal leaves the existing record intact.
+  assertFreshDeploymentMatchesExpectedPool(pool.address);
 
   const withdrawalCredentials = await pool.read.withdrawalCredentials();
 

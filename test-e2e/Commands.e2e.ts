@@ -244,6 +244,31 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     beacon.setValidator(deposits.pubkey, absentValidator());
   });
 
+  it("deploy refuses to record a second pool while EXPECTED_POOL names the first", async () => {
+    // The redeploy guard. Every other command reads EXPECTED_POOL as "the pool I mean"; on
+    // `deploy` it used to be ignored, and the run would overwrite the record naming that pool
+    // with a brand-new one — stranding the first pool's predeposit and pointing every later
+    // command at the wrong pool, with every check passing.
+    const result = expectFailure(
+      await runCommand({
+        script: "deploy",
+        env: {
+          RPC_URL: chain.url,
+          PRIVATE_KEY: operator.privateKey,
+          DEPLOYMENT_FILE: deploymentFile,
+          EXPECTED_POOL: pool,
+        },
+      }),
+    );
+
+    assertReadableFailure(result, "deploy", `deploy: EXPECTED_POOL is declared as ${pool}`);
+    assertOutputLacks(result, `Wrote deployment: ${deploymentFile}`);
+    // The record the declaration was about is untouched, which is the point of refusing
+    // before it is written.
+    const record = JSON.parse(readFileSync(deploymentFile, "utf8")) as DeploymentRecord;
+    assert.equal(record.pool, pool);
+  });
+
   // -------------------------------------------------------------------------
   // 2. commit-predeposit
   // -------------------------------------------------------------------------

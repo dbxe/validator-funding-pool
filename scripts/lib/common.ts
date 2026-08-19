@@ -992,12 +992,42 @@ export function readDeployment(): DeploymentRecord {
 /// record is first verified against the chain, and again in the final on-chain re-read
 /// immediately before a funding transaction is signed. On the Ledger path those two are
 /// minutes apart.
-export function assertExpectedPool(poolAddress: Address, where: string) {
+function declaredExpectedPool(): Address | undefined {
   const expectedPool = process.env.EXPECTED_POOL ?? "";
-  if (expectedPool === "") return;
+  if (expectedPool === "") return undefined;
   if (!isAddress(expectedPool, { strict: false })) {
     throw new Error(`EXPECTED_POOL ${expectedPool} is not a 0x-prefixed 20-byte address`);
   }
+  return expectedPool;
+}
+
+/// The same pin, evaluated by the one command that CREATES a pool rather than reading a record.
+///
+/// `deploy` writes the record every other command's `EXPECTED_POOL` is checked against, so a
+/// declaration that is still in the environment when `deploy` runs is evidence the operator
+/// meant to act on the pool they already have. Left unchecked, the run deploys a second pool
+/// and overwrites that record with it — the "stale or swapped deployment record" entry in
+/// `SECURITY.md` §5, caused by the command that is supposed to be its source of truth. The
+/// comparison is made before `writeDeployment`, so the existing record survives the refusal.
+export function assertFreshDeploymentMatchesExpectedPool(poolAddress: Address) {
+  const expectedPool = declaredExpectedPool();
+  if (expectedPool === undefined) return;
+  if (poolAddress.toLowerCase() === expectedPool.toLowerCase()) return;
+  throw new Error(
+    `deploy: EXPECTED_POOL is declared as ${expectedPool}, but this run has just deployed a NEW ` +
+      `pool at ${poolAddress}. A declaration names a pool that already exists, so a fresh ` +
+      `deployment cannot satisfy it: either this is a redeploy nobody meant — which would have ` +
+      `overwritten the record at ${deploymentPath()} and stranded the existing pool's 1 ETH ` +
+      `predeposit — or EXPECTED_POOL was left over from a command against the pool you already ` +
+      `have. The record has NOT been written; the pool at ${poolAddress} is deployed and ` +
+      `unrecorded. Unset EXPECTED_POOL and re-run deploy to record it, or run the command you ` +
+      `actually meant against the existing pool`,
+  );
+}
+
+export function assertExpectedPool(poolAddress: Address, where: string) {
+  const expectedPool = declaredExpectedPool();
+  if (expectedPool === undefined) return;
   if (poolAddress.toLowerCase() !== expectedPool.toLowerCase()) {
     throw new Error(
       `${where}: the deployment record ${deploymentPath()} names pool ${poolAddress}, not the ` +
@@ -3249,8 +3279,9 @@ interface LatestBlockReader {
 /// and the signature leaves state, deadline, and remaining allocation all looking perfectly
 /// fundable while describing a completely different agreement. On the Ledger path that gap
 /// is however long the operator takes at the device. The counter is the one value that
-/// cannot be reused, so it is what the reviewed state is pinned to; every `EXPECTED_*` pin
-/// the operator set is re-evaluated here as well, against values read now.
+/// cannot be reused, so it is what the reviewed state is pinned to; every `EXPECTED_*` funding
+/// pin the operator set is re-evaluated here as well, along with `EXPECTED_POOL`, against
+/// values read now.
 export async function assertStillFundable(
   pool: FundingStateReader,
   publicClient: LatestBlockReader,
