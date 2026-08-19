@@ -990,6 +990,54 @@ describe("assertSweepWasCredited", function () {
     }
   });
 
+  it("is fatal on the Swept amount alone, even when an unlogged inflow makes the delta look whole", function () {
+    // The one-sidedness of the balance delta, made concrete. The forwarder held AMOUNT and
+    // forwarded a tenth of it; a consensus withdrawal to the pool's own credentials landed in
+    // the same block and paid in the rest. Withdrawals are credited by the protocol and emit
+    // no log anywhere, so `readPoolOutflowsInBlock` cannot see it and the delta reconciles
+    // perfectly — the pool really is AMOUNT richer. Only the forwarder's own Swept event says
+    // what the forwarder actually sent.
+    const forwarded = AMOUNT / 10n;
+    const withdrawal = AMOUNT - forwarded;
+    assert.throws(
+      () =>
+        assertSweepWasCredited(
+          { logs: [swept(SIGNER, forwarded)] },
+          FORWARDER,
+          POOL,
+          SIGNER,
+          balances(AMOUNT, 7n, 7n + forwarded + withdrawal),
+          "sweep",
+        ),
+      (error: Error) => {
+        assert.match(
+          error.message,
+          /^FATAL: sweep transaction succeeded but the forwarder at 0x4444444444444444444444444444444444444444 forwarded only 25000000000000000 wei/,
+        );
+        assert.match(error.message, /of the 250000000000000000 wei .* it was holding/);
+        assert.match(error.message, /225000000000000000 wei .* was not forwarded at all/);
+        // It says why the pool's balance was not consulted.
+        assert.match(error.message, /consensus withdrawal to the pool's credentials/);
+        assert.match(error.message, /npm run status/);
+        return true;
+      },
+    );
+
+    // And the delta check on its own would have passed this: same balances, honest Swept.
+    assert.doesNotThrow(() =>
+      silently(() =>
+        assertSweepWasCredited(
+          { logs: [swept(SIGNER, AMOUNT)] },
+          FORWARDER,
+          POOL,
+          SIGNER,
+          balances(AMOUNT, 7n, 7n + forwarded + withdrawal),
+          "sweep",
+        ),
+      ),
+    );
+  });
+
   it("is fatal when the pool is not richer by what the forwarder was holding", function () {
     for (const poolAfter of [0n, AMOUNT - 1n]) {
       assert.throws(

@@ -3217,6 +3217,17 @@ function totalOutflow(outflows: readonly PoolOutflow[]): bigint {
 /// received. Comparing the second against the forwarder's pre-sweep balance is what catches a
 /// forwarder whose `sweep()` sends somewhere else, or sends part.
 ///
+/// They are checked in that order, and the first one decides on its own. `Swept` carries the
+/// whole balance the forwarder is about to forward, and nothing but `sweep()` moves ETH out of
+/// the forwarder, so a `Swept` amount BELOW the balance this command read is a forwarder that
+/// kept part of what it was holding — a statement about what the forwarder did, made by the
+/// forwarder's own log in the mined transaction, with no dependence on the pool's balance at
+/// all. That matters because the balance delta is one-sided evidence: it can only be inflated
+/// by an inflow, and a consensus withdrawal paying the pool's credentials in the sweep's own
+/// block emits nothing anywhere, so a partial sweep plus such an inflow can produce a delta
+/// that clears the reconciliation. Checking the Swept amount first is why that arrangement
+/// does not decide the outcome.
+///
 /// The balance delta is not the sweep's alone, though, and treating it as if it were made this
 /// check accuse an honest sweep. A `claim()` or a `refund()` mined in the same block is
 /// ordinary — both are permissionless and callable at any time — and every wei they pay out
@@ -3252,6 +3263,29 @@ export function assertSweepWasCredited(
   }
 
   const sweptAmount = swept[0];
+
+  // The primary statement of what the forwarder sent, and fatal on its own. `sweep()` emits
+  // `Swept` with its whole balance immediately before the transfer, and the forwarder has no
+  // other path that moves ETH out, so its balance cannot have fallen between the read and the
+  // sweep: a smaller amount forwarded means part of it was kept or sent elsewhere. No
+  // reconciliation applies — nothing that happens to the POOL's balance can make a forwarder
+  // that forwarded less have forwarded more.
+  if (sweptAmount < balances.forwarderBefore) {
+    throw new Error(
+      `FATAL: ${label} transaction succeeded but the forwarder at ${forwarderAddress} forwarded ` +
+        `only ${formatWei(sweptAmount)} of the ${formatWei(balances.forwarderBefore)} it was ` +
+        `holding when this command read it, according to its own Swept event in this ` +
+        `transaction's receipt. sweep() emits Swept with the entire balance it is about to ` +
+        `transfer, and nothing else moves ETH out of the forwarder, so the difference of ` +
+        `${formatWei(balances.forwarderBefore - sweptAmount)} was not forwarded at all. That is ` +
+        `a finding about the forwarder's code, which is what the runtime-code check exists to ` +
+        `catch. The pool's balance is not consulted for this: an inflow from any source — a ` +
+        `consensus withdrawal to the pool's credentials above all, which emits no log anywhere ` +
+        `— can hide a partial sweep inside a healthy-looking balance delta. Run ` +
+        `"npm run status" and reconcile both balances before re-running ${label}`,
+    );
+  }
+
   const outflow = totalOutflow(balances.sameBlockOutflows);
   // What the pool's balance would have risen by if the sweep had been the only thing in its
   // block. Everything added back is an outflow the pool itself logged.
