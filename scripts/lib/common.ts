@@ -1549,7 +1549,17 @@ export async function assertDeploymentCanonicity(
 /// command. `"authenticate-forwarder"` runs the full authenticity check — code, binding, and
 /// runtime code against the local build; `"forwarder-untouched"` says this command reads and
 /// writes the pool and never the forwarder, so the forwarder's condition is not its business.
-export type ForwarderScope = "authenticate-forwarder" | "forwarder-untouched";
+///
+/// `"report-forwarder"` is `status` alone, and it says something the other two cannot: NOTHING
+/// about the forwarder is evaluated inside this gate, not even the `EXPECTED_FORWARDER` pin,
+/// because the caller evaluates all of it itself inside a boundary that warns instead of
+/// refusing. The pin is not skipped — `reportForwarderWithoutRefusing` runs it — it is moved,
+/// so that a set-but-mismatched declaration costs `status` a loud warning rather than the pool
+/// state the operator ran it for. See that function.
+export type ForwarderScope =
+  | "authenticate-forwarder"
+  | "forwarder-untouched"
+  | "report-forwarder";
 
 /// Everything the deployment record claims, checked against the chain before a command acts.
 ///
@@ -1565,13 +1575,15 @@ export type ForwarderScope = "authenticate-forwarder" | "forwarder-untouched";
 ///
 /// `status` is neither: it authenticates the forwarder, and does it OUTSIDE this gate, after
 /// every line of pool state has been printed, reporting a failure as a warning. See
-/// `reportForwarder` in `scripts/status.ts`. The scope here is about what may REFUSE a
-/// command, and `status` signs nothing, so it has nothing to protect by refusing and a great
-/// deal to lose: every FATAL in this repository ends by telling the operator to run it.
+/// `reportForwarderWithoutRefusing`. The scope here is about what may REFUSE a command, and
+/// `status` signs nothing, so it has nothing to protect by refusing and a great deal to lose:
+/// every FATAL in this repository ends by telling the operator to run it.
 ///
-/// The `EXPECTED_FORWARDER` pin is NOT scoped: it runs wherever a record is read. It is a
-/// string comparison against the record, it depends on no artifact and no RPC read, and a pin
-/// the operator set must never be silently unevaluated.
+/// The `EXPECTED_FORWARDER` pin is not scoped away anywhere: it is evaluated on every command,
+/// including `status`. It is a string comparison against the record, it depends on no artifact
+/// and no RPC read, and a pin the operator set must never be silently unevaluated. What
+/// `"report-forwarder"` changes is only WHERE it runs and what a mismatch costs — inside the
+/// caller's warning boundary, as a loud warning, for the one command that signs nothing.
 export async function assertDeploymentIntegrity(
   publicClient: DeploymentPublicClient,
   pool: PoolDeploymentReader,
@@ -1592,7 +1604,11 @@ export async function assertDeploymentIntegrity(
   );
   const liveCodeHashes = await assertDeploymentSystemCodeHashes(publicClient, deployment, liveConfig);
   await assertDeploymentCanonicity(chainId, liveConfig, liveCodeHashes);
-  assertExpectedForwarderRecorded(deployment);
+  // `"report-forwarder"` is the one scope that does not evaluate the pin here, because the
+  // caller evaluates it a few lines later inside a boundary that warns instead of refusing.
+  // Running it in both places would defeat that: a fatal here is a fatal, whatever the caller
+  // intended to do with it.
+  if (forwarderScope !== "report-forwarder") assertExpectedForwarderRecorded(deployment);
   const forwarder = deployment.feeRecipientForwarder;
   if (forwarderScope === "authenticate-forwarder" && forwarder !== undefined) {
     await assertForwarderAuthenticity(publicClient, forwarder, deployment.pool);
@@ -1645,6 +1661,69 @@ export async function assertForwarderAuthenticity(
     readLocalBuildArtifacts(VERIFIED_FORWARDER),
     VERIFIED_FORWARDER,
   );
+}
+
+/// The public actions the forwarder report needs: everything the authenticity check needs,
+/// plus the balance read that only `status` makes.
+export type ForwarderReportClient = DeploymentPublicClient & {
+  getBalance: (args: { address: Address }) => Promise<bigint>;
+};
+
+/// Everything `status` says about the fee-recipient forwarder, with every way it can fail
+/// converted into a warning.
+///
+/// This lives here rather than in `scripts/status.ts` for the reason stated at the funding
+/// helpers below: a script file runs `main()` on import, so a helper inside one cannot be
+/// tested. What it is, though, is `status`'s alone — no other command may call it, because no
+/// other command is entitled to continue past a forwarder finding.
+///
+/// The boundary is drawn around EVERY forwarder-dependent step, and that placement is the
+/// whole point:
+///
+///   - the `EXPECTED_FORWARDER` pin, including the record-names-none case. It is evaluated,
+///     never skipped: a pin the operator set that goes unevaluated is a check reported as
+///     passed. But it is evaluated HERE, so a mismatch is a loud warning rather than the fatal
+///     it is everywhere else. `status` signs nothing, and a declaration typo must not be able
+///     to withhold the pool state above.
+///   - the balance read, which is an RPC round trip against an address chosen by the record
+///     and can fail on its own.
+///   - the three authenticity layers, which additionally depend on a local build artifact.
+///
+/// A failure in any of them prints the finding in full, beside the forwarder lines, and leaves
+/// the exit code at zero. In `sweep` and `deploy-forwarder` the same findings are refusals,
+/// because both are about to transact with the forwarder; `status` transacts with nothing.
+export async function reportForwarderWithoutRefusing(
+  publicClient: ForwarderReportClient,
+  deployment: DeploymentRecord,
+): Promise<void> {
+  const forwarder = deployment.feeRecipientForwarder;
+  // Straight off the record, so it cannot fail and belongs above the boundary: whatever is
+  // wrong below, the operator sees which address the record names.
+  console.log(`Fee recipient forwarder: ${forwarder ?? "not configured"}`);
+  try {
+    assertExpectedForwarderRecorded(deployment);
+    if (forwarder === undefined) return;
+    // `getBalance` answers for an address with no code as readily as for one with code, so the
+    // balance is printed before the authenticity check rather than after it.
+    console.log(
+      `Forwarder pending balance: ${formatWei(await publicClient.getBalance({ address: forwarder }))}`,
+    );
+    await assertForwarderAuthenticity(publicClient, forwarder, deployment.pool);
+  } catch (error) {
+    console.warn(
+      `\nWARNING: the fee-recipient forwarder${forwarder === undefined ? "" : ` at ${forwarder}`}` +
+        ` did NOT check out.\n` +
+        describeFatalError(error)
+          .map((line) => `  ${line}\n`)
+          .join("") +
+        `  This is a warning and not a refusal because status signs nothing: every FATAL in ` +
+        `this repository ends by telling you to run it and reconcile, so a broken sidecar must ` +
+        `not be able to withhold the pool state above.\n` +
+        `  "npm run sweep" and "npm run deploy-forwarder" DO refuse on this, and they are the ` +
+        `two commands that transact with the forwarder. Do not point a validator client's ` +
+        `fee_recipient at this address until it authenticates.\n`,
+    );
+  }
 }
 
 /// The declared forwarder pin, parsed: absent when unset or empty, fatal when it is not an

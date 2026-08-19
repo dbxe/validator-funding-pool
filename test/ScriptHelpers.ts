@@ -35,12 +35,15 @@ import {
   parseBigIntList,
   printPayoutRecipient,
   printSuggestedFees,
+  reportForwarderWithoutRefusing,
   requireFundingAllocation,
   resolveSuggestedFees,
   requireFundingWindowSeconds,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
   warnOnPlaintextEndpoints,
+  type DeploymentRecord,
+  type ForwarderReportClient,
   type PoolOutflow,
 } from "../scripts/lib/common.js";
 
@@ -1912,6 +1915,143 @@ describe("assertExpectedForwarderRecorded", function () {
         () => assertExpectedForwarderRecorded({}),
         /EXPECTED_FORWARDER 0x1234 is not a 0x-prefixed 20-byte address/,
       );
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+});
+
+describe("reportForwarderWithoutRefusing", function () {
+  const FORWARDER = "0x4444444444444444444444444444444444444444" as Address;
+
+  /// A record with only the fields this helper reads. The rest of `DeploymentRecord` is the
+  /// integrity gate's business, and that gate has already run by the time this is called.
+  function record(feeRecipientForwarder?: Address) {
+    return { pool: POOL, feeRecipientForwarder } as DeploymentRecord;
+  }
+
+  /// A client whose forwarder-facing reads all fail. `status` never reaches the authenticity
+  /// layers in these tests — the balance read is the first of them and the point is that it,
+  /// too, is inside the boundary.
+  function clientWhoseBalanceReadFails(message: string): ForwarderReportClient {
+    return {
+      getBalance: async () => {
+        throw new Error(message);
+      },
+      getChainId: async () => 1,
+      getCode: async () => undefined,
+      readContract: async () => {
+        throw new Error("readContract must not be reached once the balance read has failed");
+      },
+    } as unknown as ForwarderReportClient;
+  }
+
+  async function run(
+    client: ForwarderReportClient,
+    deployment: DeploymentRecord,
+  ): Promise<{ log: string[]; warn: string[] }> {
+    const log = captureLog();
+    const warn = captureWarn();
+    try {
+      await assert.doesNotReject(() => reportForwarderWithoutRefusing(client, deployment));
+      return { log: log.lines, warn: warn.lines };
+    } finally {
+      log.restore();
+      warn.restore();
+    }
+  }
+
+  it("evaluates a mismatched EXPECTED_FORWARDER loudly, and does not throw", async function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = OTHER_SIGNER;
+      const printed = await run(clientWhoseBalanceReadFails("unreachable"), record(FORWARDER));
+
+      // The pin IS evaluated — a set pin that goes unevaluated is a check reported as passed —
+      // and the finding is the same one every other command is fatal on.
+      assert.deepEqual(printed.log, [`Fee recipient forwarder: ${FORWARDER}`]);
+      assert.equal(printed.warn.length, 1);
+      assert.match(printed.warn[0], new RegExp(`the fee-recipient forwarder at ${FORWARDER} did NOT check out`));
+      assert.match(printed.warn[0], /not the declared EXPECTED_FORWARDER/);
+      assert.match(printed.warn[0], /status signs nothing/);
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("evaluates the pin against a record naming no forwarder, and still does not throw", async function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      process.env.EXPECTED_FORWARDER = FORWARDER;
+      const printed = await run(clientWhoseBalanceReadFails("unreachable"), record(undefined));
+
+      assert.deepEqual(printed.log, ["Fee recipient forwarder: not configured"]);
+      assert.equal(printed.warn.length, 1);
+      assert.match(printed.warn[0], /the fee-recipient forwarder did NOT check out/);
+      assert.match(printed.warn[0], /names no fee-recipient forwarder at all/);
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("is silent on a record with no forwarder and no declaration", async function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      delete process.env.EXPECTED_FORWARDER;
+      const printed = await run(clientWhoseBalanceReadFails("unreachable"), record(undefined));
+
+      assert.deepEqual(printed.log, ["Fee recipient forwarder: not configured"]);
+      assert.deepEqual(printed.warn, []);
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("keeps the balance read inside the boundary: an unanswerable read costs a warning", async function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      delete process.env.EXPECTED_FORWARDER;
+      const printed = await run(
+        clientWhoseBalanceReadFails("eth_getBalance: connection refused"),
+        record(FORWARDER),
+      );
+
+      // The address line is above the boundary and survives; the balance line is inside it and
+      // is replaced by the finding. Nothing throws, so `status` goes on to exit 0.
+      assert.deepEqual(printed.log, [`Fee recipient forwarder: ${FORWARDER}`]);
+      assert.equal(printed.warn.length, 1);
+      assert.match(printed.warn[0], /eth_getBalance: connection refused/);
+      assert.match(printed.warn[0], new RegExp(`the fee-recipient forwarder at ${FORWARDER} did NOT check out`));
+    } finally {
+      restoreEnv("EXPECTED_FORWARDER", original);
+    }
+  });
+
+  it("prints the balance before the authenticity check, which a codeless address fails", async function () {
+    const original = process.env.EXPECTED_FORWARDER;
+
+    try {
+      delete process.env.EXPECTED_FORWARDER;
+      const printed = await run(
+        {
+          getBalance: async () => 1_500_000_000_000_000_000n,
+          getChainId: async () => 1,
+          getCode: async () => undefined,
+          readContract: async () => POOL,
+        } as unknown as ForwarderReportClient,
+        record(FORWARDER),
+      );
+
+      assert.deepEqual(printed.log, [
+        `Fee recipient forwarder: ${FORWARDER}`,
+        `Forwarder pending balance: ${formatWei(1_500_000_000_000_000_000n)}`,
+      ]);
+      assert.equal(printed.warn.length, 1);
+      assert.match(printed.warn[0], new RegExp(`feeRecipientForwarder has no code at ${FORWARDER}`));
     } finally {
       restoreEnv("EXPECTED_FORWARDER", original);
     }

@@ -1379,7 +1379,14 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       await runCommand({
         script: "status",
         network: "read",
-        env: { RPC_URL: chain.url, DEPLOYMENT_FILE: brokenFile, PRIVATE_KEY: undefined },
+        env: {
+          RPC_URL: chain.url,
+          DEPLOYMENT_FILE: brokenFile,
+          PRIVATE_KEY: undefined,
+          // The last lines of pool state, so this run also proves the forwarder block is
+          // genuinely last rather than merely after the participant table.
+          REFUND_PARTICIPANTS: participant.address,
+        },
       }),
     );
     assertOutputContains(reading, `Pool: ${pool}`);
@@ -1388,13 +1395,19 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(reading, `Fee recipient forwarder: ${outsider.address}`);
     assertOutputContains(
       reading,
-      `WARNING: the fee-recipient forwarder at ${outsider.address} did NOT authenticate.`,
+      `WARNING: the fee-recipient forwarder at ${outsider.address} did NOT check out.`,
     );
     assertOutputContains(reading, `feeRecipientForwarder has no code at ${outsider.address}`);
     assertOutputContains(reading, "status signs nothing");
     // The pool state comes first, which is the point: the finding must not cost the operator
-    // the reconciliation they ran the command for.
-    assertOutputOrder(reading, "State: ToppedUp (3)", "did NOT authenticate.");
+    // the reconciliation they ran the command for. The refund-holder lines are part of that
+    // state, so the forwarder block is last of all — after them too.
+    assertOutputOrder(reading, "State: ToppedUp (3)", "did NOT check out.");
+    assertOutputOrder(
+      reading,
+      `Refund holder ${participant.address}:`,
+      `Fee recipient forwarder: ${outsider.address}`,
+    );
     assertOutputLacks(reading, "FATAL: status did not complete.");
 
     // The control, against the record that names the real forwarder: the same three
@@ -1412,7 +1425,42 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       "FeeRecipientForwarder runtime code matches the local build artifacts/contracts/" +
         "FeeRecipientForwarder.sol/FeeRecipientForwarder.json",
     );
-    assertOutputLacks(healthy, "did NOT authenticate.");
+    assertOutputLacks(healthy, "did NOT check out.");
+
+    // And the third way the forwarder block can fail: a set-but-mismatched EXPECTED_FORWARDER,
+    // against the record that names the real, healthy forwarder. Everywhere else this is
+    // fatal at the head of the integrity gate, before a line of state is printed. In `status`
+    // the pin is evaluated inside the same warning boundary — checked, never skipped, loud on
+    // a mismatch, and not able to cost the operator the reconciliation.
+    const pinned = expectSuccess(
+      await runCommand({
+        script: "status",
+        network: "read",
+        env: {
+          RPC_URL: chain.url,
+          DEPLOYMENT_FILE: deploymentFile,
+          PRIVATE_KEY: undefined,
+          EXPECTED_FORWARDER: outsider.address,
+        },
+      }),
+    );
+    assertOutputContains(pinned, `Pool: ${pool}`);
+    assertOutputContains(pinned, "State: ToppedUp (3)");
+    assertOutputContains(pinned, `Validator pubkey: ${deposits.pubkey}`);
+    assertOutputContains(pinned, `Fee recipient forwarder: ${forwarder}`);
+    assertOutputContains(
+      pinned,
+      `WARNING: the fee-recipient forwarder at ${forwarder} did NOT check out.`,
+    );
+    assertOutputContains(
+      pinned,
+      `names fee-recipient forwarder ${forwarder}, not the declared EXPECTED_FORWARDER ` +
+        outsider.address,
+    );
+    assertOutputOrder(pinned, "State: ToppedUp (3)", "did NOT check out.");
+    assertOutputLacks(pinned, "FATAL: status did not complete.");
+    // An earlier case in this file drives `sweep` with the same declaration and asserts it is
+    // fatal. The two together are what make this a relocation of the pin, not an exemption.
 
     // And the escape hatch itself, which spends a real EIP-7002 fee against the real predeploy.
     const exiting = await beacon.withScenario(
