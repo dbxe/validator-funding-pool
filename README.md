@@ -196,11 +196,14 @@ The reachable sequence is therefore: the participant has two funding transaction
 
 One other path reaches the same window without a double-send, and it is far narrower. If a single transfer stays unmined past the funding deadline, someone closes the expired attempt, the operator opens a fresh attempt that the sender is not part of or is fully funded without them, and that attempt tops up — then the stale transfer lands in `ToppedUp`. The final re-read requires the deadline to still be in the future, so this needs a transaction to sit pending for the rest of the funding window plus an entire second attempt. Underpriced funding transactions are the way to get there, so price them to confirm.
 
+There is a third way in, and it needs neither a double-send nor a stuck transaction. Every state check `fund.ts` makes — including the final re-read — reads the endpoint in `RPC_URL`. An RPC that is stale, forked, or dishonest and reports `Funding` for a pool that is already `ToppedUp` lets a single, first-and-only transfer straight through into the proceeds window. Nothing local catches it: the script cannot detect a lie using the same endpoint that is telling it, and unlike `fund()` there is no revert underneath. **The plain-transfer path trusts the EL RPC's freshness.** That is the real cost of the clear-signed device screen, alongside the timing race above. Point `RPC_URL` at an endpoint you control or trust; where you cannot, `FUND_VIA_TRANSFER=0` puts the contract's revert back underneath you.
+
 Operationally:
 
 - Never run a funding command twice. Check `npm run status` first.
 - If a funding transaction is stuck, replace it at the same nonce. Never send a second transaction at a new nonce.
 - The final re-read narrows the window; it cannot close it. No off-chain check can.
+- The final re-read is only as fresh as `RPC_URL`. Use an endpoint you control or trust.
 - If certainty matters more than clear signing, use the calldata path with `FUND_VIA_TRANSFER=0`. A late `fund()` reverts and the ETH stays with the sender. That is the trade: the transfer path buys a readable device screen at the cost of the revert acting as a safety net in this one window.
 
 ## Event Reconciliation
