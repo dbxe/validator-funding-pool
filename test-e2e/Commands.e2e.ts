@@ -689,6 +689,35 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
   // 10. top-up
   // -------------------------------------------------------------------------
 
+  it("top-up refuses a deposit-data file that is not about the committed validator", async () => {
+    // `committedPubkey()` comes from the EL RPC, and the beacon preflight decides on
+    // whatever pubkey it is handed. Without a local value to compare it against, a wrong or
+    // dishonest endpoint chooses which validator gets checked. The deposit-data file is that
+    // local value.
+    const otherValidatorFile = path.join(workdir, "deposit-data-other-validator.json");
+    const otherValidator = buildDepositData(11, withdrawalCredentials, GENESIS_FORK_VERSION as Hex);
+    writeDepositDataFile(otherValidatorFile, otherValidator);
+
+    const result = expectFailure(
+      await runCommand({
+        script: "top-up",
+        env: asOperator({ DEPOSIT_DATA_FILE: otherValidatorFile }),
+      }),
+    );
+
+    assertReadableFailure(
+      result,
+      "top-up",
+      `top-up: the pool reports committedPubkey ${deposits.pubkey}, but the local deposit-data ` +
+        `file's 1 ETH predeposit entry is for ${otherValidator.pubkey}`,
+    );
+    // It fails before the preflight, so the other validator is never the subject of a single
+    // beacon read, and no transaction is sent.
+    assertOutputLacks(result, "top-up beacon");
+    assertOutputLacks(result, "Topped up in block");
+    assert.equal(await readPool<boolean>("topUpSubmitted"), false);
+  });
+
   it("top-up submits the 31 ETH deposit", async () => {
     const result = expectSuccess(await runCommand({ script: "top-up", env: asOperator() }));
 

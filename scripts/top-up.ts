@@ -5,14 +5,17 @@ import {
   assertBeaconMatchesExecutionChain,
   assertBeaconValidatorReadyForTopUp,
   assertBeaconValidatorStillFresh,
+  assertCommittedPubkeyMatchesLocal,
   assertDeploymentIntegrity,
   readDeployment,
+  readPredepositAndTopUpDepositData,
   reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
 async function main() {
   const deployment = readDeployment();
+  const deposits = readPredepositAndTopUpDepositData();
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
@@ -29,7 +32,10 @@ async function main() {
   }
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
-  const pubkey = await pool.read.committedPubkey();
+  // The pubkey the preflight runs against is the local file's, not the RPC's answer. The
+  // two must agree first; see `assertCommittedPubkeyMatchesLocal`.
+  const committedPubkey = await pool.read.committedPubkey();
+  const pubkey = assertCommittedPubkeyMatchesLocal(committedPubkey, deposits.predeposit, "top-up");
   const headBalanceGwei = await assertBeaconValidatorReadyForTopUp(
     pubkey,
     expectedCredentials,

@@ -5,6 +5,7 @@ import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "
 
 import {
   assertActiveSigner,
+  assertCommittedPubkeyMatchesLocal,
   assertDeployedAt,
   assertExpectedPool,
   assertFundingWasCredited,
@@ -897,6 +898,59 @@ describe("assertStillFundable", function () {
         assertStillFundable(poolAt(FUNDING, 10n), blockAt(1_000n), SIGNER, 10n, REVIEWED_ATTEMPT),
       ),
     );
+  });
+});
+
+describe("assertCommittedPubkeyMatchesLocal", function () {
+  const PUBKEY = `0x${"aa".repeat(48)}` as Hex;
+  const OTHER_PUBKEY = `0x${"bb".repeat(48)}` as Hex;
+
+  function predepositEntry(pubkey: string) {
+    return {
+      pubkey,
+      withdrawal_credentials: `0x${"00".repeat(32)}`,
+      amount: "1000000000",
+      signature: `0x${"cc".repeat(96)}`,
+      deposit_data_root: `0x${"dd".repeat(32)}`,
+    };
+  }
+
+  it("returns the local pubkey when the chain's commitment matches it", function () {
+    assert.equal(
+      assertCommittedPubkeyMatchesLocal(PUBKEY, predepositEntry(PUBKEY), "top-up"),
+      PUBKEY,
+    );
+    // Neither side has a guaranteed case on the wire, and the file may omit the 0x.
+    assert.equal(
+      assertCommittedPubkeyMatchesLocal(
+        PUBKEY.toUpperCase().replace("0X", "0x") as Hex,
+        predepositEntry(PUBKEY.slice(2)),
+        "top-up",
+      ),
+      PUBKEY,
+    );
+  });
+
+  it("is fatal when the endpoint's committed pubkey is not the local file's, naming both", function () {
+    assert.throws(
+      () => assertCommittedPubkeyMatchesLocal(OTHER_PUBKEY, predepositEntry(PUBKEY), "top-up"),
+      (error: Error) => {
+        assert.match(error.message, new RegExp(`^top-up: the pool reports committedPubkey ${OTHER_PUBKEY}`));
+        assert.match(error.message, new RegExp(`1 ETH predeposit entry is for ${PUBKEY}`));
+        assert.match(error.message, /Nothing has been sent/);
+        assert.match(error.message, /DEPOSIT_DATA_FILE and DEPLOYMENT_FILE/);
+        return true;
+      },
+    );
+  });
+
+  it("is fatal for a local entry that is not a 48-byte pubkey at all", function () {
+    for (const pubkey of ["", "0xnothex", `0x${"aa".repeat(47)}`]) {
+      assert.throws(
+        () => assertCommittedPubkeyMatchesLocal(PUBKEY, predepositEntry(pubkey), "top-up"),
+        /deposit-data predeposit pubkey (is not hex|must be 48 bytes)/,
+      );
+    }
   });
 });
 

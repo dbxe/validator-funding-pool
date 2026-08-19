@@ -2129,6 +2129,42 @@ export function readPredepositAndTopUpDepositData(
   return { predeposit, topUp };
 }
 
+/// Requires the pool's committed pubkey to equal the local deposit-data file's predeposit
+/// pubkey, and returns the LOCAL value for the caller's preflight to run against.
+///
+/// `top-up` reads `committedPubkey()` from the EL RPC and used to hand that value straight
+/// to the beacon preflight with nothing local to check it against. That let the untrusted
+/// endpoint choose the preflight's SUBJECT: an RPC answering with some other validator's
+/// pubkey gets that validator checked for credentials, slashing, epochs and balance, every
+/// assertion passes, and the 31 ETH goes to a validator none of it was about. `fund` never
+/// had the gap — it validates the deposit-data file and requires the on-chain commitment to
+/// match it before any participant capital moves — and this is that same comparison at the
+/// one remaining command that sends capital without it.
+///
+/// Which side is returned does not change what is asserted: they are equal by the time this
+/// returns. Returning the local one is what makes the preflight's subject a file on the
+/// operator's disk rather than a value the endpoint chose.
+export function assertCommittedPubkeyMatchesLocal(
+  committedPubkey: Hex,
+  localPredeposit: DepositData,
+  label: string,
+): Hex {
+  const localPubkey = normalizeHexLength(
+    localPredeposit.pubkey,
+    48,
+    "deposit-data predeposit pubkey",
+  );
+  if (committedPubkey.toLowerCase() !== localPubkey.toLowerCase()) {
+    throw new Error(
+      `${label}: the pool reports committedPubkey ${committedPubkey}, but the local deposit-data ` +
+        `file's 1 ETH predeposit entry is for ${localPubkey}. Nothing has been sent. One of the ` +
+        `two does not describe this validator: check that DEPOSIT_DATA_FILE and DEPLOYMENT_FILE ` +
+        `name the pair that belong together, and re-run`,
+    );
+  }
+  return localPubkey;
+}
+
 export function validateDepositData(
   deposit: DepositData,
   expectedWithdrawalCredentials: Hex,
