@@ -503,6 +503,51 @@ describe("ValidatorFundingPool", async function () {
     assert.equal(record[4], TOP_UP);
   });
 
+  it("matches fund() accounting on plain transfers and only diverges once topped up", async function () {
+    const { pool, alice, alicePool, outsider } = await networkHelpers.loadFixture(fundingFixture);
+
+    const transferReceipt = await waitForReceipt(
+      await alice.sendTransaction({ to: pool.address, value: ALICE_TARGET - 1n }),
+    );
+    const funded = parsePoolEvents(pool, transferReceipt).find((event) => event.eventName === "ParticipantFunded");
+    assert.ok(funded, "ParticipantFunded event missing");
+    assert.equal((funded.args.participant as string).toLowerCase(), alice.account.address.toLowerCase());
+    assert.equal(bigintArg(funded.args, "amount"), ALICE_TARGET - 1n);
+    assert.equal(await pool.read.activeFundedWeiOf([alice.account.address]), ALICE_TARGET - 1n);
+
+    await viem.assertions.revertWithCustomError(alicePool.write.fund({ value: 2n }), pool, "FundingCapExceeded");
+    await viem.assertions.revertWithCustomError(
+      alice.sendTransaction({ to: pool.address, value: 2n }),
+      pool,
+      "FundingCapExceeded",
+    );
+    await viem.assertions.revertWithCustomError(
+      outsider.sendTransaction({ to: pool.address, value: 1n }),
+      pool,
+      "NotParticipant",
+    );
+
+    const { pool: topped, alice: toppedAlice, alicePool: toppedAlicePool } =
+      await networkHelpers.loadFixture(toppedUpFixture);
+
+    // The only divergence: fund() refuses the late send, while the plain transfer
+    // keeps it as pool proceeds shared pro rata by credited weight.
+    await viem.assertions.revertWithCustomError(toppedAlicePool.write.fund({ value: PREDEPOSIT }), topped, "InvalidState");
+
+    const lateReceipt = await waitForReceipt(
+      await toppedAlice.sendTransaction({ to: topped.address, value: PREDEPOSIT }),
+    );
+    assert.deepEqual(
+      parsePoolEvents(topped, lateReceipt).map((event) => event.eventName),
+      ["EthReceivedViaCall"],
+    );
+    assert.equal(await topped.read.grossPoolProceeds(), PREDEPOSIT);
+    assert.equal(
+      await topped.read.claimable([toppedAlice.account.address]),
+      (PREDEPOSIT * ALICE_TARGET) / VALIDATOR_DEPOSIT,
+    );
+  });
+
   it("closes expired attempts into passive refunds and opens a fresh attempt without rollover", async function () {
     const { pool, operatorPool, alicePool, bobPool, charliePool, operator, alice, bob, charlie, outsider, deadline } =
       await networkHelpers.loadFixture(fundingFixture);
