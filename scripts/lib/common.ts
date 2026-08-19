@@ -2928,6 +2928,121 @@ export interface SweepBalances {
   /// The pool's balance in the block before the sweep, and in the sweep's own block.
   poolBefore: bigint;
   poolAfter: bigint;
+  /// Every ETH outflow the pool's own logs record for the sweep's block, which the balance
+  /// delta has already netted out. See `readPoolOutflowsInBlock`.
+  sameBlockOutflows: readonly PoolOutflow[];
+}
+
+/// One ETH outflow from the pool, as the pool's own logs record it.
+export interface PoolOutflow {
+  event: string;
+  amount: bigint;
+}
+
+/// The pool events that record ETH LEAVING the pool, with the amount that left.
+///
+/// The list is exactly the pool's net outflows, and the two obvious candidates that are not
+/// here are absent on purpose. `commitAndPredeposit` is payable and forwards the same
+/// `PREDEPOSIT_WEI` it was sent, and `requestExit` is payable and forwards the fee and refunds
+/// the remainder of `msg.value` — both are net zero for the pool's balance, so counting them
+/// would overstate the reconciliation. `topUpValidator` is not payable and sends `TOP_UP_WEI`
+/// out of the pool's own balance, so it is a real outflow; its event carries no amount because
+/// the amount is a constant (`ValidatorFundingPool.sol:393`).
+const POOL_OUTFLOW_EVENTS_ABI = [
+  {
+    type: "event",
+    name: "Claimed",
+    inputs: [
+      { name: "participant", type: "address", indexed: true },
+      { name: "recipient", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "Refunded",
+    inputs: [
+      { name: "participant", type: "address", indexed: true },
+      { name: "recipient", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "ValidatorTopUpSubmitted",
+    inputs: [
+      { name: "pubkeyHash", type: "bytes32", indexed: true },
+      { name: "pubkey", type: "bytes", indexed: false },
+      { name: "topUpDepositDataRoot", type: "bytes32", indexed: false },
+    ],
+  },
+] as const;
+
+interface BlockLogReader {
+  getLogs: (args: {
+    address: Address;
+    fromBlock: bigint;
+    toBlock: bigint;
+  }) => Promise<readonly ObservedLog[]>;
+}
+
+/// Every ETH outflow the pool recorded in one block, from the pool's own logs.
+///
+/// The sweep credit check compares the pool's balance across the sweep's own block against
+/// what the forwarder was holding, and anything else in that block that moved ETH OUT of the
+/// pool shrinks that delta. A `claim()` or a `refund()` mined in the same block is ordinary —
+/// both are permissionless, callable by anyone with a balance, at any time — and it made the
+/// check report a FATAL shortfall for a sweep that landed in full. The pool's own logs are the
+/// authority on what left, and they come from the same mined block rather than from a later
+/// read.
+export async function readPoolOutflowsInBlock(
+  publicClient: BlockLogReader,
+  poolAddress: Address,
+  blockNumber: bigint,
+): Promise<PoolOutflow[]> {
+  const logs = await publicClient.getLogs({
+    address: poolAddress,
+    fromBlock: blockNumber,
+    toBlock: blockNumber,
+  });
+  return decodePoolOutflows(logs, poolAddress);
+}
+
+/// Split out so the decoding is testable without a chain, and so an unrecognised log is
+/// visibly skipped rather than silently counted.
+export function decodePoolOutflows(
+  logs: readonly ObservedLog[],
+  poolAddress: Address,
+): PoolOutflow[] {
+  const outflows: PoolOutflow[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== poolAddress.toLowerCase()) continue;
+    let decoded: ReturnType<typeof decodeEventLog<typeof POOL_OUTFLOW_EVENTS_ABI>>;
+    try {
+      decoded = decodeEventLog({
+        abi: POOL_OUTFLOW_EVENTS_ABI,
+        data: log.data,
+        topics: log.topics as [Hex, ...Hex[]],
+      });
+    } catch {
+      // Every other pool event moves no ETH out.
+      continue;
+    }
+    outflows.push(
+      decoded.eventName === "ValidatorTopUpSubmitted"
+        ? { event: decoded.eventName, amount: TOP_UP_GWEI * GWEI_WEI }
+        : { event: decoded.eventName, amount: decoded.args.amount },
+    );
+  }
+  return outflows;
+}
+
+function describeOutflows(outflows: readonly PoolOutflow[]): string {
+  return outflows.map((outflow) => `${outflow.event} ${formatWei(outflow.amount)}`).join(", ");
+}
+
+function totalOutflow(outflows: readonly PoolOutflow[]): bigint {
+  return outflows.reduce((sum, outflow) => sum + outflow.amount, 0n);
 }
 
 /// Requires the mined sweep to prove the ETH REACHED THE POOL, not merely that a transaction
@@ -2945,6 +3060,15 @@ export interface SweepBalances {
 /// forwarder sent. The pool's balance across the sweep's own block says what the pool
 /// received. Comparing the second against the forwarder's pre-sweep balance is what catches a
 /// forwarder whose `sweep()` sends somewhere else, or sends part.
+///
+/// The balance delta is not the sweep's alone, though, and treating it as if it were made this
+/// check accuse an honest sweep. A `claim()` or a `refund()` mined in the same block is
+/// ordinary — both are permissionless and callable at any time — and every wei they pay out
+/// comes off the same delta, so a sweep that landed in full reported a FATAL shortfall of
+/// exactly the amount somebody else withdrew. The pool's own logs for that block say what left
+/// and why (`readPoolOutflowsInBlock`), and that sum is added back before the comparison. A
+/// shortfall that survives the reconciliation is still fatal; a reconciled pass says what was
+/// netted, because "the numbers only agree once you account for X" is the operator's business.
 ///
 /// A delta ABOVE the pre-sweep balance is not a failure: the forwarder is a validator's
 /// `fee_recipient` and a block it proposed may pay into it between the balance read and the
@@ -2972,26 +3096,36 @@ export function assertSweepWasCredited(
   }
 
   const sweptAmount = swept[0];
-  const delta = balances.poolAfter - balances.poolBefore;
-  if (delta < balances.forwarderBefore) {
+  const outflow = totalOutflow(balances.sameBlockOutflows);
+  // What the pool's balance would have risen by if the sweep had been the only thing in its
+  // block. Everything added back is an outflow the pool itself logged.
+  const credited = balances.poolAfter - balances.poolBefore + outflow;
+  const netted =
+    outflow === 0n
+      ? ""
+      : `, after adding back the ${formatWei(outflow)} the pool's own logs record leaving it in ` +
+        `that block (${describeOutflows(balances.sameBlockOutflows)})`;
+
+  if (credited < balances.forwarderBefore) {
     throw new Error(
       `FATAL: ${label} transaction succeeded but the pool at ${poolAddress} is only ` +
-        `${formatWei(delta)} richer across the block that included it, against the ` +
+        `${formatWei(credited)} richer across the block that included it${netted}, against the ` +
         `${formatWei(balances.forwarderBefore)} the forwarder at ${forwarderAddress} held going ` +
         `in (its Swept event says it forwarded ${formatWei(sweptAmount)}). The ETH is already ` +
         `gone from the forwarder: this check DETECTS a sweep that did not land in the pool, it ` +
-        `cannot prevent one. Either the forwarder's code sends somewhere other than the pool it ` +
-        `reports — which is what the runtime-code check exists to catch, so treat a shortfall ` +
-        `here as a finding about this deployment — or something else in the same block moved ETH ` +
-        `out of the pool. Run "npm run status", reconcile the pool's balance and ` +
-        `grossPoolProceeds against the mined transaction, and do not re-run ${label} until you ` +
-        `know which`,
+        `cannot prevent one. The shortfall is not explained by anything the pool logged, so ` +
+        `either the forwarder's code sends somewhere other than the pool it reports — which is ` +
+        `what the runtime-code check exists to catch, so treat a shortfall here as a finding ` +
+        `about this deployment — or ETH left the pool in that block without an event, which the ` +
+        `audited contract has no path for. Run "npm run status", reconcile the pool's balance ` +
+        `and grossPoolProceeds against the mined transaction, and do not re-run ${label} until ` +
+        `you know which`,
     );
   }
 
-  if (delta > balances.forwarderBefore) {
+  if (credited > balances.forwarderBefore) {
     console.log(
-      `${label} credited ${formatWei(delta)} to the pool, more than the ` +
+      `${label} credited ${formatWei(credited)} to the pool${netted}, more than the ` +
         `${formatWei(balances.forwarderBefore)} the forwarder held when this command read it: ` +
         `${formatWei(sweptAmount)} was forwarded, so ETH arrived at the forwarder between the ` +
         `read and the sweep, which is exactly what a fee recipient does`,
@@ -3002,7 +3136,7 @@ export function assertSweepWasCredited(
   console.log(
     `${label} credit confirmed: the forwarder's Swept event reports ${formatWei(sweptAmount)} ` +
       `forwarded, and the pool's balance rose by exactly the ` +
-      `${formatWei(balances.forwarderBefore)} it was holding`,
+      `${formatWei(balances.forwarderBefore)} it was holding${netted}`,
   );
 }
 

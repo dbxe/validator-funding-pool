@@ -7,6 +7,7 @@ import {
   assertSweepWasCredited,
   formatWei,
   readDeployment,
+  readPoolOutflowsInBlock,
   reportFatalError,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
@@ -47,15 +48,18 @@ async function main() {
   // before the transaction was even broadcast, and a head read afterwards would fold in
   // every other transaction since — a refund or a claim leaving the pool in a later block
   // would look exactly like a sweep that never arrived. Across `blockNumber - 1` and
-  // `blockNumber` the delta is the sweep's, plus at most whatever else shared its block.
+  // `blockNumber` the delta is the sweep's, plus at most whatever else shared its block —
+  // and what else shared it is read from the pool's own logs for that block, so a
+  // same-block `claim()` or `refund()` is reconciled rather than accused.
   const blockBefore = { blockNumber: receipt.blockNumber - 1n };
   const blockOfSweep = { blockNumber: receipt.blockNumber };
-  const [forwarderAtSweep, poolBeforeSweep, poolAfterSweep, forwarderBalanceAfter] =
+  const [forwarderAtSweep, poolBeforeSweep, poolAfterSweep, forwarderBalanceAfter, sameBlockOutflows] =
     await Promise.all([
       publicClient.getBalance({ address: deployment.feeRecipientForwarder, ...blockBefore }),
       publicClient.getBalance({ address: deployment.pool, ...blockBefore }),
       publicClient.getBalance({ address: deployment.pool, ...blockOfSweep }),
       publicClient.getBalance({ address: deployment.feeRecipientForwarder }),
+      readPoolOutflowsInBlock(publicClient, deployment.pool, receipt.blockNumber),
     ]);
 
   console.log(`Swept in block ${receipt.blockNumber}`);
@@ -66,7 +70,12 @@ async function main() {
     deployment.feeRecipientForwarder,
     deployment.pool,
     signer,
-    { forwarderBefore: forwarderAtSweep, poolBefore: poolBeforeSweep, poolAfter: poolAfterSweep },
+    {
+      forwarderBefore: forwarderAtSweep,
+      poolBefore: poolBeforeSweep,
+      poolAfter: poolAfterSweep,
+      sameBlockOutflows,
+    },
     "sweep",
   );
 }

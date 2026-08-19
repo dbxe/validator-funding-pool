@@ -21,6 +21,7 @@ import {
   assertStillFundable,
   assertSweepWasCredited,
   beaconApiUrl,
+  decodePoolOutflows,
   describeFatalError,
   envBigInt,
   formatPoolState,
@@ -29,6 +30,7 @@ import {
   parseBigIntList,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
+  type PoolOutflow,
 } from "../scripts/lib/common.js";
 
 const SIGNER = "0x1111111111111111111111111111111111111111" as Address;
@@ -761,8 +763,58 @@ describe("assertSweepWasCredited", function () {
     };
   }
 
-  function balances(forwarderBefore: bigint, poolBefore: bigint, poolAfter: bigint) {
-    return { forwarderBefore, poolBefore, poolAfter };
+  function balances(
+    forwarderBefore: bigint,
+    poolBefore: bigint,
+    poolAfter: bigint,
+    sameBlockOutflows: PoolOutflow[] = [],
+  ) {
+    return { forwarderBefore, poolBefore, poolAfter, sameBlockOutflows };
+  }
+
+  /// The pool's own events for the sweep's block, encoded independently of the
+  /// implementation from `ValidatorFundingPool.sol:132`, `:154`, and `:133`.
+  const POOL_EVENTS = [
+    {
+      type: "event",
+      name: "Claimed",
+      inputs: [
+        { name: "participant", type: "address", indexed: true },
+        { name: "recipient", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+    {
+      type: "event",
+      name: "Refunded",
+      inputs: [
+        { name: "participant", type: "address", indexed: true },
+        { name: "recipient", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+    {
+      type: "event",
+      name: "PoolToppedUp",
+      inputs: [],
+    },
+  ] as const;
+
+  function poolPayout(
+    eventName: "Claimed" | "Refunded",
+    participant: Address,
+    amount: bigint,
+    address: Address = POOL,
+  ) {
+    return {
+      address,
+      topics: encodeEventTopics({
+        abi: POOL_EVENTS,
+        eventName,
+        args: { participant, recipient: participant },
+      }) as Hex[],
+      data: encodeAbiParameters([{ type: "uint256" }], [amount]),
+    };
   }
 
   it("confirms a sweep whose whole balance shows up in the pool", function () {
@@ -841,6 +893,92 @@ describe("assertSweepWasCredited", function () {
         },
       );
     }
+  });
+
+  it("reconciles a same-block claim or refund instead of accusing the sweep", function () {
+    // The false FATAL this reconciliation exists for. `claim()` and `refund()` are
+    // permissionless and callable at any moment, so one landing in the sweep's own block is
+    // ordinary — and every wei it pays out comes off the same balance delta, which made a
+    // sweep that landed in full look like a shortfall of exactly the amount somebody else
+    // withdrew.
+    const claimed = 100_000n;
+    const refunded = 900_000n;
+    const log = captureLog();
+    try {
+      assertSweepWasCredited(
+        { logs: [swept(SIGNER, AMOUNT)] },
+        FORWARDER,
+        POOL,
+        SIGNER,
+        balances(AMOUNT, 7n, 7n + AMOUNT - claimed - refunded, [
+          { event: "Claimed", amount: claimed },
+          { event: "Refunded", amount: refunded },
+        ]),
+        "sweep",
+      );
+      assert.equal(log.lines.length, 1);
+      assert.match(log.lines[0], /^sweep credit confirmed: /);
+      // The pass says what had to be netted to reach it: "the numbers agree once you account
+      // for X" is the operator's business, not an implementation detail.
+      assert.match(
+        log.lines[0],
+        /after adding back the 1000000 wei .* the pool's own logs record leaving it in that block/,
+      );
+      assert.match(log.lines[0], /Claimed 100000 wei .*, Refunded 900000 wei/);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("still fails a genuine shortfall, and says what the reconciliation could not explain", function () {
+    // One wei short of the forwarder's balance AFTER every logged outflow is added back.
+    // Nothing the pool recorded accounts for it, which is the finding.
+    const claimed = 100_000n;
+    assert.throws(
+      () =>
+        assertSweepWasCredited(
+          { logs: [swept(SIGNER, AMOUNT)] },
+          FORWARDER,
+          POOL,
+          SIGNER,
+          balances(AMOUNT, 0n, AMOUNT - claimed - 1n, [{ event: "Claimed", amount: claimed }]),
+          "sweep",
+        ),
+      (error: Error) => {
+        assert.match(error.message, /^FATAL: sweep transaction succeeded but the pool at /);
+        assert.match(error.message, /only 249999999999999999 wei/);
+        assert.match(error.message, /after adding back the 100000 wei/);
+        assert.match(error.message, /not explained by anything the pool logged/);
+        return true;
+      },
+    );
+  });
+
+  it("counts every pool outflow event and nothing else", function () {
+    // Decoded from raw logs the way the block's logs arrive, so the event set the
+    // reconciliation trusts is pinned. A log from another contract is not the pool's, and a
+    // pool event that moves no ETH out is not an outflow.
+    assert.deepEqual(
+      decodePoolOutflows(
+        [
+          poolPayout("Claimed", SIGNER, 5n),
+          poolPayout("Refunded", OTHER_SIGNER, 7n),
+          // Right event, wrong contract.
+          poolPayout("Claimed", SIGNER, 11n, FORWARDER),
+          // A pool event that is not an outflow at all.
+          {
+            address: POOL,
+            topics: encodeEventTopics({ abi: POOL_EVENTS, eventName: "PoolToppedUp" }) as Hex[],
+            data: "0x" as Hex,
+          },
+        ],
+        POOL,
+      ),
+      [
+        { event: "Claimed", amount: 5n },
+        { event: "Refunded", amount: 7n },
+      ],
+    );
   });
 
   it("is fatal when the receipt carries no Swept for this signer at this forwarder", function () {
