@@ -43,7 +43,7 @@ async function main() {
 
   // Printed BEFORE the transaction is composed, which is the only moment at which the
   // recipient is still a decision. On the Ledger path the address goes into calldata the
-  // device does not render, and README.md's mitigation ladder tells the operator to compare
+  // device does not render, and SIGNING.md's mitigation ladder tells the operator to compare
   // it against an independently derived one right here.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   printPayoutRecipient("claim", deployment.pool, signer, recipient, claimable);

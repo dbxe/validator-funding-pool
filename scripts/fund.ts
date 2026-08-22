@@ -114,7 +114,7 @@ async function main() {
   await printSuggestedFees(publicClient, "fund");
   // Final race-narrowing re-reads, and the last thing this script does before the
   // transaction is composed. They cannot close the race, only shorten it: see
-  // "Plain-Transfer Funding" in the README for the one window where a plain transfer
+  // "Plain-Transfer Funding" in ACCOUNTING.md for the one window where a plain transfer
   // behaves differently from a reverting fund().
   //
   // The beacon leg matters just as much as the on-chain leg here. The full preflight ran

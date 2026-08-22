@@ -2250,7 +2250,7 @@ describe("assertStillFundable", function () {
 describe("assertContractPredepositWei", function () {
   const ONE_ETH = 1_000_000_000_000_000_000n;
 
-  it("accepts a pool that agrees with the audited contract's 1 ether", function () {
+  it("accepts a pool that agrees with the contract's declared 1 ether", function () {
     assert.equal(PREDEPOSIT_WEI, ONE_ETH);
     assert.doesNotThrow(() => assertContractPredepositWei(ONE_ETH, "commit-predeposit"));
   });
@@ -2264,7 +2264,7 @@ describe("assertContractPredepositWei", function () {
         (error: Error) => {
           assert.match(error.message, /^commit-predeposit: the pool reports PREDEPOSIT_WEI /);
           assert.match(error.message, new RegExp(`${reported} wei`));
-          assert.match(error.message, new RegExp(`audited contract declares ${ONE_ETH} wei`));
+          assert.match(error.message, new RegExp(`contract declares ${ONE_ETH} wei`));
           assert.match(error.message, /Nothing has been sent/);
           assert.match(error.message, /do not send capital to it/);
           return true;

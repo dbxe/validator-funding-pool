@@ -504,7 +504,7 @@ const NO_COMPILE_FLAG = "--no-compile";
 ///
 /// `assertRuntimeCodeMatchesLocalBuild` is the one check in this repository that is not
 /// circular: it compares the deployed runtime code against `artifacts/`, the participant's
-/// OWN build of the audited source. What makes that evidence rather than ceremony is that
+/// OWN build of this repository's source. What makes that evidence rather than ceremony is that
 /// `hardhat run` recompiles the project immediately before running the script, so the
 /// artifact is a fresh product of the source in this checkout.
 ///
@@ -529,7 +529,7 @@ export function assertCompilationNotSkipped(label: string) {
     `${label}: ${NO_COMPILE_FLAG} was passed, and this command will not run with it. Nothing ` +
       `has been sent. The runtime-code check that decides whether capital may be sent — the ` +
       `only check here that is not circular — compares the deployed code against ` +
-      `artifacts/, and it means "this is the audited source" only because "hardhat run" ` +
+      `artifacts/, and it means "this is the source this checkout ships" only because "hardhat run" ` +
       `rebuilds that artifact from this checkout immediately before the script runs. With ` +
       `${NO_COMPILE_FLAG} the comparison still runs and still prints a pass, against whatever ` +
       `artifact happened to be left on disk — possibly from edited sources, or from the other ` +
@@ -1912,14 +1912,14 @@ export async function codeHash(
 //
 // Everything else in this file compares an operator-supplied deployment record
 // against the live contract that record names. Those two can agree perfectly and
-// still describe a pool nobody audited: the record is written by whoever ran
+// still describe a pool nobody has checked: the record is written by whoever ran
 // `deploy`, and the pool answers whatever its own code says. Neither side is
 // independent of the operator.
 //
 // The two checks below are the ones that are. The first derives the withdrawal
 // credentials from the pool's own address instead of asking the pool for them.
 // The second compares the pool's runtime code against the participant's OWN
-// local build of `contracts/ValidatorFundingPool.sol` — the audited source, in
+// local build of `contracts/ValidatorFundingPool.sol` — this repository's source, in
 // the participant's checkout, compiled on the participant's machine.
 // ---------------------------------------------------------------------------
 
@@ -2106,7 +2106,7 @@ export function maskImmutableRanges(
 /// build.
 ///
 /// This is the check that is not circular: the deployment record and the live contract are
-/// both downstream of whoever deployed, but `artifacts/` is downstream of the audited
+/// both downstream of whoever deployed, but `artifacts/` is downstream of the
 /// source in this checkout. A contract that is not this source fails here even when every
 /// record-to-chain comparison passes.
 ///
@@ -2118,7 +2118,7 @@ export function maskImmutableRanges(
 /// binding check and fails this one.
 ///
 /// It is not a substitute for source verification. It proves the deployed code is the code
-/// this checkout builds; it says nothing about whether this checkout is the audited one.
+/// this checkout builds; it says nothing about whether this checkout is the genuine repository.
 /// Verify the repository's provenance and the contracts on Sourcify as well.
 export async function assertRuntimeCodeMatchesLocalBuild(
   publicClient: { getCode: (args: { address: Address }) => Promise<Hex | undefined> },
@@ -2171,7 +2171,7 @@ export async function assertRuntimeCodeMatchesLocalBuild(
       `${candidates.length === 1 ? "its" : "their"} immutable ranges masked on both sides: ` +
       `${rejections.join("; ")}. This is the check that the deployment record cannot make for ` +
       `you — a record and a contract can agree with each other and still describe something ` +
-      `nobody audited. Do not send capital to this address. If it was built with the other ` +
+      `nobody has checked. Do not send capital to this address. If it was built with the other ` +
       `solidity profile, re-run this command with "--build-profile production"; hardhat compiles ` +
       `before it runs a script and keeps only the last-built profile's artifacts, so the profile ` +
       `has to be chosen on the command itself rather than by a separate compile`,
@@ -2994,13 +2994,13 @@ export function readPredepositAndTopUpDepositData(
 /// capital path, one refactor away from not holding.
 ///
 /// The amount is now the local constant and the chain's value is asserted against it. A
-/// divergence is fatal rather than followed: the audited contract declares
+/// divergence is fatal rather than followed: the contract in this repository declares
 /// `PREDEPOSIT_WEI = 1 ether`, so a pool reporting anything else is not that contract, and
 /// the deployment record names something other than what the operator thinks it does.
 export function assertContractPredepositWei(chainPredepositWei: bigint, label: string) {
   if (chainPredepositWei === PREDEPOSIT_WEI) return;
   throw new Error(
-    `${label}: the pool reports PREDEPOSIT_WEI ${formatWei(chainPredepositWei)}, but the audited ` +
+    `${label}: the pool reports PREDEPOSIT_WEI ${formatWei(chainPredepositWei)}, but this repository's ` +
       `contract declares ${formatWei(PREDEPOSIT_WEI)}. Nothing has been sent. A pool that does ` +
       `not agree on the predeposit amount is not the contract this checkout builds, so the ` +
       `deployment record ${deploymentPath()} names something else; do not send capital to it`,
@@ -3425,7 +3425,7 @@ const STATE_FUNDING = 2;
 /// forces it on (`1`) or off (`0`) on any network.
 ///
 /// The two paths are identical in every pool state but one; see "Plain-Transfer Funding —
-/// The One Divergence" in `README.md` for the window in which the transfer path is
+/// The One Divergence" in `ACCOUNTING.md` for the window in which the transfer path is
 /// accepted as pool proceeds where `fund()` would have reverted.
 export function fundViaPlainTransfer(networkConfig: { ledgerAccounts?: readonly string[] }): boolean {
   const override = process.env.FUND_VIA_TRANSFER;
@@ -3597,10 +3597,10 @@ export type PayoutEventName = (typeof POOL_PAYOUT_EVENTS_ABI)[number]["name"];
 ///
 /// `claim` and `refund` used to print the destination only after mining — `Claimed to <x> in
 /// block <n>` — which is the one moment at which it is no longer a decision. On the Ledger
-/// path that is the whole exposure of the `claimTo`/`refundTo` wart (`README.md`): the
+/// path that is the whole exposure of the `claimTo`/`refundTo` wart (`SIGNING.md`): the
 /// recipient is an ABI argument, so the device renders the pool as the destination and `0` as
 /// the value while the address that receives every wei sits in calldata it does not show.
-/// `README.md`'s mitigation ladder tells the operator to derive the recipient independently
+/// `SIGNING.md`'s mitigation ladder tells the operator to derive the recipient independently
 /// and compare it against "the address the script prints before you approve on the device" —
 /// and until this printed, there was no such address.
 ///
@@ -3954,7 +3954,7 @@ export function assertSweepWasCredited(
         `either the forwarder's code sends somewhere other than the pool it reports — which is ` +
         `what the runtime-code check exists to catch, so treat a shortfall here as a finding ` +
         `about this deployment — or ETH left the pool in that block without an event, which the ` +
-        `audited contract has no path for. Run "npm run status", reconcile the pool's balance ` +
+        `contract in this repository has no path for. Run "npm run status", reconcile the pool's balance ` +
         `and grossPoolProceeds against the mined transaction, and do not re-run ${label} until ` +
         `you know which`,
     );

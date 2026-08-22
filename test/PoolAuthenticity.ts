@@ -599,7 +599,7 @@ describe("pool authenticity", async function () {
     const bytes = toBytes(artifact.deployedBytecode);
 
     // A byte the comparison is not allowed to ignore. The forwarder is small, so this is the
-    // whole difference between the audited sidecar and something that answers `pool()`
+    // whole difference between the genuine sidecar and something that answers `pool()`
     // correctly and sends the balance elsewhere.
     let offset = 0;
     while (masked.has(offset)) offset += 1;
