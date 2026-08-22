@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -16,11 +16,13 @@ import {
   assertBeaconValidatorReadyForTopUp,
   assertBeaconValidatorStillFresh,
   assertDeploymentMatchesPool,
+  CANONICAL_GENESIS_FORK_VERSION,
   computeDepositDataRoot,
   computeDepositSigningRoot,
   PREDEPOSIT_GWEI,
   readBeaconGenesisForkVersion,
   readDeployment,
+  readPredepositAndTopUpDepositData,
   TOP_UP_GWEI,
   validateDepositData,
   VALIDATOR_DEPOSIT_GWEI,
@@ -236,7 +238,7 @@ describe("beacon preflight checks", function () {
             { depositContract: "0x1111111111111111111111111111111111111111" },
             "deposit-test",
           );
-          await readBeaconGenesisForkVersion("deposit-test");
+          await readBeaconGenesisForkVersion(31337, "deposit-test");
         })(),
         /deposit-test beacon deposit chain_id 1 does not match deployment chainId 31337/,
       );
@@ -317,7 +319,7 @@ describe("beacon preflight checks", function () {
     process.env.BEACON_NODE_URL = "http://beacon.example";
 
     try {
-      const chainForkVersion = await readBeaconGenesisForkVersion("deposit-test");
+      const chainForkVersion = await readBeaconGenesisForkVersion(31337, "deposit-test");
       assert.equal(chainForkVersion, "0xaabbccdd");
 
       const secretKey = SecretKey.fromKeygen(Buffer.alloc(32, 2));
@@ -1166,7 +1168,7 @@ describe("beacon preflight checks", function () {
           { depositContract: "0x1111111111111111111111111111111111111111" },
           "fund",
         );
-        assert.equal(await readBeaconGenesisForkVersion("fund"), "0x00000000");
+        assert.equal(await readBeaconGenesisForkVersion(31337, "fund"), "0x00000000");
         await assertBeaconValidatorAbsent(PUBKEY, "commit-predeposit");
         await assertBeaconValidatorReadyForFunding(
           PUBKEY,
@@ -1541,3 +1543,188 @@ function signedDeposit(
     fork_version: forkVersion,
   };
 }
+
+
+/// The fork version is the one input to the deposit domain that used to come from the beacon
+/// node with nothing local to compare it against, so these cases are about the comparison
+/// existing at all: a node that reports the wrong value must be fatal on a chain this
+/// repository pins, and the override that exists for devnets must not be able to turn the pin
+/// off.
+describe("the genesis fork version pin", function () {
+  const withBeacon = async (
+    chainId: number,
+    mockOptions: Parameters<typeof installBeaconMock>[0],
+    declared: string | undefined,
+    body: (run: () => Promise<Hex>, lines: string[]) => Promise<void>,
+  ) => {
+    installBeaconMock(mockOptions);
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    const originalDeclared = process.env.GENESIS_FORK_VERSION;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    restoreEnv("GENESIS_FORK_VERSION", declared);
+    const log = captureLog();
+    try {
+      await body(() => readBeaconGenesisForkVersion(chainId, "fork-test"), log.lines);
+    } finally {
+      log.restore();
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+      restoreEnv("GENESIS_FORK_VERSION", originalDeclared);
+    }
+  };
+
+  it("is the mainnet value from the spec, and mainnet is the only chain it pins", function () {
+    assert.deepEqual(Object.keys(CANONICAL_GENESIS_FORK_VERSION), ["1"]);
+    // consensus-specs v1.6.1, configs/mainnet.yaml line 30. Re-derive from there, never from
+    // what a node reports — a pin updated to match an observation is not a pin.
+    assert.equal(CANONICAL_GENESIS_FORK_VERSION[1], "0x00000000");
+  });
+
+  it("accepts the pinned value and says so", async function () {
+    await withBeacon(1, { genesisForkVersion: "0x00000000" }, undefined, async (run, lines) => {
+      assert.equal(await run(), "0x00000000");
+      assert.ok(
+        lines.some((line) => line.includes("matches the pinned value for chainId 1")),
+        `no confirmation line in ${JSON.stringify(lines)}`,
+      );
+    });
+  });
+
+  it("is fatal when a node reports a fork version the pinned chain does not use", async function () {
+    // The deposit contract verifies no BLS signature, so this is the only place a deposit
+    // signed under the wrong domain can be stopped. Nothing downstream would notice.
+    await withBeacon(1, { genesisForkVersion: "0xaabbccdd" }, undefined, async (run) => {
+      await assert.rejects(
+        run(),
+        /reports genesis_fork_version 0xaabbccdd, but chainId 1 requires 0x00000000/,
+      );
+    });
+  });
+
+  it("takes an unpinned chain's fork version from GENESIS_FORK_VERSION and enforces it", async function () {
+    await withBeacon(31337, { genesisForkVersion: "0x10203040" }, "0x10203040", async (run) => {
+      assert.equal(await run(), "0x10203040");
+    });
+    await withBeacon(31337, { genesisForkVersion: "0x10203040" }, "0x99887766", async (run) => {
+      await assert.rejects(
+        run(),
+        /reports genesis_fork_version 0x10203040, but chainId 31337 requires 0x99887766/,
+      );
+    });
+  });
+
+  it("refuses to let the devnet override overrule a pinned chain", async function () {
+    await withBeacon(1, { genesisForkVersion: "0x01020304" }, "0x01020304", async (run) => {
+      await assert.rejects(
+        run(),
+        /GENESIS_FORK_VERSION is declared as 0x01020304, but chainId 1 is pinned to 0x00000000/,
+      );
+    });
+    // Declaring the pinned value is not an override at all, so it changes nothing.
+    await withBeacon(1, { genesisForkVersion: "0x00000000" }, "0x00000000", async (run) => {
+      assert.equal(await run(), "0x00000000");
+    });
+  });
+
+  it("warns, rather than failing, on a chain nothing pins and nothing declares", async function () {
+    await withBeacon(31337, { genesisForkVersion: "0x10203040" }, undefined, async (run, lines) => {
+      assert.equal(await run(), "0x10203040");
+      assert.ok(
+        lines.some((line) => line.startsWith("WARNING: no genesis fork version is pinned")),
+        `no warning in ${JSON.stringify(lines)}`,
+      );
+    });
+  });
+});
+
+
+/// The amount decides how much ETH a deposit claims to be for and it is hashed into the
+/// deposit data root, so it is parsed the way every other operator-supplied number here is:
+/// the JSON number the staking-deposit CLI writes, or a canonical decimal string, and nothing
+/// that merely happens to survive `BigInt`.
+describe("deposit amounts", function () {
+  const secretKey = SecretKey.fromKeygen(Buffer.alloc(32, 5));
+  const pubkey = bytesToHex(secretKey.toPublicKey().toBytes());
+  const FORK_VERSION = "0x00000000" as Hex;
+
+  function deposit(amountGwei: bigint) {
+    return signedDeposit(secretKey, pubkey, WITHDRAWAL_CREDENTIALS, amountGwei, FORK_VERSION);
+  }
+
+  it("accepts the decimal string and the JSON number, which are the two forms tools write", function () {
+    for (const amount of [PREDEPOSIT_GWEI.toString(), Number(PREDEPOSIT_GWEI)]) {
+      assert.equal(
+        validateDepositData(
+          { ...deposit(PREDEPOSIT_GWEI), amount },
+          WITHDRAWAL_CREDENTIALS,
+          FORK_VERSION,
+          pubkey,
+          PREDEPOSIT_GWEI,
+        ).amountGwei,
+        PREDEPOSIT_GWEI,
+      );
+    }
+  });
+
+  it("refuses a number that is not the number it looks like, naming the field", function () {
+    // "0x3b9aca00" is 1000000000 and is not the form anything writes; the fractional number
+    // used to reach a bare RangeError from BigInt that named no field at all.
+    for (const amount of ["0x3b9aca00", "+1000000000", " 1000000000 ", "01000000000", 1e9 + 0.5]) {
+      assert.throws(
+        () =>
+          validateDepositData(
+            { ...deposit(PREDEPOSIT_GWEI), amount },
+            WITHDRAWAL_CREDENTIALS,
+            FORK_VERSION,
+            pubkey,
+            PREDEPOSIT_GWEI,
+          ),
+        /Deposit amount .* is not a (canonical unsigned decimal integer or a JSON number|non-negative integer)/,
+        String(amount),
+      );
+    }
+  });
+
+  it("refuses a malformed amount when selecting the two entries, rather than skipping the entry", function () {
+    const directory = mkdtempSync(path.join(tmpdir(), "deposit-amounts-"));
+    const file = path.join(directory, "deposit-data.json");
+    const log = captureLog();
+    try {
+      writeFileSync(
+        file,
+        JSON.stringify([{ ...deposit(PREDEPOSIT_GWEI), amount: "0x3b9aca00" }, deposit(TOP_UP_GWEI)]),
+      );
+      // A file whose 1 ETH entry is unreadable is not a file with one entry: silently
+      // skipping it would report "no predeposit entry" about a file that has one.
+      assert.throws(
+        () => readPredepositAndTopUpDepositData(file),
+        /entry 0 amount in .*deposit-data.json "0x3b9aca00" is not a canonical unsigned decimal/,
+      );
+
+      writeFileSync(file, JSON.stringify([deposit(PREDEPOSIT_GWEI), deposit(TOP_UP_GWEI)]));
+      const { predeposit, topUp } = readPredepositAndTopUpDepositData(file);
+      assert.equal(predeposit.amount, PREDEPOSIT_GWEI.toString());
+      assert.equal(topUp.amount, TOP_UP_GWEI.toString());
+
+      // A trailing entry the search never reaches is not this function's business, and it
+      // matters that it stays that way: `request-exit` treats any throw from here as an
+      // unreadable file and continues with the EL RPC's pubkey unchecked, so a malformed
+      // entry nobody reads must not be able to switch that comparison off.
+      writeFileSync(
+        file,
+        JSON.stringify([
+          deposit(PREDEPOSIT_GWEI),
+          deposit(TOP_UP_GWEI),
+          { ...deposit(VALIDATOR_DEPOSIT_GWEI), amount: "0x1dcd6500" },
+        ]),
+      );
+      assert.equal(
+        readPredepositAndTopUpDepositData(file).predeposit.amount,
+        PREDEPOSIT_GWEI.toString(),
+      );
+    } finally {
+      log.restore();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

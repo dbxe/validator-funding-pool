@@ -12,7 +12,7 @@ Participants should not fund until beacon state confirms the predeposit locked t
 - both deposit-data entries use the pool's `0x01` withdrawal credentials;
 - one entry is exactly `1000000000` Gwei and the other is exactly `31000000000` Gwei;
 - both deposit data roots recompute correctly;
-- both BLS deposit signatures verify against the connected beacon chain's `genesis_fork_version`;
+- both BLS deposit signatures verify against the `genesis_fork_version` this repository pins for mainnet and requires the beacon node to report;
 - network metadata matches the intended chain;
 - beacon state shows the committed pubkey with the pool withdrawal credentials;
 - the pool's `withdrawalCredentials` are `0x01`, eleven zero bytes, then the pool's own address — anything else means the validator's consensus withdrawals do not pay this pool;
@@ -74,9 +74,13 @@ This section covers what the repository scripts check against the beacon chain b
 
 Deposit data is designed to be publishable and becomes public when submitted to the deposit contract. The operator must not share validator private keys, mnemonics, keystore passwords, remote signer credentials, or validator-client secrets.
 
-### Reading `genesis_fork_version` From The Node
+### Pinning `genesis_fork_version`
 
-Repository scripts read the authoritative `genesis_fork_version` from the connected beacon node, require both deposit-data entries to declare that value, and use it to verify deposit roots and BLS signatures.
+The `genesis_fork_version` is part of the domain a validator's BLS deposit signature is computed over. This repository pins mainnet's value — `0x00000000`, from consensus-specs `configs/mainnet.yaml` — and requires the connected beacon node to report it. Both deposit-data entries must declare the same value, and it is what verifies the deposit roots and BLS signatures.
+
+Requiring only that the node and the deposit file agree with each other would check nothing when the same party supplies both: a deposit signed under the wrong fork version is still accepted by the deposit contract, which verifies no BLS signature, and the validator would simply never activate.
+
+On a chain this repository does not pin — a devnet — set `GENESIS_FORK_VERSION` to that network's value and it is enforced the same way. It cannot overrule a pinned chain: a declaration that disagrees with the pin is a fatal error, not an override. If nothing pins the chain and nothing is declared, the scripts print a warning saying the fork version is whatever the node reports.
 
 ### What `fund.ts` Does Before Sending
 

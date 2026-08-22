@@ -224,6 +224,28 @@ export const CANONICAL_SYSTEM_CONTRACTS: Readonly<Record<number, CanonicalSystem
   },
 };
 
+// The beacon-chain genesis fork version, pinned exactly the way the system contracts above are.
+//
+// This value is one of the inputs to the deposit domain a validator's BLS deposit signature is
+// computed over, and it used to be taken from the beacon node with nothing local to compare it
+// against: `validateDepositData` required only that the deposit file and the node AGREE with
+// each other. Two inputs supplied by the same party agree for free. A deposit signed under the
+// wrong fork version is accepted by the deposit contract — it checks the deposit data root and
+// verifies no signature at all — and the validator then never activates: every local check
+// reports a clean pass, the ETH is in the deposit contract, and nothing can retrieve it.
+//
+// Provenance: consensus-specs v1.6.1, configs/mainnet.yaml line 30, `GENESIS_FORK_VERSION:
+// 0x00000000`.
+//
+// The same do-not-update rule as CANONICAL_SYSTEM_CONTRACTS applies. If the comparison fails,
+// the node or the deposit file is wrong; this table is not the thing to change.
+//
+// Exported for the tests, and only for them: the pin is applied by
+// `readBeaconGenesisForkVersion` alone.
+export const CANONICAL_GENESIS_FORK_VERSION: Readonly<Record<number, Hex>> = {
+  1: "0x00000000",
+};
+
 /// Minimal view of a resolved `network.create()` connection. Scripts pass the whole
 /// connection; only these fields are read.
 export interface SignerConnection {
@@ -1010,6 +1032,38 @@ export function parseUnsignedDecimal(value: string, name: string): bigint {
   return BigInt(value);
 }
 
+/// Parses a deposit file's `amount`, in Gwei.
+///
+/// The staking-deposit CLI writes it as a JSON number and other tools write it as a decimal
+/// string, so both are read — but nothing else is. `BigInt` on its own accepts `"0x20"`,
+/// `"+5"` and `" 5 "`, and throws a bare `RangeError: The number ... cannot be converted to a
+/// BigInt because it is not an integer` on a fractional number, which names no file and no
+/// field. The amount says how much ETH a deposit claims to be for and it is hashed into the
+/// deposit data root, so it is parsed like every other number this repository takes from an
+/// operator-supplied file, rather than coerced.
+function parseDepositAmountGwei(value: unknown, field: string): bigint {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(
+        `Deposit ${field} ${describeBeaconValue(value)} is not a non-negative integer`,
+      );
+    }
+    return BigInt(value);
+  }
+  if (typeof value !== "string" || !CANONICAL_UNSIGNED_DECIMAL.test(value)) {
+    throw new Error(
+      `Deposit ${field} ${describeBeaconValue(value)} is not a canonical unsigned decimal ` +
+        `integer or a JSON number: no 0x prefix, no sign, no leading zeros, no separators, no ` +
+        `surrounding whitespace`,
+    );
+  }
+  const parsed = BigInt(value);
+  if (parsed > UINT64_MAX) {
+    throw new Error(`Deposit ${field} ${value} exceeds the uint64 maximum ${UINT64_MAX}`);
+  }
+  return parsed;
+}
+
 export function envBigInt(name: string, fallback?: bigint): bigint {
   const value = process.env[name];
   if (value === undefined || value === "") {
@@ -1321,11 +1375,33 @@ function requireRecordObject(value: unknown, file: string): Record<string, unkno
   return value as Record<string, unknown>;
 }
 
+/// Requires a well-formed address AND, when the value is mixed case, a valid EIP-55 checksum.
+///
+/// The shape gate used to pass `strict: false`, which accepts any 20-byte hex whatever its
+/// capitalization. That let a record whose pool address had been mangled in transit through
+/// this function and into `deriveWithdrawalCredentials`, whose `asAddress` IS strict — so the
+/// run died several checks later on a bare `Invalid address: 0x...` that named neither the
+/// field, nor the record, nor the fact that a local file was the problem. This function exists
+/// precisely so that a bad record fails here, by name. Checking the checksum it already has is
+/// free, and a mangled address cannot pass it.
+///
+/// An all-lowercase or all-uppercase address carries no checksum to check, and viem accepts
+/// the lowercase form; a record hand-written in uppercase is now rejected, and lowercasing it
+/// is the fix the message asks for.
 function requireRecordAddress(value: unknown, field: string, file: string): void {
   if (typeof value !== "string" || !isAddress(value, { strict: false })) {
     throw new Error(
       `The deployment record ${file} has ${field} ${describeBeaconValue(value)}, which is not a ` +
         `0x-prefixed 20-byte address`,
+    );
+  }
+  if (!isAddress(value)) {
+    throw new Error(
+      `The deployment record ${file} has ${field} ${value}, which is 20 bytes of hex but fails ` +
+        `its EIP-55 checksum: the capitalization does not match the address. A record is not ` +
+        `hand-typed — this one has been edited or corrupted, and ${field} selects what this ` +
+        `command acts on. Re-derive the record, or write the address in lowercase if you are ` +
+        `certain of the value`,
     );
   }
 }
@@ -2326,7 +2402,52 @@ export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
   );
 }
 
-export async function readBeaconGenesisForkVersion(label: string): Promise<Hex> {
+/// Resolves the genesis fork version this run REQUIRES the beacon node to report.
+///
+/// `GENESIS_FORK_VERSION` exists for chains this repository does not pin — a devnet, whose
+/// fork version is whatever that network chose and cannot be written down here. It cannot
+/// waive a pin: on a chain that has a canonical entry, a declaration which disagrees is fatal
+/// rather than winning, because a variable that can overwrite a pin is not a pin. Declaring
+/// the pinned value is allowed and changes nothing.
+///
+/// `undefined` means nothing pins this chain and nothing was declared — the caller warns.
+function requiredGenesisForkVersion(chainId: number, label: string): Hex | undefined {
+  const canonical = CANONICAL_GENESIS_FORK_VERSION[chainId];
+  const declared = process.env.GENESIS_FORK_VERSION ?? "";
+  if (declared === "") return canonical;
+
+  let normalized: Hex;
+  try {
+    normalized = normalizeHexLength(declared, 4, "GENESIS_FORK_VERSION").toLowerCase() as Hex;
+  } catch (error) {
+    // `normalizeHexLength` reports the field and nothing else, which is the wrong shape for a
+    // declaration the operator typed: a stray space in `.env` would surface as a bare
+    // "GENESIS_FORK_VERSION is not hex" naming no command and no consequence.
+    throw new Error(
+      `${label}: GENESIS_FORK_VERSION is declared as ${JSON.stringify(declared)}, which is not a ` +
+        `4-byte 0x-prefixed fork version (${error instanceof Error ? error.message : String(error)}). ` +
+        `Nothing has been sent. A declaration that cannot be parsed has not been made, and this ` +
+        `one says which deposit domain every BLS signature below is checked against`,
+    );
+  }
+  if (canonical !== undefined && normalized !== canonical) {
+    throw new Error(
+      `${label}: GENESIS_FORK_VERSION is declared as ${normalized}, but chainId ${chainId} is ` +
+        `pinned to ${canonical}. The declaration exists for chains this repository does not pin; ` +
+        `it cannot overrule one. Nothing has been sent. Unset GENESIS_FORK_VERSION, or point ` +
+        `this run at the chain you actually mean`,
+    );
+  }
+  return normalized;
+}
+
+/// Reads the fork version the deposit domain is built from, and holds the node to the pin.
+///
+/// `chainId` comes from the deployment record, which `assertBeaconMatchesExecutionChain` has
+/// already required the beacon node's own config to agree with — so the pin looked up here is
+/// the pin for the chain this command is acting on, not for whichever chain an endpoint
+/// claims to be.
+export async function readBeaconGenesisForkVersion(chainId: number, label: string): Promise<Hex> {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   await assertBeaconNodeHealthy(beaconNodeUrl, label);
   const genesis = await fetchBeaconJson<BeaconGenesisResponse>(
@@ -2335,7 +2456,35 @@ export async function readBeaconGenesisForkVersion(label: string): Promise<Hex> 
     label,
   );
   requireBeaconDataEnvelope(genesis, "genesis", label);
-  return normalizeHexLength(genesis.data.genesis_fork_version, 4, "genesis_fork_version").toLowerCase() as Hex;
+  const reported = normalizeHexLength(
+    genesis.data.genesis_fork_version,
+    4,
+    "genesis_fork_version",
+  ).toLowerCase() as Hex;
+
+  const required = requiredGenesisForkVersion(chainId, label);
+  if (required === undefined) {
+    console.warn(
+      `WARNING: no genesis fork version is pinned for chainId ${chainId} and ` +
+        `GENESIS_FORK_VERSION is unset, so the deposit domain every BLS signature below is ` +
+        `checked against is whatever ${beaconNodeUrl} reports`,
+    );
+    return reported;
+  }
+  if (reported !== required) {
+    throw new Error(
+      `${label}: the beacon node reports genesis_fork_version ${reported}, but chainId ` +
+        `${chainId} requires ${required}. Nothing has been sent. The deposit signatures this ` +
+        `command verifies are only meaningful under the right fork version: a deposit signed ` +
+        `under the wrong one is still accepted by the deposit contract, which verifies no BLS ` +
+        `signature, and the validator would never activate. Either this node is not on the ` +
+        `chain the deployment record names, or the pin is wrong — check the node, not the pin`,
+    );
+  }
+  console.log(
+    `${label}: beacon genesis fork version ${reported} matches the pinned value for chainId ${chainId}`,
+  );
+  return reported;
 }
 
 async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
@@ -2975,8 +3124,15 @@ export function readPredepositAndTopUpDepositData(
   file = depositDataPath(),
 ): { predeposit: DepositData; topUp: DepositData } {
   const deposits = readDepositDataFile(file);
-  const predeposit = deposits.find((deposit) => BigInt(deposit.amount) === PREDEPOSIT_GWEI);
-  const topUp = deposits.find((deposit) => BigInt(deposit.amount) === TOP_UP_GWEI);
+  // Parsed per entry as the search reaches it, and deliberately not in one pass up front. A
+  // file's trailing entries are not this function's business, and `request-exit` treats ANY
+  // throw from here as "the file is unreadable" and continues with the pubkey the EL RPC
+  // reported, unchecked — so a pass that parsed the whole file would let one malformed entry
+  // nobody reads disable a check that stops a dishonest endpoint naming a different validator.
+  const amountOf = (deposit: DepositData, index: number) =>
+    parseDepositAmountGwei(deposit.amount, `entry ${index} amount in ${file}`);
+  const predeposit = deposits.find((deposit, index) => amountOf(deposit, index) === PREDEPOSIT_GWEI);
+  const topUp = deposits.find((deposit, index) => amountOf(deposit, index) === TOP_UP_GWEI);
   if (predeposit === undefined || topUp === undefined) {
     throw new Error(
       `Expected deposit data entries for ${PREDEPOSIT_GWEI} Gwei and ${TOP_UP_GWEI} Gwei in ${file}`,
@@ -3171,7 +3327,7 @@ export function validateDepositData(
   const depositDataRoot = normalizeHexLength(deposit.deposit_data_root, 32, "deposit_data_root");
   const forkVersion = normalizeHexLength(deposit.fork_version ?? "", 4, "fork_version");
   const normalizedChainForkVersion = normalizeHexLength(chainForkVersion, 4, "genesis_fork_version");
-  const amountGwei = BigInt(deposit.amount);
+  const amountGwei = parseDepositAmountGwei(deposit.amount, "amount");
 
   if (amountGwei !== expectedAmountGwei) {
     throw new Error(`Deposit amount ${amountGwei} != expected ${expectedAmountGwei}`);

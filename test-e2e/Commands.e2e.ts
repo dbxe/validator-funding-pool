@@ -685,6 +685,18 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(await readPool<bigint>("totalActiveFundedWei"), 0n);
   });
 
+  it("AMOUNT_WEI of zero is refused rather than signed into a certain revert", async () => {
+    const result = expectFailure(
+      await runCommand({ script: "fund", env: asParticipant({ AMOUNT_WEI: "0" }) }),
+    );
+
+    // The pool reverts ZeroAmount() on this, so the only thing sending it could buy is the
+    // gas and — on the Ledger path — a device signing session spent approving a failure.
+    assertReadableFailure(result, "fund", "AMOUNT_WEI is 0, and the pool rejects a zero-value fund");
+    assertOutputLacks(result, "Funded in block");
+    assert.equal(await readPool<bigint>("totalActiveFundedWei"), 0n);
+  });
+
   // -------------------------------------------------------------------------
   // 5. Zero-balance claim and refund
   // -------------------------------------------------------------------------

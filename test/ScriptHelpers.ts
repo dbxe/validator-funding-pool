@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { encodeAbiParameters, encodeEventTopics, type Address, type Hex } from "viem";
+import { encodeAbiParameters, encodeEventTopics, getAddress, type Address, type Hex } from "viem";
 
 import {
   assertActiveSigner,
@@ -2550,6 +2550,46 @@ describe("assertDeploymentRecordShape", function () {
     );
     // Returned unchanged: the check narrows a parse, it does not rewrite one.
     assert.deepEqual(assertDeploymentRecordShape(validRecord(), FILE), validRecord());
+  });
+
+  /// EIP-55 fixes the case of every letter in an address, so flipping one produces hex of the
+  /// right length whose capitalization cannot be a valid checksum — exactly what a record
+  /// mangled in transit looks like.
+  function mangleChecksum(address: Address): string {
+    const body = getAddress(address).slice(2);
+    const index = [...body].findIndex((character) => /[a-f]/i.test(character));
+    const letter = body[index]!;
+    const flipped = letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase();
+    return `0x${body.slice(0, index)}${flipped}${body.slice(index + 1)}`;
+  }
+
+  it("refuses an address whose EIP-55 checksum does not hold, by name", function () {
+    // Before this check the record passed the shape gate and died several checks later inside
+    // deriveWithdrawalCredentials on a bare `Invalid address: 0x...` that named neither the
+    // field nor the file. This gate exists so a bad record fails here instead.
+    const mangled = mangleChecksum("0xaBcDeF0123456789AbCdEf0123456789aBcDeF01" as Address);
+    for (const field of ["pool", "operator", "depositContract", "withdrawalRequestPredeploy"]) {
+      assert.throws(
+        () => assertDeploymentRecordShape({ ...validRecord(), [field]: mangled }, FILE),
+        new RegExp(`has ${field} ${mangled}, which is 20 bytes of hex but fails its EIP-55 checksum`),
+        field,
+      );
+    }
+    assert.throws(
+      () =>
+        assertDeploymentRecordShape({ ...validRecord(), feeRecipientForwarder: mangled }, FILE),
+      /has feeRecipientForwarder .* fails its EIP-55 checksum/,
+    );
+    // The two forms that carry no checksum to fail are still accepted, and the correctly
+    // checksummed form of the same address is what the message asks the operator for.
+    for (const accepted of [
+      getAddress("0xaBcDeF0123456789AbCdEf0123456789aBcDeF01" as Address),
+      "0xabcdef0123456789abcdef0123456789abcdef01",
+    ]) {
+      assert.doesNotThrow(() =>
+        assertDeploymentRecordShape({ ...validRecord(), pool: accepted }, FILE),
+      );
+    }
   });
 
   it("refuses anything that is not a JSON object at all", function () {

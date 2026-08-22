@@ -101,7 +101,7 @@ Do not fund until beacon state confirms that the predeposit locked the validator
 
 - the on-chain committed pubkey, signatures, and roots match the deposit-data file;
 - both deposit-data entries use the pool's `0x01` withdrawal credentials, one for exactly `1000000000` Gwei and the other for exactly `31000000000` Gwei;
-- both deposit data roots recompute, both BLS deposit signatures verify against the connected beacon chain's `genesis_fork_version`, and the network metadata matches the intended chain;
+- both deposit data roots recompute, both BLS deposit signatures verify against the `genesis_fork_version` this repository pins for mainnet and requires the beacon node to report, and the network metadata matches the intended chain;
 - beacon state shows the committed pubkey with the pool's withdrawal credentials;
 - the pool's `withdrawalCredentials` are `0x01`, eleven zero bytes, then the pool's own address — anything else means the validator's consensus withdrawals do not pay this pool;
 - the pool's deployed runtime bytecode is the bytecode this repository builds, and the source is verified on Sourcify.

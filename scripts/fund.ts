@@ -51,7 +51,7 @@ async function main() {
   await assertBeaconMatchesExecutionChain(deployment, liveConfig, "fund");
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
-  const chainForkVersion = await readBeaconGenesisForkVersion("fund");
+  const chainForkVersion = await readBeaconGenesisForkVersion(deployment.chainId, "fund");
   const predeposit = validateDepositData(
     deposits.predeposit,
     expectedCredentials,
@@ -103,6 +103,16 @@ async function main() {
   const amount = envBigInt("AMOUNT_WEI", remaining);
   if (amount > remaining) {
     throw new Error(`AMOUNT_WEI exceeds remaining cap: ${formatWei(remaining)}`);
+  }
+  // The pool reverts `ZeroAmount()` on a zero-value fund, so a run that got this far with
+  // AMOUNT_WEI=0 could only ever compose a transaction guaranteed to fail: gas spent for
+  // nothing, and on the Ledger path a whole device signing session spent approving it.
+  if (amount === 0n) {
+    throw new Error(
+      `AMOUNT_WEI is 0, and the pool rejects a zero-value fund. Nothing has been sent. Unset ` +
+        `AMOUNT_WEI to fund the full remaining ${formatWei(remaining)}, or set the amount you ` +
+        `mean to send`,
+    );
   }
 
   const viaTransfer = fundViaPlainTransfer(connection.networkConfig);

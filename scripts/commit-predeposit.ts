@@ -55,7 +55,7 @@ async function main() {
   assertContractPredepositWei(await pool.read.PREDEPOSIT_WEI(), "commit-predeposit");
 
   const expectedCredentials = liveConfig.withdrawalCredentials;
-  const chainForkVersion = await readBeaconGenesisForkVersion("commit-predeposit");
+  const chainForkVersion = await readBeaconGenesisForkVersion(deployment.chainId, "commit-predeposit");
 
   const predeposit = validateDepositData(
     deposits.predeposit,
