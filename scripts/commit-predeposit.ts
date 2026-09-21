@@ -98,7 +98,7 @@ async function main() {
     "commit-predeposit",
   );
   console.log(`Predeposited in block ${receipt.blockNumber}`);
-  console.log("Participants should wait for beacon confirmation before funding.");
+  console.log("High-trust flow: open the funding attempt and fund now, then submit the top-up without waiting for the deposit queue.");
 }
 
 main().catch((error) => reportFatalError(error, "commit-predeposit"));

@@ -430,7 +430,77 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("uses finalized credentials and head consensus fields rather than the status label", async function () {
+  it("allows positively established absence on both capital paths without a finalized read", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    try {
+      for (const leg of freshPredepositLegs) {
+        const calls = installBeaconMock({ validatorList: [], validatorStatus: 404 });
+        try {
+          assert.equal(await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()), undefined);
+          await assertBeaconValidatorStillFresh(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, undefined);
+          assert.equal(calls.filter((call) => call.includes("/validators?id=")).length, 2);
+          assert(!calls.some((call) => call.includes("/states/finalized/")));
+        } finally {
+          restoreFetch();
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("does not confuse failed or malformed high-trust lookups with absence", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    const cases = [
+      { options: { validatorListStatus: 404 }, expected: /absence is INCONCLUSIVE/ },
+      { options: { validatorListStatus: 503 }, expected: /absence is INCONCLUSIVE/ },
+      { options: { validatorListBody: {} }, expected: /has no data array/ },
+      { options: { validatorListBody: { data: null } }, expected: /has no data array/ },
+      { options: { validatorList: [beaconValidator("pending_initialized").data, beaconValidator("pending_initialized").data] }, expected: /multiple entries/ },
+      { options: { validatorList: [], syncingOverrides: { is_syncing: true } }, expected: /node is syncing/ },
+      { options: { validatorList: [], syncingOverrides: { is_optimistic: true } }, expected: /node is optimistic/ },
+      { options: { validatorList: [], syncingOverrides: { el_offline: true } }, expected: /execution layer offline/ },
+    ];
+    try {
+      for (const leg of freshPredepositLegs) {
+        for (const { options, expected } of cases) {
+          installBeaconMock(options);
+          try {
+            await assert.rejects(leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()), expected);
+          } finally {
+            restoreFetch();
+          }
+        }
+      }
+    } finally {
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("requires a new review if a validator appears or disappears before broadcast", async function () {
+    const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
+    process.env.BEACON_NODE_URL = "http://beacon.example";
+    try {
+      installBeaconMock({});
+      await assert.rejects(
+        assertBeaconValidatorStillFresh(PUBKEY, WITHDRAWAL_CREDENTIALS, "fund", undefined),
+        /changed from absent at the preflight to 1000000000 Gwei/,
+      );
+      restoreFetch();
+      installBeaconMock({ validatorList: [] });
+      await assert.rejects(
+        assertBeaconValidatorStillFresh(PUBKEY, WITHDRAWAL_CREDENTIALS, "top-up", PREDEPOSIT_GWEI),
+        /changed from 1000000000 Gwei at the preflight to absent/,
+      );
+    } finally {
+      restoreFetch();
+      restoreEnv("BEACON_NODE_URL", originalBeaconNodeUrl);
+    }
+  });
+
+  it("uses head consensus fields without waiting for finalized state or relying on the status label", async function () {
     const calls = installBeaconMock({
       finalizedValidator: beaconValidator("pending_initialized"),
       headValidator: beaconValidator("active_ongoing"),
@@ -447,7 +517,7 @@ describe("beacon preflight checks", function () {
         "top-up-test",
         refusingReader(),
       );
-      assert(calls.includes(`/eth/v1/beacon/states/finalized/validators/${PUBKEY}`));
+      assert(!calls.some((call) => call.includes("/states/finalized/")));
       assert(calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
     } finally {
       restoreFetch();
@@ -826,28 +896,19 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("still confirms credentials at the settled state through the surviving entry points", async function () {
+  it("does not wait for finalized credentials when head already has the predeposit", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
     process.env.BEACON_NODE_URL = "http://beacon.example";
-
     try {
       for (const leg of freshPredepositLegs) {
         const calls = installBeaconMock({
           finalizedValidator: beaconValidator("pending_initialized", {
             withdrawal_credentials: OTHER_WITHDRAWAL_CREDENTIALS,
           }),
-          headValidator: beaconValidator("pending_initialized"),
         });
         try {
-          await assert.rejects(
-            leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()),
-            new RegExp(
-              `${leg.label} beacon withdrawal_credentials ${OTHER_WITHDRAWAL_CREDENTIALS} != pool ` +
-                WITHDRAWAL_CREDENTIALS,
-            ),
-          );
-          // The settled-state read is what failed: head was never consulted.
-          assert(!calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
+          assert.equal(await leg.assert(PUBKEY, WITHDRAWAL_CREDENTIALS, leg.label, refusingReader()), PREDEPOSIT_GWEI);
+          assert(!calls.some((call) => call.includes("/states/finalized/")));
         } finally {
           restoreFetch();
         }
@@ -885,18 +946,12 @@ describe("beacon preflight checks", function () {
     }
   });
 
-  it("always confirms at finalized, whatever the deleted BEACON_CONFIRMATION_STATE_ID says", async function () {
+  it("has only the high-trust policy, whatever obsolete confirmation variables say", async function () {
     const originalBeaconNodeUrl = process.env.BEACON_NODE_URL;
     const originalStateId = process.env.BEACON_CONFIRMATION_STATE_ID;
     process.env.BEACON_NODE_URL = "http://beacon.example";
 
     try {
-      // The variable is gone. `head` in particular was the one value the old allowlist
-      // existed to refuse, because it would have collapsed the settled read and the head
-      // read into one; `justified` was the only value the flag ever bought over the
-      // default. Neither can do anything now, and a silently ignored variable has to be
-      // provably inert rather than assumed so — so this asserts on the requests that were
-      // actually made, not merely that the preflight passed.
       for (const stateId of [undefined, "head", "justified", "0x1234", ""]) {
         restoreEnv("BEACON_CONFIRMATION_STATE_ID", stateId);
         const calls = installBeaconMock({});
@@ -914,8 +969,8 @@ describe("beacon preflight checks", function () {
         }
 
         assert(
-          calls.includes(`/eth/v1/beacon/states/finalized/validators/${PUBKEY}`),
-          `settled read did not hit finalized with BEACON_CONFIRMATION_STATE_ID=${stateId}`,
+          !calls.some((call) => call.includes("/states/finalized/")),
+          `unexpected finalized wait with BEACON_CONFIRMATION_STATE_ID=${stateId}`,
         );
         assert(calls.includes(`/eth/v1/beacon/states/head/validators/${PUBKEY}`));
         // And no read went anywhere the variable named.
@@ -981,7 +1036,6 @@ describe("beacon preflight checks", function () {
       // satisfies every other assertion in the preflight: the credentials, the balance, the
       // slashing flag, and all four epochs are read from whatever came back.
       for (const overrides of [
-        { finalizedValidator: beaconValidator("pending_initialized", { pubkey: OTHER_PUBKEY }) },
         { headValidator: beaconValidator("pending_initialized", { pubkey: OTHER_PUBKEY }) },
       ]) {
         for (const leg of freshPredepositLegs) {
@@ -1376,7 +1430,7 @@ function installBeaconMock({
   validatorStatus = 200,
   syncingOverrides = {},
   specOverrides = {},
-  validatorList = [] as unknown,
+  validatorList = undefined as unknown,
   validatorListBody = undefined as unknown,
   validatorListStatus = 200,
   basePath = "",
@@ -1422,9 +1476,8 @@ function installBeaconMock({
       if (validatorListStatus !== 200) {
         return new Response("not found", { status: validatorListStatus });
       }
-      return jsonResponse(
-        validatorListBody === undefined ? { data: validatorList } : validatorListBody,
-      );
+      const entries = validatorList === undefined ? [headValidators[0].data] : validatorList;
+      return jsonResponse(validatorListBody === undefined ? { data: entries } : validatorListBody);
     }
 
     if (pathname === "/eth/v1/node/syncing") {

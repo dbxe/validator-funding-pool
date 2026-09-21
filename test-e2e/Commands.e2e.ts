@@ -784,9 +784,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       () => runCommand({ script: "fund", env: asParticipant() }),
     );
     expectFailure(slashed);
-    // `fund head`, not `fund`: the finalized-state confirmation only compares credentials,
-    // so the slashing flag is caught by the head-state preflight that follows it, and the
-    // label says which of the two states the finding came from.
+    // A present validator still has to pass all head-state anomaly checks.
     assertReadableFailure(slashed, "fund", "fund head beacon validator is slashed");
 
     const someoneElsesCredentials = deriveWithdrawalCredentials(outsider.address);
@@ -802,7 +800,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertReadableFailure(
       wrongCredentials,
       "fund",
-      `fund beacon withdrawal_credentials ${someoneElsesCredentials} != pool ${withdrawalCredentials}`,
+      `fund head beacon withdrawal_credentials ${someoneElsesCredentials} != pool ${withdrawalCredentials}`,
     );
     assertOutputLacks(wrongCredentials, "Funded in block");
   });

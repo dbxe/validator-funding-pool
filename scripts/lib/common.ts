@@ -30,16 +30,6 @@ export const VALIDATOR_DEPOSIT_GWEI = 32_000_000_000n;
 export const PREDEPOSIT_WEI = PREDEPOSIT_GWEI * 1_000_000_000n;
 export const VALIDATOR_DEPOSIT_WEI = VALIDATOR_DEPOSIT_GWEI * 1_000_000_000n;
 const ZERO_ROOT = `0x${"00".repeat(32)}` as Hex;
-/// The settled state the credential confirmation reads, before the same credentials are
-/// re-confirmed at head. Fixed, with no environment variable behind it.
-///
-/// It used to be selectable through `BEACON_CONFIRMATION_STATE_ID`, restricted to
-/// `finalized` or `justified`. The only thing that flag ever bought over the default was
-/// `justified` — roughly one epoch, some six minutes of freshness — on a confirmation that
-/// happens once per validator lifecycle and is followed by a head read anyway. That is not
-/// worth a variable on the security surface: every configurable input is one more thing an
-/// auditor has to reason about, and one more thing an operator can be talked into setting.
-const CONFIRMATION_STATE_ID = "finalized";
 const HEAD_STATE_ID = "head";
 const UINT64_MAX = 2n ** 64n - 1n;
 const FAR_FUTURE_EPOCH = UINT64_MAX.toString();
@@ -2431,13 +2421,35 @@ export async function assertBeaconMatchesExecutionChain(
 /// non-200, a body that is not a list, or anything else is fatal as INCONCLUSIVE — the
 /// question was not answered, which is not the same as answered "no".
 export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
-  const beaconNodeUrl = requireBeaconNodeUrl(label);
+  const validators = await readHeadValidatorList(requireBeaconNodeUrl(label), pubkey, label);
+  if (validators.length !== 0) {
+    const first = asBeaconObject(validators[0], "validator list entry", label);
+    const validator = asBeaconObject(first.validator, "validator list entry validator", label);
+    throw new Error(
+      `${label} beacon preflight failed: validator ${pubkey} already exists in head state with ` +
+        `status ${describeBeaconValue(first.status)} and withdrawal_credentials ` +
+        describeBeaconValue(validator.withdrawal_credentials),
+    );
+  }
+
+  console.log(
+    `${label} beacon preflight passed: the head state validator list is empty for this pubkey`,
+  );
+}
+
+// An HTTP error is never evidence of absence. Only a successful, filtered list can
+// establish it; this still cannot see queued deposits or prove global pubkey freshness.
+async function readHeadValidatorList(
+  beaconNodeUrl: string,
+  pubkey: Hex,
+  label: string,
+): Promise<unknown[]> {
   await assertBeaconNodeHealthy(beaconNodeUrl, label);
 
   const url = beaconApiUrl(beaconNodeUrl, `/eth/v1/beacon/states/${HEAD_STATE_ID}/validators`);
   url.searchParams.set("id", pubkey);
   const response = await fetchBeacon(url, label);
-  if (!response.ok) {
+  if (response.status !== 200) {
     throw new Error(
       `${label} beacon validator lookup returned ${response.status} ${response.statusText}; the ` +
         `head state's validator list was not read, so the pubkey's absence is INCONCLUSIVE. A ` +
@@ -2453,19 +2465,10 @@ export async function assertBeaconValidatorAbsent(pubkey: Hex, label: string) {
         `the pubkey's absence is inconclusive`,
     );
   }
-  if (body.data.length !== 0) {
-    const first = asBeaconObject(body.data[0], "validator list entry", label);
-    const validator = asBeaconObject(first.validator, "validator list entry validator", label);
-    throw new Error(
-      `${label} beacon preflight failed: validator ${pubkey} already exists in head state with ` +
-        `status ${describeBeaconValue(first.status)} and withdrawal_credentials ` +
-        describeBeaconValue(validator.withdrawal_credentials),
-    );
+  if (body.data.length > 1) {
+    throw new Error(`${label} beacon validator list returned multiple entries for one pubkey; absence is inconclusive`);
   }
-
-  console.log(
-    `${label} beacon preflight passed: the head state validator list is empty for this pubkey`,
-  );
+  return body.data;
 }
 
 /// Resolves the genesis fork version this run REQUIRES the beacon node to report.
@@ -2553,24 +2556,6 @@ export async function readBeaconGenesisForkVersion(chainId: number, label: strin
   return reported;
 }
 
-async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
-  beaconNodeUrl: string,
-  pubkey: Hex,
-  expectedWithdrawalCredentials: Hex,
-  label: string,
-): Promise<BeaconValidatorPreflight> {
-  const preflight = await readBeaconValidatorPreflight(
-    beaconNodeUrl,
-    pubkey,
-    CONFIRMATION_STATE_ID,
-    label,
-  );
-  assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
-  printBeaconPreflight(label, preflight);
-  console.log(`${label} beacon confirmation passed: validator has pool withdrawal credentials`);
-  return preflight;
-}
-
 // The fund and top-up legs run the identical preflight. Both names are kept so call sites stay
 // labeled with the operation the operator actually ran.
 //
@@ -2578,15 +2563,15 @@ async function assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
 // confirmation without a terminal. It is not an authority boundary and grants a caller nothing:
 // any importer of this module could skip the preflight altogether. The supported commands never
 // pass it, so a real run always reads a real TTY.
-/// Both return the head-state balance in Gwei the preflight settled on, which is what
-/// `assertBeaconValidatorStillFresh` requires to still hold immediately before broadcast.
+/// One high-trust policy on both commands: absence is allowed, presence is checked.
+/// Return undefined for absence, otherwise the observed balance, for the final recheck.
 export async function assertBeaconValidatorReadyForTopUp(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
   testOnlyConfirmationReader?: ExcessBalanceConfirmationReader,
-): Promise<bigint> {
-  return assertBeaconValidatorIsFreshPredeposit(
+): Promise<bigint | undefined> {
+  return assertHighTrustValidator(
     pubkey,
     expectedWithdrawalCredentials,
     label,
@@ -2599,8 +2584,8 @@ export async function assertBeaconValidatorReadyForFunding(
   expectedWithdrawalCredentials: Hex,
   label: string,
   testOnlyConfirmationReader?: ExcessBalanceConfirmationReader,
-): Promise<bigint> {
-  return assertBeaconValidatorIsFreshPredeposit(
+): Promise<bigint | undefined> {
+  return assertHighTrustValidator(
     pubkey,
     expectedWithdrawalCredentials,
     label,
@@ -2609,7 +2594,7 @@ export async function assertBeaconValidatorReadyForFunding(
 }
 
 /// Re-runs the head-state preflight as the last thing before a transaction is composed, and
-/// requires the balance to be exactly what the full preflight settled on.
+/// requires presence and balance to be exactly what the full preflight settled on.
 ///
 /// It removes the largest part of the window: the funding review and everything the operator
 /// reads before deciding are behind it. What it does NOT remove is everything after it, and
@@ -2632,7 +2617,7 @@ export async function assertBeaconValidatorStillFresh(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
-  expectedBalanceGwei: bigint,
+  expectedBalanceGwei: bigint | undefined,
 ): Promise<void> {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
   const balanceGwei = await assertFreshPredepositHeadState(
@@ -2644,29 +2629,31 @@ export async function assertBeaconValidatorStillFresh(
   );
   if (balanceGwei !== expectedBalanceGwei) {
     throw new Error(
-      `${label} head beacon validator balance changed from ${expectedBalanceGwei} Gwei at the ` +
-        `preflight to ${balanceGwei} Gwei immediately before broadcast; nothing was sent. Re-run ` +
+      `${label} head beacon validator balance changed from ${describeHeadBalance(expectedBalanceGwei)} at the ` +
+        `preflight to ${describeHeadBalance(balanceGwei)} immediately before broadcast; nothing was sent. Re-run ` +
         `this command so the preflight decides on the state that exists now`,
     );
   }
-  console.log(
-    `${label} pre-broadcast head recheck passed: balance still ${balanceGwei} Gwei, credentials, ` +
-      `slashing flag, and all four epochs unchanged`,
-  );
+  const observation = balanceGwei === undefined
+    ? "validator still absent (high trust)"
+    : `balance still ${balanceGwei} Gwei, credentials, slashing flag, and all four epochs unchanged`;
+  console.log(`${label} pre-broadcast head recheck passed: ${observation}`);
 }
 
-async function assertBeaconValidatorIsFreshPredeposit(
+function describeHeadBalance(balanceGwei: bigint | undefined): string {
+  return balanceGwei === undefined ? "absent" : `${balanceGwei} Gwei`;
+}
+
+async function assertHighTrustValidator(
   pubkey: Hex,
   expectedWithdrawalCredentials: Hex,
   label: string,
   testOnlyConfirmationReader: ExcessBalanceConfirmationReader = stdinConfirmationReader(),
-): Promise<bigint> {
+): Promise<bigint | undefined> {
   const beaconNodeUrl = requireBeaconNodeUrl(label);
-  await assertBeaconValidatorHasWithdrawalCredentialsAtUrl(
-    beaconNodeUrl,
-    pubkey,
-    expectedWithdrawalCredentials,
-    label,
+  console.warn(
+    `${label}: HIGH TRUST - proceeding without finalized credential confirmation. ` +
+      `Trust the operator to use a fresh key with no earlier conflicting deposit; queued deposits are not checked.`,
   );
 
   const balanceGwei = await assertFreshPredepositHeadState(
@@ -2675,6 +2662,10 @@ async function assertBeaconValidatorIsFreshPredeposit(
     expectedWithdrawalCredentials,
     `${label} head`,
   );
+  if (balanceGwei === undefined) {
+    console.log(`${label} high-trust preflight passed: validator absent from head; no queue wait required`);
+    return undefined;
+  }
   if (balanceGwei <= PREDEPOSIT_GWEI) {
     console.log(`${label} head beacon fresh-predeposit preflight passed`);
     return balanceGwei;
@@ -2696,7 +2687,7 @@ async function assertBeaconValidatorIsFreshPredeposit(
   if (reReadBalanceGwei !== balanceGwei) {
     throw new Error(
       `${label} head beacon validator balance changed from the confirmed ${balanceGwei} Gwei to ` +
-        `${reReadBalanceGwei} Gwei between the confirmation and the re-read; nothing was sent. ` +
+        `${describeHeadBalance(reReadBalanceGwei)} between the confirmation and the re-read; nothing was sent. ` +
         `Re-run this command and confirm the balance it observes then`,
     );
   }
@@ -2709,7 +2700,8 @@ async function assertBeaconValidatorIsFreshPredeposit(
 }
 
 /// Fetches head state fresh and runs the whole fresh-predeposit preflight over it, returning
-/// the head-state balance in Gwei. `compact` skips the field-by-field printout; it asserts
+/// the head-state balance in Gwei, or undefined for an absent validator.
+/// `compact` skips the field-by-field printout; it asserts
 /// exactly the same things.
 async function assertFreshPredepositHeadState(
   beaconNodeUrl: string,
@@ -2717,7 +2709,12 @@ async function assertFreshPredepositHeadState(
   expectedWithdrawalCredentials: Hex,
   label: string,
   options: { compact?: boolean } = {},
-): Promise<bigint> {
+): Promise<bigint | undefined> {
+  const validators = await readHeadValidatorList(beaconNodeUrl, pubkey, label);
+  if (validators.length === 0) return undefined;
+  // Validate the list entry too: a proxy must not answer a filtered query about a
+  // different pubkey. Then fetch fresh detail for the existing anomaly checks.
+  assertBeaconValidatorResponseShape(validators[0], label, pubkey);
   const preflight = await readBeaconValidatorPreflight(beaconNodeUrl, pubkey, HEAD_STATE_ID, label);
   assertBeaconValidatorWithdrawalCredentials(preflight, expectedWithdrawalCredentials, label);
   const balanceGwei = assertFreshPredepositMutableState(preflight, label);
@@ -2794,7 +2791,7 @@ async function confirmExcessBalance(
       `withdrawable solely to the pool.\n` +
       `  Remaining impact: activation timing and economics only. An excess balance is uncredited ` +
       `external capital that this pool never distributes to the depositor.\n` +
-      `  Every other assertion passed: credentials match at both states, the validator is ` +
+      `  Every other assertion passed: head credentials match, the validator is ` +
       `unslashed, and all four epochs are FAR_FUTURE_EPOCH.\n`,
   );
 

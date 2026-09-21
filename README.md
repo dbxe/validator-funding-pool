@@ -1,5 +1,13 @@
 # Validator Funding Pool
 
+> This `unsafe/high-trust-single-queue` branch uses only the high-trust flow. The Solidity contracts are unchanged from `main` at `419e6a8`. Selecting this branch is the consent flag; there is no runtime mode switch.
+>
+> After `commit-predeposit` succeeds, immediately open the attempt, fund, and top up. For 16/16, use `PARTICIPANTS=<operator>,<friend>` and `FUNDING_TARGETS_GWEI=16000000000,16000000000`. With `AMOUNT_WEI` unset, the operator's `fund` sends 15 ETH (plus their earlier 1 ETH), and the friend's sends 16 ETH. Each uses their own signer. Then the operator runs `top-up`.
+>
+> `BEACON_NODE_URL` remains required. Funding and top-up accept a positively established absence from beacon head; a present validator must pass the credential and consensus-state checks. Both members trust the operator to use a fresh key with no earlier conflicting deposit. A queued conflicting deposit can put the full 32 ETH at risk. Two deposits still undergo Ethereum's queue and activation rules; submitting them without an intervening wait does not guarantee same-epoch processing.
+>
+> The documentation and audit history below describe the conservative main-branch workflow. Its finalized-confirmation requirement and 1 ETH limit on first-deposit credential risk do not apply to this branch. `npm run test:e2e` includes the no-wait 16/16 command flow against a local execution chain with a mock beacon node.
+
 Minimal `0x01` withdrawal-credential funding pool for known participants funding one Ethereum validator.
 
 The contract is a non-tokenized agreement between known funders. It mints no ERC-20, ERC-721, ERC-1155, vault share, receipt token, or transferable claim. Economic rights are internal accounting only.
