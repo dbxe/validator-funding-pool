@@ -4,7 +4,7 @@ Reference for running the repository's commands: how to install and test, what t
 
 ## Installing And Testing
 
-Install dependencies and run the local checks:
+Install dependencies and run the local checks. `.nvmrc` names Node 24, the major version the suites are run under; `nvm use` in the checkout selects it.
 
 ```bash
 npm ci
@@ -131,7 +131,7 @@ Four variables are read by `npm run deploy` and by nothing else. Each becomes an
 - `EXPECTED_DEADLINE_BEFORE`: optional `fund` check requiring the funding deadline to be at or before this Unix timestamp.
 - `DEPOSIT_NETWORK_NAME`: optional deposit-file metadata check.
 - `RECIPIENT`: optional nonzero, non-pool recipient for `claim` and `refund`. Unset, both commands call the no-argument `claim()` / `refund()`, which pay `msg.sender` and put no address in calldata at all. Set, they call `claimTo(address)` / `refundTo(address)`, and that address is an ABI argument no hardware wallet renders — so both commands print the pool, the recipient, and the amount before composing the transaction, with a loud notice on the redirected path, and both re-check the recipient against the pool's own `Claimed` / `Refunded` event in the mined receipt. See [`SIGNING.md`](SIGNING.md), "The `claimTo` And `refundTo` Wart".
-- `MAX_FEE_WEI`: optional cap on the EIP-7002 exit request fee for `request-exit`, and the value the transaction carries. Defaults to twice the fee read immediately before sending, so an ordinary fee uptick between the read and inclusion does not revert `ExitFeeTooHigh`. Only the live fee is forwarded to the predeploy; the rest is refunded in the same transaction. A value below the currently observed fee is rejected before signing.
+- `MAX_FEE_WEI`: optional cap on the EIP-7002 exit request fee for `request-exit`, and the value the transaction carries. Defaults to twice the fee read immediately before sending, so an ordinary fee uptick between the read and inclusion does not revert `ExitFeeTooHigh`. Only the live fee is forwarded to the predeploy; the rest is refunded in the same transaction. A value below the currently observed fee is rejected before signing. The default guards against an ordinary uptick, not against someone raising the fee on purpose: anyone can, cheaply, by filling a block with requests, and the fee then drains back slowly (`SECURITY.md` §2, "Third parties"). During a spike, read the fee `request-exit` prints and set `MAX_FEE_WEI` explicitly to the most you are prepared to pay. Too high a cap costs nothing — only the live fee is charged — and too low a cap costs only a revert and a retry.
 - `BEACON_NODE_URL`: beacon REST URL for validator predeposit confirmation, funding and top-up preflights, and the advisory exit preflight; required by `commit-predeposit`, `fund`, and `top-up`.
 - `GENESIS_FORK_VERSION`: the beacon-chain genesis fork version, for a chain this repository does not pin. Mainnet's `0x00000000` is pinned in the source and the beacon node is required to report it; on a devnet, set this to that network's value and it is enforced the same way. It cannot overrule a pinned chain — a declaration that disagrees with the pin is fatal, not an override. See [`VERIFICATION.md`](VERIFICATION.md), "Pinning `genesis_fork_version`".
 - `REFUND_PARTICIPANTS`: optional comma-separated addresses for `status` to display refund-only claimants that are no longer in the current funding attempt.

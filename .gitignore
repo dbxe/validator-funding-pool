@@ -3,6 +3,6 @@ artifacts/
 cache/
 coverage/
 docs/
-.env
+*.env
 deployments/*.json
 .DS_STORE

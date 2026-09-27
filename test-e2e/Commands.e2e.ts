@@ -1231,6 +1231,14 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, `Requesting full exit for ${deposits.pubkey}`);
     assertOutputContains(result, `EIP-7002 fee: ${fee} wei`);
     assertOutputContains(result, "Exit requested in block ");
+    // Acceptance is not an exit, and the command says so after the success line rather than
+    // letting "Exit requested" be read as one.
+    assertOutputOrder(
+      result,
+      "Exit requested in block ",
+      "request-exit: the execution layer accepted the request; that is not an exit.",
+    );
+    assertOutputContains(result, `validator ${deposits.pubkey} has an exit_epoch other than FAR_FUTURE_EPOCH`);
     await assertSignedAsPrinted(result, "request-exit", operator.address);
 
     assert.equal(await readPool<bigint>("exitRequestAttemptCount"), 1n);

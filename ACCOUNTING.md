@@ -26,7 +26,8 @@ This section establishes that ETH can arrive at the pool without any pool functi
 The pool uses balance-based accounting, so ETH that reaches the pool is accounted for even if no Solidity function executes. Silent balance increases can come from:
 
 - consensus withdrawals to the pool's `0x01` withdrawal credentials;
-- priority-fee / coinbase payments if the validator or builder configuration points to the pool;
+- consensus withdrawals from *other* validators created with the pool's withdrawal credentials. The credentials are public and a deposit needs no permission, so anyone holding a BLS key can create a validator that pays the pool. Only the pool can request such a validator's exit through EIP-7002 — the request's source address must be the credentials' address — and `requestExit` only ever names the committed pubkey, so that validator's principal reaches the pool only if its own key holder exits it, while its balance above 32 ETH arrives through the withdrawal sweep regardless. Before `ToppedUp` that ETH is simply held, and it becomes proceeds at top-up like any other pre-top-up balance;
+- priority-fee / coinbase payments from any block proposer that names the pool as its fee recipient — the committed validator or builder configured to, or anyone else who chooses to;
 - forced ETH transfers, including `selfdestruct`-based transfers.
 
 Ordinary ETH transfers are accepted only during `Funding` and `ToppedUp`. Forced ETH can still arrive in any state.

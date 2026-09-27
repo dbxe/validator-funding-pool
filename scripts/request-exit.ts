@@ -80,6 +80,15 @@ async function main() {
   const hash = await pool.write.requestExit([maxFee], { value: maxFee, ...fields });
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "request-exit");
   console.log(`Exit requested in block ${receipt.blockNumber}`);
+  // Accepted is not exited. Consensus drops an ineligible request without a trace on the
+  // execution layer (`process_withdrawal_request`, consensus-specs `specs/electra/beacon-chain.md`),
+  // so this line is the one place the command can say where the outcome actually shows up.
+  console.log(
+    `request-exit: the execution layer accepted the request; that is not an exit. Consensus ` +
+      `drops an ineligible request silently, with the fee spent. Confirm on the beacon API that ` +
+      `validator ${pubkey} has an exit_epoch other than FAR_FUTURE_EPOCH; if the request was ` +
+      `honoured it is set in the beacon block that carries this execution block`,
+  );
 }
 
 main().catch((error) => reportFatalError(error, "request-exit"));
