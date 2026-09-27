@@ -1,6 +1,6 @@
 # Validator Funding Pool
 
-> This `unsafe/high-trust-single-queue` branch uses only the high-trust flow. The Solidity contracts are unchanged from `main` at `419e6a8`. Selecting this branch is the consent flag; there is no runtime mode switch.
+> This `unsafe/high-trust-single-queue` branch uses only the high-trust flow. The Solidity contracts are unchanged from `main` at `92715e7` (v1.0.0-rc.4). Selecting this branch is the consent flag; there is no runtime mode switch.
 >
 > After `commit-predeposit` succeeds, immediately open the attempt, fund, and top up. For 16/16, use `PARTICIPANTS=<operator>,<friend>` and `FUNDING_TARGETS_GWEI=16000000000,16000000000`. With `AMOUNT_WEI` unset, the operator's `fund` sends 15 ETH (plus their earlier 1 ETH), and the friend's sends 16 ETH. Each uses their own signer. Then the operator runs `top-up`.
 >
