@@ -38,6 +38,7 @@ import {
   printPayoutRecipient,
   reportForwarderWithoutRefusing,
   requireFundingAllocation,
+  resolveSigningWallet,
   resolveSuggestedFees,
   resolveTransactionFields,
   requireFundingWindowSeconds,
@@ -669,7 +670,7 @@ describe("assertActiveSigner", function () {
     }
   });
 
-  it("refuses to sign with an account that is not the Ledger account", async function () {
+  it("keeps the Ledger-account comparison as an invariant", async function () {
     const original = process.env.LEDGER_ADDRESS;
     const originalExpected = process.env.EXPECTED_SIGNER;
     const log = captureLog();
@@ -677,9 +678,11 @@ describe("assertActiveSigner", function () {
     delete process.env.EXPECTED_SIGNER;
 
     try {
+      // Unreachable through `resolveSigningWallet`, which chooses the wallet by this address;
+      // kept as an invariant so a regression in the selection still refuses before signing.
       await assert.rejects(
         () => assertActiveSigner(ledger, OTHER_SIGNER, "fund"),
-        /fund would sign with .* not the Ledger account/,
+        /INVARIANT VIOLATED: fund would sign with .* not the Ledger account .*Nothing has been sent/,
       );
       assert.equal(
         (await assertActiveSigner(ledger, SIGNER.toUpperCase().replace("0X", "0x") as Address, "fund")).toLowerCase(),
@@ -690,6 +693,75 @@ describe("assertActiveSigner", function () {
       restoreEnv("LEDGER_ADDRESS", original);
       restoreEnv("EXPECTED_SIGNER", originalExpected);
     }
+  });
+});
+
+describe("resolveSigningWallet", function () {
+  const NODE_ACCOUNT = "0x4444444444444444444444444444444444444444" as Address;
+
+  /// Wallet clients in `eth_accounts` order. The Ledger plugin appends the device accounts
+  /// AFTER the node's own, so on the Ledger path the device account is never first when the
+  /// node exposes anything.
+  function source(...addresses: Address[]) {
+    return {
+      getWalletClients: async () => addresses.map((address) => ({ account: { address } })),
+    };
+  }
+
+  async function withLedgerAddress<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const original = process.env.LEDGER_ADDRESS;
+    restoreEnv("LEDGER_ADDRESS", value);
+    try {
+      return await run();
+    } finally {
+      restoreEnv("LEDGER_ADDRESS", original);
+    }
+  }
+
+  it("takes the private-key account off the Ledger path, as before", async function () {
+    const wallet = await withLedgerAddress(SIGNER, () =>
+      resolveSigningWallet({ networkConfig: {}, viem: source(OTHER_SIGNER) }, "fund"),
+    );
+    assert.equal(wallet.account.address, OTHER_SIGNER);
+    await assert.rejects(
+      () => resolveSigningWallet({ networkConfig: {}, viem: source() }, "fund"),
+      /fund: the connection reports no account to sign with\. Nothing has been sent/,
+    );
+  });
+
+  it("chooses the Ledger account by address, not the node account listed first", async function () {
+    const connection = {
+      networkConfig: { ledgerAccounts: [SIGNER] },
+      viem: source(NODE_ACCOUNT, OTHER_SIGNER, SIGNER),
+    };
+    const wallet = await withLedgerAddress(SIGNER, () => resolveSigningWallet(connection, "deploy"));
+    assert.equal(wallet.account.address, SIGNER);
+    // The declaration's case does not matter; the address does.
+    const upper = `0x${SIGNER.slice(2).toUpperCase()}`;
+    const again = await withLedgerAddress(upper, () => resolveSigningWallet(connection, "deploy"));
+    assert.equal(again.account.address, SIGNER);
+  });
+
+  it("refuses before anything is sent when LEDGER_ADDRESS is unset or not reported", async function () {
+    const connection = {
+      networkConfig: { ledgerAccounts: [SIGNER] },
+      viem: source(NODE_ACCOUNT, SIGNER),
+    };
+    await withLedgerAddress(undefined, () =>
+      assert.rejects(
+        () => resolveSigningWallet(connection, "top-up"),
+        /top-up is connected to a Ledger-signing network but LEDGER_ADDRESS is unset/,
+      ),
+    );
+    await withLedgerAddress(OTHER_SIGNER, () =>
+      assert.rejects(
+        () => resolveSigningWallet(connection, "top-up"),
+        new RegExp(
+          `top-up: LEDGER_ADDRESS ${OTHER_SIGNER} is not among the accounts this connection ` +
+            `reports \\(${NODE_ACCOUNT}, ${SIGNER}\\)\\. Nothing has been sent`,
+        ),
+      ),
+    );
   });
 });
 

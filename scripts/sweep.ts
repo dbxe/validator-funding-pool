@@ -10,6 +10,7 @@ import {
   readDeployment,
   readPoolOutflowsInBlock,
   reportFatalError,
+  resolveSigningWallet,
   resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
@@ -26,9 +27,13 @@ async function main() {
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
-  const [wallet] = await viem.getWalletClients();
+  const wallet = await resolveSigningWallet(connection, "sweep");
   const signer = await assertActiveSigner(connection, wallet.account.address, "sweep");
-  const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
+  // Read-only here, but given the chosen wallet anyway: left out, hardhat-viem fills in its
+  // first-account default, and no script relies on that default. See `resolveSigningWallet`.
+  const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
+    client: { wallet },
+  });
   // The command whose whole transaction is a call to the forwarder: it is authenticated in
   // full before that call is made.
   await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");

@@ -730,6 +730,71 @@ export function formatPoolState(state: number | bigint): string {
   return name === undefined ? `${ordinal} (unknown state)` : `${name} (${ordinal})`;
 }
 
+/// The wallet clients a signing command chooses from. Structural, so the tests can drive it;
+/// hardhat-viem's `connection.viem` satisfies it.
+export interface WalletClientSource<W extends { account: { address: Address } }> {
+  getWalletClients: () => Promise<W[]>;
+}
+
+/// Chooses the wallet client every write signs with. Called once per command, before
+/// `assertActiveSigner`, and the only way a script obtains a wallet.
+///
+/// Off the Ledger path the connection's accounts are the configured private key's, and the
+/// first is taken, as it always was.
+///
+/// On a connection with `ledgerAccounts` configured it is chosen BY ADDRESS: the client whose
+/// account is `LEDGER_ADDRESS`. Position cannot be trusted there. The plugin answers
+/// `eth_accounts` with the node's own accounts FIRST and the device accounts appended after
+/// them (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/hook-handlers/network.js`,
+/// the `eth_accounts` branch), so taking the first account made any node that exposes an
+/// account of its own — observed on mainnet: a Nethermind node listing its node-key account —
+/// the signer. Selected by address, the request carries `from = LEDGER_ADDRESS`, which is an
+/// address the plugin controls, so the plugin signs it on the device and nothing the node
+/// exposes can take its place.
+///
+/// `LEDGER_ADDRESS` must be among the accounts the connection reports. On the `ledger` network
+/// it always is, because the plugin appends the configured device accounts and `hardhat.config.ts`
+/// configures them from the same variable; the check is here so that a disagreement between the
+/// two is a named refusal before anything is sent rather than a request the plugin does not own.
+export async function resolveSigningWallet<W extends { account: { address: Address } }>(
+  connection: { networkConfig: ResolvedNetworkConfigView; viem: WalletClientSource<W> },
+  label: string,
+): Promise<W> {
+  const wallets = await connection.viem.getWalletClients();
+  const ledgerAccounts = connection.networkConfig.ledgerAccounts ?? [];
+
+  if (ledgerAccounts.length === 0) {
+    const [wallet] = wallets;
+    if (wallet === undefined) {
+      throw new Error(
+        `${label}: the connection reports no account to sign with. Nothing has been sent. ` +
+          `Check that PRIVATE_KEY resolves for this network and re-run`,
+      );
+    }
+    return wallet;
+  }
+
+  const ledgerAddress = process.env.LEDGER_ADDRESS ?? "";
+  if (ledgerAddress === "") {
+    throw new Error(
+      `${label} is connected to a Ledger-signing network but LEDGER_ADDRESS is unset; ` +
+        `set it to the device account and re-run`,
+    );
+  }
+  const wallet = wallets.find(
+    (candidate) => candidate.account.address.toLowerCase() === ledgerAddress.toLowerCase(),
+  );
+  if (wallet === undefined) {
+    throw new Error(
+      `${label}: LEDGER_ADDRESS ${ledgerAddress} is not among the accounts this connection ` +
+        `reports (${wallets.map((candidate) => candidate.account.address).join(", ") || "none"}). ` +
+        `Nothing has been sent. The Ledger plugin signs only for the addresses configured on the ` +
+        `network; check LEDGER_ADDRESS and re-run`,
+    );
+  }
+  return wallet;
+}
+
 /// Asserts that the wallet a script is about to sign with is the wallet the operator
 /// intended, and prints it on every network.
 ///
@@ -744,12 +809,12 @@ export function formatPoolState(state: number | bigint): string {
 /// `networkName` was rejected as the hook because it only names a config entry and
 /// proves nothing about whether a device sits in the signing path.
 ///
-/// On the Ledger path the active address must equal `LEDGER_ADDRESS`. This is the
-/// account-confusion guard: `eth_accounts` on the ledger network returns the node's
-/// own accounts first and the device account last
-/// (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/hook-handlers/network.js`
-/// lines 47-63), so a node that exposes unlocked accounts would otherwise have every
-/// script sign with one of them.
+/// On the Ledger path the active address must equal `LEDGER_ADDRESS`. That used to be the
+/// account-confusion guard, when every script signed with the first account `eth_accounts`
+/// listed and the plugin lists the node's own accounts ahead of the device's. The wallet is
+/// now chosen by that address (`resolveSigningWallet`), so the comparison can no longer fail
+/// for that reason; it is kept as an invariant, so that a regression in the selection is a
+/// refusal before anything is sent rather than a signature from the wrong account.
 ///
 /// Off the Ledger path there is nothing to compare against unless the operator says what
 /// they expect, so `EXPECTED_SIGNER` is offered as a declare-and-verify check: set it and
@@ -794,9 +859,10 @@ export async function assertActiveSigner(
   }
   if (activeAddress.toLowerCase() !== ledgerAddress.toLowerCase()) {
     throw new Error(
-      `${label} would sign with ${activeAddress}, not the Ledger account ${ledgerAddress}. ` +
-        `The connected node exposes accounts of its own and they are ordered ahead of the ` +
-        `device account; point RPC_URL at a node with no unlocked accounts and re-run`,
+      `INVARIANT VIOLATED: ${label} would sign with ${activeAddress}, not the Ledger account ` +
+        `${ledgerAddress}, although the wallet is chosen by that address. Nothing has been ` +
+        `sent. This is a bug in this repository's signer selection (resolveSigningWallet); ` +
+        `do not work around it`,
     );
   }
   return activeAddress;

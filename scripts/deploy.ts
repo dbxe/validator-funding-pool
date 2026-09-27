@@ -19,6 +19,7 @@ import {
   readLocalBuildArtifacts,
   reportFatalError,
   requireFundingWindowSeconds,
+  resolveSigningWallet,
   resolveTransactionFields,
   VERIFIED_POOL,
   waitForSenderVerifiedReceipt,
@@ -38,7 +39,7 @@ async function main() {
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
-  const [deployer] = await viem.getWalletClients();
+  const deployer = await resolveSigningWallet(connection, "deploy");
   const signer = await assertActiveSigner(connection, deployer.account.address, "deploy");
   // `deploy` is the one command that WRITES the record every other command reads, so it
   // announces the same path at the same point in its output rather than only when it
@@ -98,7 +99,9 @@ async function main() {
   const { contract: pool, deploymentTransaction } = await viem.sendDeploymentTransaction(
     "ValidatorFundingPool",
     constructorArgs,
-    fields,
+    // The chosen wallet, explicitly: left out, hardhat-viem deploys from the FIRST account
+    // `eth_accounts` lists, which on the Ledger path is the node's, not the device's.
+    { client: { wallet: deployer }, ...fields },
   );
   const deploymentReceipt = await waitForSenderVerifiedReceipt(
     publicClient,

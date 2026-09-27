@@ -36,6 +36,7 @@ import {
   MockBeaconNode,
   type Malformation,
 } from "./mock-beacon.js";
+import { REPO_ROOT } from "./paths.js";
 import { POOL_ABI } from "./pool.js";
 import {
   assertActiveSignerPrinted,
@@ -620,6 +621,55 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     // funding review, and above all no transaction.
     assertOutputLacks(result, "Funding review for pool");
     assertOutputLacks(result, "Funded in block");
+  });
+
+  it("on a network with ledgerAccounts the signer is LEDGER_ADDRESS, not the node's first account", async () => {
+    // The local `hardhat node` exposes twenty unlocked accounts, which is exactly the node the
+    // account-confusion entry in SECURITY.md §5 is about: the Ledger plugin lists them FIRST
+    // and appends the device account after them, so a command that took the first account
+    // would resolve the operator's account zero here.
+    const nodeAccounts = await chain.rpc<string[]>("eth_accounts");
+    assert.equal(nodeAccounts[0].toLowerCase(), operator.address.toLowerCase());
+    const ledgerAddress = "0x000000000000000000000000000000000000beef";
+    assert.ok(!nodeAccounts.some((account) => account.toLowerCase() === ledgerAddress));
+    const blockBefore = await chain.publicClient.getBlockNumber();
+
+    // The one run in this suite on the `ledger` network, and it must never reach a device: a
+    // Ledger may be plugged into the machine running it. Two things make sure of that. The run
+    // is refused inside `assertActiveSigner`, by the EXPECTED_SIGNER pin, before any request
+    // the plugin signs — the plugin opens the device only for `eth_sendTransaction`, `eth_sign`,
+    // `personal_sign`, and `eth_signTypedData_v4`, never for `eth_accounts`. And the child runs
+    // with `block-ledger-transport.cjs` preloaded, which replaces the plugin's USB transport
+    // with one that throws, so even a regression that did reach signing could not touch
+    // hardware.
+    const guard = path.join(REPO_ROOT, "test-e2e", "block-ledger-transport.cjs");
+    const result = expectFailure(
+      await runCommand({
+        script: "claim",
+        network: "ledger",
+        env: baseEnv({
+          LEDGER_ADDRESS: ledgerAddress,
+          EXPECTED_SIGNER: operator.address,
+          NODE_OPTIONS: `--require ${guard}`,
+        }),
+      }),
+    );
+
+    // The stand-in was served, so the plugin really was active in this run and really had no
+    // way to a device.
+    assertOutputContains(result, "[e2e] ledger transport replaced by a stand-in that cannot reach a device");
+    assertOutputLacks(result, "Connecting to Ledger");
+    assertOutputLacks(result, "ledger device access is blocked");
+
+    // Chosen by address: the device account, not account zero.
+    assertOutputContains(result, `claim active signer: ${ledgerAddress} (network ledger)`);
+    assertReadableFailure(
+      result,
+      "claim",
+      `claim would sign with ${ledgerAddress}, not the declared EXPECTED_SIGNER ${operator.address}`,
+    );
+    assertOutputLacks(result, "Claimable for");
+    assert.equal(await chain.publicClient.getBlockNumber(), blockBefore);
   });
 
   it("a declared EXPECTED_POOL that the record does not name stops the command dead", async () => {

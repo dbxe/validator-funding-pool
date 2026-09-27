@@ -10,6 +10,7 @@ import {
   printPayoutRecipient,
   readDeployment,
   reportFatalError,
+  resolveSigningWallet,
   resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
@@ -22,7 +23,7 @@ async function main() {
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
-  const [wallet] = await viem.getWalletClients();
+  const wallet = await resolveSigningWallet(connection, "claim");
   const signer = await assertActiveSigner(connection, wallet.account.address, "claim");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },

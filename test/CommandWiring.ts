@@ -43,8 +43,13 @@ function scriptSource(command: string): string {
 /// `sendTransaction`, or a `sendDeploymentTransaction` — with its full argument text, found by
 /// matching parentheses from the opening one.
 function signingCalls(source: string): string[] {
+  return callsMatching(source, /(\.write\.\w+|\.sendTransaction|\.sendDeploymentTransaction)\(/g);
+}
+
+/// Every call whose opening matches `opener` (which must end at the opening parenthesis), with
+/// its full argument text.
+function callsMatching(source: string, opener: RegExp): string[] {
   const calls: string[] = [];
-  const opener = /(\.write\.\w+|\.sendTransaction|\.sendDeploymentTransaction)\(/g;
   for (const match of source.matchAll(opener)) {
     let depth = 0;
     const start = match.index + match[0].length - 1;
@@ -104,6 +109,26 @@ describe("transacting-command wiring", function () {
         assert.ok(
           /\bfields\b/.test(call),
           `scripts/${command}.ts sends a transaction without the resolved fields: ${call}`,
+        );
+      }
+
+      // The signer is chosen by `resolveSigningWallet` and nowhere else. `getWalletClients()`
+      // taken positionally, or a contract or deployment helper left to hardhat-viem's default
+      // wallet, is the first account `eth_accounts` lists — on the Ledger path, the node's.
+      assert.ok(
+        source.includes(`resolveSigningWallet(connection, "${command}")`),
+        `scripts/${command}.ts does not choose its wallet through resolveSigningWallet under its own label`,
+      );
+      assert.ok(
+        !source.includes("getWalletClients("),
+        `scripts/${command}.ts takes a wallet client by position`,
+      );
+      const clientTaking = callsMatching(source, /\.(getContractAt|sendDeploymentTransaction)\(/g);
+      assert.ok(clientTaking.length > 0);
+      for (const call of clientTaking) {
+        assert.ok(
+          /client: \{ wallet(: \w+)? \}/.test(call),
+          `scripts/${command}.ts leaves hardhat-viem to pick the wallet: ${call}`,
         );
       }
       assert.ok(

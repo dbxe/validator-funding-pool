@@ -21,6 +21,7 @@ import {
   readDeployment,
   readPredepositAndTopUpDepositData,
   reportFatalError,
+  resolveSigningWallet,
   resolveTransactionFields,
   TOP_UP_GWEI,
   validateDepositData,
@@ -37,7 +38,7 @@ async function main() {
   const connection = await network.create();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
-  const [wallet] = await viem.getWalletClients();
+  const wallet = await resolveSigningWallet(connection, "fund");
   const signer = await assertActiveSigner(connection, wallet.account.address, "fund");
   const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool, {
     client: { wallet },
