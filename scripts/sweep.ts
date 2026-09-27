@@ -7,10 +7,10 @@ import {
   assertFeeRecipientForwarderMatchesDeployment,
   assertSweepWasCredited,
   formatWei,
-  printSuggestedFees,
   readDeployment,
   readPoolOutflowsInBlock,
   reportFatalError,
+  resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -52,8 +52,10 @@ async function main() {
   console.log(`Forwarder pending balance: ${formatWei(forwarderBalanceBefore)}`);
   console.log(`Pool balance before: ${formatWei(poolBalanceBefore)}`);
 
-  await printSuggestedFees(publicClient, "sweep");
-  const hash = await forwarder.write.sweep();
+  const fields = await resolveTransactionFields(publicClient, "sweep", () =>
+    forwarder.estimateGas.sweep(),
+  );
+  const hash = await forwarder.write.sweep(fields);
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "sweep");
 
   // Pinned to the sweep's own block rather than read at head. The reads above happened

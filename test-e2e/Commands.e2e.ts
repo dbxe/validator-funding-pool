@@ -11,6 +11,7 @@ import {
   DEFAULT_WITHDRAWAL_REQUEST_PREDEPLOY,
   deriveWithdrawalCredentials,
   formatWei,
+  GAS_MARGIN_PERCENT,
   VALIDATOR_DEPOSIT_GWEI,
   type DeploymentRecord,
 } from "../scripts/lib/common.js";
@@ -184,6 +185,76 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
   }
 
   // -------------------------------------------------------------------------
+  // Signed fields
+  // -------------------------------------------------------------------------
+
+  /// Reads the gas limit and fee fields a command printed before signing, and the
+  /// `eth_estimateGas` answer it says the gas limit came from.
+  function printedFields(result: CommandResult, script: string) {
+    const header = `${script} fees, as this endpoint suggests them and as this command signs them:`;
+    assertOutputContains(result, header);
+    const block = result.stdout.slice(result.stdout.indexOf(header));
+    const field = (pattern: RegExp, name: string): RegExpMatchArray => {
+      const match = block.match(pattern);
+      assert.ok(match !== null, `${result.commandLine} printed no ${name}:\n${result.output}`);
+      return match;
+    };
+    const gasLine = field(/gas limit: +(\d+) \(eth_estimateGas (\d+) \+ (\d+)% margin\)/, "gas limit");
+    return {
+      maxPriorityFeePerGas: BigInt(field(/max priority fee per gas: +(\d+) wei/, "priority fee")[1]),
+      maxFeePerGas: BigInt(field(/max fee per gas: +(\d+) wei/, "max fee")[1]),
+      gas: BigInt(gasLine[1]),
+      estimate: BigInt(gasLine[2]),
+      marginPercent: BigInt(gasLine[3]),
+    };
+  }
+
+  /// The transaction a command just mined, read back from the chain, carries exactly the gas
+  /// limit and fee fields the command printed — and the gas limit is the estimate times the
+  /// margin, where the estimate is re-derived here, independently, against the block before.
+  ///
+  /// This is the property the Ledger path depends on: `@nomicfoundation/hardhat-ledger` signs
+  /// only a request that already carries `gas` and the fee fields, because hardhat's own
+  /// fillers run after it. On this keystore path hardhat would have filled them had the
+  /// command not, so equality with the printed numbers is what proves the command set them
+  /// itself. Every command mines one transaction into its own block under automine, so the
+  /// latest block holds exactly it.
+  async function assertSignedAsPrinted(result: CommandResult, script: string, signer: Address) {
+    const printed = printedFields(result, script);
+    const block = await chain.publicClient.getBlock({ blockTag: "latest", includeTransactions: true });
+    const mined = block.transactions.filter(
+      (transaction) => transaction.from.toLowerCase() === signer.toLowerCase(),
+    );
+    assert.equal(mined.length, 1, `expected one ${script} transaction in block ${block.number}`);
+    const [transaction] = mined;
+
+    assert.equal(transaction.type, "eip1559");
+    assert.equal(transaction.gas, printed.gas, `${script} signed a gas limit it did not print`);
+    assert.equal(transaction.maxFeePerGas, printed.maxFeePerGas, `${script} max fee`);
+    assert.equal(
+      transaction.maxPriorityFeePerGas,
+      printed.maxPriorityFeePerGas,
+      `${script} max priority fee`,
+    );
+
+    assert.equal(printed.marginPercent, GAS_MARGIN_PERCENT - 100n);
+    assert.equal(printed.gas, (printed.estimate * GAS_MARGIN_PERCENT) / 100n);
+    const reestimate = await chain.publicClient.estimateGas({
+      account: transaction.from,
+      to: transaction.to ?? undefined,
+      data: transaction.input,
+      value: transaction.value,
+      blockNumber: block.number - 1n,
+    });
+    assert.equal(
+      reestimate,
+      printed.estimate,
+      `${script} printed estimate ${printed.estimate}, but the same transaction estimates at ` +
+        `${reestimate} against the block before it`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // 1. deploy
   // -------------------------------------------------------------------------
 
@@ -237,6 +308,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assert.equal(record.fundingWindowDuration, "86400");
     assert.equal(record.withdrawalCredentials.toLowerCase(), withdrawalCredentials);
     assertOutputContains(result, `Pool deployed: ${pool}`);
+    await assertSignedAsPrinted(result, "deploy", operator.address);
 
     // The default addresses in the record are the ones the harness installed the real
     // system contracts at, which is what makes the record's code hashes mean anything.
@@ -398,6 +470,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, `Committing validator ${deposits.pubkey} to ${pool}`);
     assertOutputContains(result, "Submitting operator-funded predeposit: 1 ETH");
     assertOutputContains(result, "Predeposited in block ");
+    await assertSignedAsPrinted(result, "commit-predeposit", operator.address);
 
     assert.equal(await readPool<number>("state"), 1);
     assert.equal(await readPool<boolean>("predepositSubmitted"), true);
@@ -492,6 +565,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     // deadline it produced. Nothing about the attempt chose it.
     assertOutputContains(result, "Funding window (immutable): 86400s");
     assertOutputContains(result, `Funding deadline: ${await fundingDeadline()}`);
+    await assertSignedAsPrinted(result, "open-funding-attempt", operator.address);
 
     assert.equal(await readPool<number>("state"), 2);
     assert.equal(await readPool<bigint>("fundingAttempt"), 1n);
@@ -732,11 +806,10 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
     assertOutputContains(result, "fund head beacon fresh-predeposit preflight passed");
     assertOutputContains(result, "fund pre-broadcast head recheck passed");
-    // Nothing here chooses a fee: hardhat fills them from the endpoint. On the keystore path
-    // nothing renders them either, so they are printed — before the transaction, which is the
-    // only side of it where a number is any use.
-    assertOutputContains(result, "fund fees, as this endpoint suggests them and hardhat will fill them:");
-    assertOutputContains(result, "gas limit:                filled from eth_estimateGas");
+    // The command sets the gas limit and both fee fields itself, from the endpoint's answers,
+    // and prints them before the transaction — the only side of it where a number is any use.
+    // On the keystore path nothing else renders them.
+    assertOutputContains(result, "fund fees, as this endpoint suggests them and as this command signs them:");
     assertOutputOrder(result, "max fee per gas:", "Funded in block ");
     assertOutputContains(
       result,
@@ -744,6 +817,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         `${participant.address.toLowerCase()} with exactly ${TARGET_WEI} wei (16 ETH)`,
     );
     assertOutputContains(result, "Funded in block ");
+    await assertSignedAsPrinted(result, "fund", participant.address);
 
     assert.equal(await readPool<bigint>("activeFundedWeiOf", [participant.address]), TARGET_WEI);
     assert.equal(await readPool<bigint>("fundingRemainingWeiOf", [participant.address]), 0n);
@@ -802,6 +876,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     );
     assertOutputContains(result, `Closing expired funding attempt for ${pool}`);
     assertOutputContains(result, "Closed in block ");
+    await assertSignedAsPrinted(result, "close-expired-funding-attempt", operator.address);
 
     assert.equal(await readPool<number>("state"), 1);
     assert.equal(await readPool<bigint>("refundableWeiOf", [participant.address]), TARGET_WEI);
@@ -839,6 +914,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       `refund recipient confirmed from the receipt: the pool emitted Refunded paying ` +
         `${TARGET_WEI} wei (16 ETH) to ${participant.address}`,
     );
+    await assertSignedAsPrinted(result, "refund", participant.address);
 
     assert.equal(await readPool<bigint>("refundableWeiOf", [participant.address]), 0n);
     const after = await chain.publicClient.getBalance({ address: participant.address });
@@ -886,6 +962,8 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         `${participant.address.toLowerCase()} with exactly ${TARGET_WEI} wei (16 ETH)`,
     );
     assertOutputContains(result, "Funded in block ");
+    // The plain-transfer path is the other send: `wallet.sendTransaction`, not a contract write.
+    await assertSignedAsPrinted(result, "fund", participant.address);
     assert.equal(await readPool<bigint>("activeFundedWeiOf", [participant.address]), TARGET_WEI);
   });
 
@@ -951,6 +1029,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, "top-up head beacon fresh-predeposit preflight passed");
     assertOutputContains(result, "top-up pre-broadcast head recheck passed");
     assertOutputContains(result, "Topped up in block ");
+    await assertSignedAsPrinted(result, "top-up", operator.address);
 
     assert.equal(await readPool<number>("state"), 3);
     assert.equal(await readPool<boolean>("topUpSubmitted"), true);
@@ -1102,6 +1181,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputContains(result, `Requesting full exit for ${deposits.pubkey}`);
     assertOutputContains(result, `EIP-7002 fee: ${fee} wei`);
     assertOutputContains(result, "Exit requested in block ");
+    await assertSignedAsPrinted(result, "request-exit", operator.address);
 
     assert.equal(await readPool<bigint>("exitRequestAttemptCount"), 1n);
     assert.equal(await readPool<bigint>("lastExitRequestFeePaid"), fee);
@@ -1183,6 +1263,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     forwarder = record.feeRecipientForwarder;
     assertOutputContains(result, `Fee recipient forwarder deployed: ${forwarder}`);
     assertOutputContains(result, `Immutable pool destination: ${pool}`);
+    await assertSignedAsPrinted(result, "deploy-forwarder", operator.address);
   });
 
   it("deploy-forwarder refuses while EXPECTED_FORWARDER is declared, before broadcasting", async () => {
@@ -1282,6 +1363,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       `sweep credit confirmed: the forwarder's Swept event reports ${formatWei(rewards)} ` +
         `forwarded, and the pool's balance rose by exactly the ${formatWei(rewards)} it was holding`,
     );
+    await assertSignedAsPrinted(result, "sweep", operator.address);
 
     assert.equal(await chain.publicClient.getBalance({ address: forwarder }), 0n);
     assert.equal(await chain.publicClient.getBalance({ address: pool }), poolBefore + rewards);
@@ -1309,7 +1391,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         participant.address.toLowerCase(),
     );
     assertOutputContains(result, "A Ledger will NOT render it");
-    // Pre-BROADCAST, not merely pre-success-line. The fee preview is the last thing printed
+    // Pre-BROADCAST, not merely pre-success-line. The fee lines are the last thing printed
     // before the write call is made, so a notice above it is a notice the operator has while
     // the recipient is still a decision. Asserting only against "Claimed to ... in block"
     // would pass for a notice printed after the transaction was already composed and sent.
@@ -1335,6 +1417,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       `claim recipient confirmed from the receipt: the pool emitted Claimed paying ` +
         `${formatWei(claimable)} to ${outsider.address}`,
     );
+    await assertSignedAsPrinted(result, "claim", participant.address);
 
     assert.equal(await readPool<bigint>("claimable", [participant.address]), 0n);
     assert.equal(
@@ -1371,6 +1454,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       `claim recipient confirmed from the receipt: the pool emitted Claimed paying ` +
         `${formatWei(claimable)} to ${operator.address}`,
     );
+    await assertSignedAsPrinted(result, "claim", operator.address);
     assert.equal(await readPool<bigint>("claimable", [operator.address]), 0n);
   });
 
@@ -1750,7 +1834,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         operator.address.toLowerCase(),
     );
     assertOutputContains(result, "A Ledger will NOT render it");
-    // See the claim case: the fee preview is the last line before the write call, so it is
+    // See the claim case: the fee lines are the last thing before the write call, so it is
     // what "pre-broadcast" has to be measured against.
     assertOutputOrder(
       result,
@@ -1772,6 +1856,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       `refund recipient confirmed from the receipt: the pool emitted Refunded paying ` +
         `${formatWei(partial)} to ${outsider.address}`,
     );
+    await assertSignedAsPrinted(result, "refund", operator.address);
 
     assert.equal(
       await chain.publicClient.getBalance({ address: outsider.address }),

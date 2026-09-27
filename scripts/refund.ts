@@ -8,9 +8,9 @@ import {
   assertPayoutReachedRecipient,
   formatWei,
   printPayoutRecipient,
-  printSuggestedFees,
   readDeployment,
   reportFatalError,
+  resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -43,10 +43,13 @@ async function main() {
   // mining against the pool's own event.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   printPayoutRecipient("refund", deployment.pool, signer, recipient, refundable);
-  await printSuggestedFees(publicClient, "refund");
-  const hash = recipient.toLowerCase() === signer.toLowerCase()
-    ? await pool.write.refund()
-    : await pool.write.refundTo([recipient]);
+  const toSelf = recipient.toLowerCase() === signer.toLowerCase();
+  const fields = await resolveTransactionFields(publicClient, "refund", () =>
+    toSelf ? pool.estimateGas.refund() : pool.estimateGas.refundTo([recipient]),
+  );
+  const hash = toSelf
+    ? await pool.write.refund(fields)
+    : await pool.write.refundTo([recipient], fields);
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "refund");
   assertPayoutReachedRecipient(
     receipt,

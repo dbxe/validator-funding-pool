@@ -1,4 +1,5 @@
-import { network } from "hardhat";
+import { artifacts, network } from "hardhat";
+import { encodeDeployData } from "viem";
 
 import {
   assertActiveSigner,
@@ -10,14 +11,15 @@ import {
   assertFreshDeploymentMatchesExpectedPool,
   assertHasCode,
   assertRuntimeCodeMatchesLocalBuild,
+  asHex,
   codeHash,
   defaultDepositContract,
   deploymentPath,
   envAddress,
-  printSuggestedFees,
   readLocalBuildArtifacts,
   reportFatalError,
   requireFundingWindowSeconds,
+  resolveTransactionFields,
   VERIFIED_POOL,
   waitForSenderVerifiedReceipt,
   writeDeployment,
@@ -69,14 +71,34 @@ async function main() {
   // printed by `status` and by `open-funding-attempt`, both read back from the pool.
   console.log(`Funding window (immutable): ${fundingWindowDuration}s`);
 
-  await printSuggestedFees(publicClient, "deploy");
+  const constructorArgs = [
+    depositContract,
+    withdrawalRequestPredeploy,
+    operator,
+    fundingWindowDuration,
+  ] as const;
+  // Estimated from the same artifact, through the same artifact manager, that
+  // `sendDeploymentTransaction` deploys from, so the estimate is of the creation transaction
+  // that is sent.
+  const artifact = await artifacts.readArtifact("ValidatorFundingPool");
+  const fields = await resolveTransactionFields(publicClient, "deploy", () =>
+    publicClient.estimateGas({
+      account: signer,
+      data: encodeDeployData({
+        abi: artifact.abi,
+        bytecode: asHex(artifact.bytecode),
+        args: constructorArgs,
+      }),
+    }),
+  );
   // sendDeploymentTransaction rather than deployContract: it surfaces the deployment
   // transaction hash, which is what the post-broadcast sender check needs. The address
   // it returns is derived from the sender and nonce before mining, so the receipt is
   // also checked to have created a contract at exactly that address.
   const { contract: pool, deploymentTransaction } = await viem.sendDeploymentTransaction(
     "ValidatorFundingPool",
-    [depositContract, withdrawalRequestPredeploy, operator, fundingWindowDuration],
+    constructorArgs,
+    fields,
   );
   const deploymentReceipt = await waitForSenderVerifiedReceipt(
     publicClient,

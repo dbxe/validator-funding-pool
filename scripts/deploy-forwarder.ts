@@ -1,6 +1,8 @@
-import { network } from "hardhat";
+import { artifacts, network } from "hardhat";
+import { encodeDeployData } from "viem";
 
 import {
+  asHex,
   assertActiveSigner,
   assertCompilationNotSkipped,
   assertDeployedAt,
@@ -8,9 +10,9 @@ import {
   assertFeeRecipientForwarderMatchesDeployment,
   assertForwarderAuthenticity,
   assertFreshForwarderMatchesExpectedForwarder,
-  printSuggestedFees,
   readDeployment,
   reportFatalError,
+  resolveTransactionFields,
   waitForSenderVerifiedReceipt,
   writeDeployment,
 } from "./lib/common.js";
@@ -37,12 +39,25 @@ async function main() {
   // here rather than an address quietly overwritten.
   await assertDeploymentIntegrity(publicClient, pool, deployment, "authenticate-forwarder");
 
-  await printSuggestedFees(publicClient, "deploy-forwarder");
-  // See deploy.ts: sendDeploymentTransaction is used for the transaction hash the
-  // post-broadcast sender check needs.
+  // See deploy.ts: the estimate is of the creation transaction that is sent, and
+  // sendDeploymentTransaction is used for the transaction hash the post-broadcast sender
+  // check needs.
+  const constructorArgs = [deployment.pool] as const;
+  const artifact = await artifacts.readArtifact("FeeRecipientForwarder");
+  const fields = await resolveTransactionFields(publicClient, "deploy-forwarder", () =>
+    publicClient.estimateGas({
+      account: signer,
+      data: encodeDeployData({
+        abi: artifact.abi,
+        bytecode: asHex(artifact.bytecode),
+        args: constructorArgs,
+      }),
+    }),
+  );
   const { contract: forwarder, deploymentTransaction } = await viem.sendDeploymentTransaction(
     "FeeRecipientForwarder",
-    [deployment.pool],
+    constructorArgs,
+    fields,
   );
   const deploymentReceipt = await waitForSenderVerifiedReceipt(
     publicClient,

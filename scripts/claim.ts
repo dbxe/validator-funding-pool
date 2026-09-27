@@ -8,9 +8,9 @@ import {
   assertPayoutReachedRecipient,
   formatWei,
   printPayoutRecipient,
-  printSuggestedFees,
   readDeployment,
   reportFatalError,
+  resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -47,10 +47,13 @@ async function main() {
   // it against an independently derived one right here.
   const recipient = process.env.RECIPIENT ? asAddress(process.env.RECIPIENT) : signer;
   printPayoutRecipient("claim", deployment.pool, signer, recipient, claimable);
-  await printSuggestedFees(publicClient, "claim");
-  const hash = recipient.toLowerCase() === signer.toLowerCase()
-    ? await pool.write.claim()
-    : await pool.write.claimTo([recipient]);
+  const toSelf = recipient.toLowerCase() === signer.toLowerCase();
+  const fields = await resolveTransactionFields(publicClient, "claim", () =>
+    toSelf ? pool.estimateGas.claim() : pool.estimateGas.claimTo([recipient]),
+  );
+  const hash = toSelf
+    ? await pool.write.claim(fields)
+    : await pool.write.claimTo([recipient], fields);
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "claim");
   // And checked after mining against the pool's own event, where `recipient` is a topic:
   // the receipt is the next and last place the address can be verified at all.

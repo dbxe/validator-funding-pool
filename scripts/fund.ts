@@ -17,11 +17,11 @@ import {
   formatWei,
   fundViaPlainTransfer,
   PREDEPOSIT_GWEI,
-  printSuggestedFees,
   readBeaconGenesisForkVersion,
   readDeployment,
   readPredepositAndTopUpDepositData,
   reportFatalError,
+  resolveTransactionFields,
   TOP_UP_GWEI,
   validateDepositData,
   VALIDATOR_DEPOSIT_WEI,
@@ -121,7 +121,12 @@ async function main() {
       `via ${viaTransfer ? "plain transfer (zero calldata)" : "fund() calldata"}`,
   );
 
-  await printSuggestedFees(publicClient, "fund");
+  // Estimated as exactly the transaction that is sent: the same path, destination, and value.
+  const fields = await resolveTransactionFields(publicClient, "fund", () =>
+    viaTransfer
+      ? publicClient.estimateGas({ account: signer, to: deployment.pool, value: amount })
+      : pool.estimateGas.fund({ value: amount }),
+  );
   // Final race-narrowing re-reads, and the last thing this script does before the
   // transaction is composed. They cannot close the race, only shorten it: see
   // "Plain-Transfer Funding" in ACCOUNTING.md for the one window where a plain transfer
@@ -129,10 +134,10 @@ async function main() {
   //
   // The beacon leg matters just as much as the on-chain leg here. The full preflight ran
   // before the funding review printed and before the operator started reading it, so this
-  // removes the largest part of the window. What is left after it is NOT seconds: hardhat's
-  // fee, gas-limit, and nonce round trips, and on the Ledger path the device approval, which
-  // is unbounded and cannot be followed by another check — the plugin signs and broadcasts in
-  // one call. `SECURITY.md` §5 states the whole window.
+  // removes the largest part of the window. What is left after it is NOT seconds: the nonce
+  // and chain-id round trips, and on the Ledger path the device approval, which is unbounded
+  // and cannot be followed by another check — the plugin signs and broadcasts in one call.
+  // `SECURITY.md` §5 states the whole window.
   await assertBeaconValidatorStillFresh(
     predeposit.pubkey,
     expectedCredentials,
@@ -142,8 +147,8 @@ async function main() {
   await assertStillFundable(pool, publicClient, signer, amount, reviewed.fundingAttempt);
 
   const hash = viaTransfer
-    ? await wallet.sendTransaction({ to: deployment.pool, value: amount })
-    : await pool.write.fund({ value: amount });
+    ? await wallet.sendTransaction({ to: deployment.pool, value: amount, ...fields })
+    : await pool.write.fund({ value: amount, ...fields });
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "fund");
   // A successful receipt is not proof of funding. On the plain-transfer path a pool that
   // reached `ToppedUp` accepts the ETH as proceeds and emits `EthReceivedViaCall` instead

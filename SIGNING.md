@@ -99,17 +99,18 @@ A Ledger clear-signs a zero-calldata ETH transfer: destination address, amount, 
 
 Funding is the only action with a clear-signed path, and it is the action that moves the most ETH. Everything else is blind-signed today.
 
-Fees are filled in by hardhat from whatever the connected endpoint answers — `eth_feeHistory` for the two EIP-1559 fields, `eth_estimateGas` for the gas limit — and nothing in this repository picks or bounds them. On the device that is fine: a Ledger renders the fee on every screen above, so an endpoint that suggested an absurd priority fee is showing it to a person before the signature. Off the device there is no such gate, so every command that transacts prints the fields first:
+Every write sets its own gas limit and fee fields before the transaction reaches the signer — the Ledger plugin refuses a transaction without them (`HHE713: Missing param "gas"`), because it sees the request before hardhat's own fillers do. The numbers come from whatever the connected endpoint answers: `eth_estimateGas` for the gas limit, plus a 20% margin, and `eth_feeHistory` for the two EIP-1559 fields, computed with hardhat's own arithmetic. Nothing in this repository bounds them. On the device that is fine: a Ledger renders the fee on every screen above, so an endpoint that suggested an absurd priority fee is showing it to a person before the signature. Off the device there is no such gate, so every command that transacts prints the fields first:
 
 ```
-fund fees, as this endpoint suggests them and hardhat will fill them:
+fund fees, as this endpoint suggests them and as this command signs them:
   base fee per gas:         8000000000 wei (8 gwei)
   max priority fee per gas: 1500000000 wei (1.5 gwei)
   max fee per gas:          10125000000 wei (10.125 gwei)
-  gas limit:                filled from eth_estimateGas when the transaction is composed, so it is not previewed here
+  gas limit:                255600 (eth_estimateGas 213000 + 20% margin)
+  max total fee:            2587950000000000 wei (0.00258795 ETH) (gas limit × max fee per gas)
 ```
 
-It is a preview, computed with hardhat's own arithmetic so the max fee is the number the device will show — compare the two. Hardhat re-reads when it composes the transaction, so the signed values may differ by a block's worth of base fee. There is no ceiling and nothing is refused: an endpoint willing to inflate your fees is an endpoint [`SECURITY.md`](SECURITY.md) §2 already tells you not to use.
+These are the values that are signed, not a preview: nothing downstream re-reads or rewrites them, so on the Ledger path the fee the device renders comes from exactly these fields — compare the two. The margin is there because a deposit landing ahead of `commit-predeposit` or `top-up` can make the deposit contract's Merkle update a few hashes longer than it was when estimated; unused gas is not charged, so it raises the most a transaction can cost, not what it costs. If the estimate itself fails — a transaction that would revert as composed — the command refuses before anything is signed and names the revert. There is no ceiling on the fee and nothing is refused for being expensive: an endpoint willing to inflate your fees is an endpoint [`SECURITY.md`](SECURITY.md) §2 already tells you not to use.
 
 The `request-exit` value deserves the extra words in the table. `MAX_FEE_WEI` is a ceiling the caller sets, not a payment: `requestExit(uint256)` reads the live EIP-7002 fee, reverts if it exceeds the cap, forwards exactly the live fee to the predeploy, and refunds the difference to the caller in the same transaction (`ValidatorFundingPool.requestExit`).
 

@@ -118,7 +118,7 @@ And a path component in `BEACON_NODE_URL` is preserved, so a hosted endpoint of 
 
 `fund` and `top-up` re-run the entire head-state preflight once more as the last thing they do before composing the transaction, and require the balance to equal the value the full preflight settled on. That removes the largest part of the window — the funding review and everything you read before deciding.
 
-It does not shrink the rest to seconds: after the recheck come hardhat's fee, gas-limit, and nonce round trips and, on the Ledger path, the device confirmation, which is a person pressing buttons and is bounded by nothing. No recheck after the approval is possible, because the plugin signs and broadcasts in one call. The stretch from signing to inclusion is beyond any of it. [`SECURITY.md`](SECURITY.md) §5 states the whole window and the deferred pipeline that would close the device half.
+It does not shrink the rest to seconds: after the recheck come the nonce and chain-id round trips — the gas limit and fees are already set, resolved just before the recheck — and, on the Ledger path, the device confirmation, which is a person pressing buttons and is bounded by nothing. No recheck after the approval is possible, because the plugin signs and broadcasts in one call. The stretch from signing to inclusion is beyond any of it. [`SECURITY.md`](SECURITY.md) §5 states the whole window and the deferred pipeline that would close the device half.
 
 ### `request-exit` Is Advisory By Design
 

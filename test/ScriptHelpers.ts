@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Address, type Hex } from "viem";
 
 import {
+  applyGasMargin,
   assertActiveSigner,
   assertCommittedPubkeyMatchesLocal,
   assertCommittedPubkeyMatchesLocalIfReadable,
@@ -31,13 +32,14 @@ import {
   formatPoolState,
   formatWei,
   fundViaPlainTransfer,
+  GAS_MARGIN_PERCENT,
   optionalEnvBigInt,
   parseBigIntList,
   printPayoutRecipient,
-  printSuggestedFees,
   reportForwarderWithoutRefusing,
   requireFundingAllocation,
   resolveSuggestedFees,
+  resolveTransactionFields,
   requireFundingWindowSeconds,
   PREDEPOSIT_WEI,
   waitForSenderVerifiedReceipt,
@@ -1545,7 +1547,7 @@ describe("assertFundingWindowNotDeclared", function () {
   });
 });
 
-describe("the fee preview printed before signing", function () {
+describe("the fee fields, computed with hardhat's own arithmetic", function () {
   /// Reproduces what hardhat's `AutomaticGasPriceHandler` would compute from the same
   /// responses, independently of the implementation:
   /// `maxFeePerGas = baseFeePerGas * 9^2 / 8^2` (three full blocks' worth of 1/8 growth),
@@ -1574,7 +1576,7 @@ describe("the fee preview printed before signing", function () {
     };
   }
 
-  it("computes the fields hardhat will fill, from the next block's base fee", async function () {
+  it("computes the fields the way hardhat would fill them, from the next block's base fee", async function () {
     const client = feeClient(8_000_000_000n, 1_500_000_000n);
 
     const fees = await resolveSuggestedFees(client);
@@ -1599,41 +1601,135 @@ describe("the fee preview printed before signing", function () {
 
   it("keeps maxFeePerGas at or above the priority fee, as hardhat does", async function () {
     // A base fee far below an extreme priority fee. hardhat adds them rather than signing an
-    // impossible pair, and the preview must print the same number the device will show.
+    // impossible pair, and so does this.
     const fees = await resolveSuggestedFees(feeClient(1n, 500_000_000_000n));
     assert.equal(fees.maxFeePerGas, 500_000_000_000n + (1n * 81n) / 64n);
     assert.ok(fees.maxFeePerGas >= fees.maxPriorityFeePerGas);
   });
+});
 
-  it("prints all three fields, in gwei, and says the gas limit is not previewed", async function () {
+describe("the transaction fields every write signs", function () {
+  /// The fee reads `resolveSuggestedFees` makes, plus the latest block's gas limit. Answers are
+  /// fixed, so a second read of the same client returns the same fees — which is what lets
+  /// the test compare against `resolveSuggestedFees` directly.
+  function fieldsClient(blockGasLimit = 36_000_000n) {
+    return {
+      getFeeHistory: async () => ({
+        baseFeePerGas: [7_000_000_000n, 8_000_000_000n],
+        gasUsedRatio: [0.5],
+        oldestBlock: 1n,
+        reward: [[1_500_000_000n]],
+      }),
+      estimateMaxPriorityFeePerGas: async () => 1n,
+      getBlock: async () => ({ gasLimit: blockGasLimit }),
+    };
+  }
+
+  it("multiplies the estimate by the 120% margin, rounding down", function () {
+    // About the size of a real `topUpValidator` estimate.
+    assert.equal(GAS_MARGIN_PERCENT, 120n);
+    assert.equal(applyGasMargin(213_000n, 36_000_000n, "top-up"), 255_600n);
+    assert.equal(applyGasMargin(21_000n, 36_000_000n, "fund"), 25_200n);
+    // 7 * 1.2 = 8.4: the fraction is dropped, never rounded up past the stated margin.
+    assert.equal(applyGasMargin(7n, 36_000_000n, "fund"), 8n);
+  });
+
+  it("caps the margin at 95% of the block gas limit, and refuses an estimate above that", function () {
+    // 900,000 * 1.2 = 1,080,000, above both the limit and the 950,000 ceiling.
+    assert.equal(applyGasMargin(900_000n, 1_000_000n, "deploy"), 950_000n);
+    // Exactly at the ceiling: signed at the ceiling, which is still the estimate.
+    assert.equal(applyGasMargin(950_000n, 1_000_000n, "deploy"), 950_000n);
+    // Below the estimate would be a transaction certain to run out of gas.
+    assert.throws(
+      () => applyGasMargin(950_001n, 1_000_000n, "deploy"),
+      /deploy: eth_estimateGas returned 950001 gas, above 95% of the latest block's gas limit \(1000000\)\. Nothing has been sent/,
+    );
+  });
+
+  it("returns the fee fields the fee source computes, and prints exactly what it returns", async function () {
+    const client = fieldsClient();
+    const expected = await resolveSuggestedFees(client);
     const log = captureLog();
+    let fields: Awaited<ReturnType<typeof resolveTransactionFields>>;
     try {
-      await printSuggestedFees(feeClient(8_000_000_000n, 1_500_000_000n), "fund");
-      assert.equal(log.lines.length, 1);
-      assert.match(log.lines[0], /fund fees, as this endpoint suggests them/);
-      assert.match(log.lines[0], /base fee per gas: +8000000000 wei \(8 gwei\)/);
-      assert.match(log.lines[0], /max priority fee per gas: +1500000000 wei \(1\.5 gwei\)/);
-      assert.match(log.lines[0], /max fee per gas: +10125000000 wei \(10\.125 gwei\)/);
-      assert.match(log.lines[0], /gas limit: +filled from eth_estimateGas/);
-      // It is a preview, and says so: hardhat re-reads when it composes the transaction.
-      assert.match(log.lines[0], /the signed values may differ by a block/);
+      fields = await resolveTransactionFields(client, "top-up", async () => 213_000n);
     } finally {
       log.restore();
     }
+
+    assert.deepEqual(fields, {
+      gas: 255_600n,
+      maxFeePerGas: expected.maxFeePerGas,
+      maxPriorityFeePerGas: expected.maxPriorityFeePerGas,
+    });
+    // 8 gwei * 81 / 64, and the 50th-percentile reward: hardhat's own arithmetic.
+    assert.equal(fields.maxFeePerGas, 10_125_000_000n);
+    assert.equal(fields.maxPriorityFeePerGas, 1_500_000_000n);
+
+    assert.equal(log.lines.length, 1);
+    const printed = log.lines[0];
+    assert.match(printed, /^top-up fees, as this endpoint suggests them and as this command signs them:/);
+    assert.match(printed, /base fee per gas: +8000000000 wei \(8 gwei\)/);
+    assert.match(printed, /max priority fee per gas: +1500000000 wei \(1\.5 gwei\)/);
+    assert.match(printed, /max fee per gas: +10125000000 wei \(10\.125 gwei\)/);
+    assert.match(printed, /gas limit: +255600 \(eth_estimateGas 213000 \+ 20% margin\)/);
+    // 255,600 * 10.125 gwei.
+    assert.match(printed, /max total fee: +2587950000000000 wei \(0\.00258795 ETH\)/);
+    // No longer a preview: what is printed is what is signed.
+    assert.match(printed, /so they are the values that get signed/);
+    assert.doesNotMatch(printed, /may differ/);
   });
 
-  it("never ends a run: an endpoint that cannot answer costs a line, not the command", async function () {
+  it("refuses, naming the command and the decoded revert, when the estimate fails", async function () {
+    // The shape viem gives a contract estimate that reverts: the decoded custom error rides on
+    // `data` somewhere down the cause chain.
+    const revert = Object.assign(new Error("execution reverted"), {
+      shortMessage: 'The contract function "closeExpiredFundingAttempt" reverted.',
+      data: { errorName: "FundingStillOpen", args: [] },
+    });
+    const log = captureLog();
+    let caught: unknown;
+    try {
+      await resolveTransactionFields(fieldsClient(), "close-expired-funding-attempt", async () => {
+        throw revert;
+      });
+    } catch (error) {
+      caught = error;
+    } finally {
+      log.restore();
+    }
+
+    assert.ok(caught instanceof Error);
+    assert.equal(caught.cause, revert);
+    const lines = describeFatalError(caught);
+    assert.match(lines[0], /^close-expired-funding-attempt: eth_estimateGas failed for this transaction/);
+    assert.match(lines[0], /Nothing has been sent/);
+    // The revert name stays where the operator looks for it, directly under the first line.
+    assert.equal(lines[1], "Contract error: FundingStillOpen()");
+    // Nothing printed: a refused transaction has no fields to show.
+    assert.deepEqual(log.lines, []);
+  });
+
+  it("refuses when the endpoint cannot supply the fee fields, rather than sending without them", async function () {
     const broken = {
-      getFeeHistory: async () => {
+      ...fieldsClient(),
+      getFeeHistory: async (): Promise<never> => {
         throw new Error("eth_feeHistory unsupported");
       },
-      estimateMaxPriorityFeePerGas: async () => 1n,
     };
     const log = captureLog();
     try {
-      await assert.doesNotReject(() => printSuggestedFees(broken, "sweep"));
-      assert.match(log.lines[0], /sweep fees: could not be previewed \(eth_feeHistory unsupported\)/);
-      assert.match(log.lines[0], /Hardhat will still fill them from this endpoint/);
+      await assert.rejects(
+        () => resolveTransactionFields(broken, "sweep", async () => 50_000n),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /^sweep: could not read the fee fields or the block gas limit/);
+          assert.match(error.message, /Nothing has been sent/);
+          assert.match(String((error.cause as Error).message), /eth_feeHistory unsupported/);
+          return true;
+        },
+      );
+      assert.deepEqual(log.lines, []);
     } finally {
       log.restore();
     }

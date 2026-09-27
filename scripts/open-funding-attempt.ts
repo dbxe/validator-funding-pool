@@ -5,10 +5,10 @@ import {
   assertCompilationNotSkipped,
   assertDeploymentIntegrity,
   assertFundingWindowNotDeclared,
-  printSuggestedFees,
   readDeployment,
   reportFatalError,
   requireFundingAllocation,
+  resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -50,8 +50,10 @@ async function main() {
   for (let i = 0; i < participants.length; ++i) {
     console.log(`Participant ${i}: ${participants[i]} target=${fundingTargetsGwei[i]} Gwei`);
   }
-  await printSuggestedFees(publicClient, "open-funding-attempt");
-  const hash = await pool.write.openFundingAttempt([participants, fundingTargetsWei]);
+  const fields = await resolveTransactionFields(publicClient, "open-funding-attempt", () =>
+    pool.estimateGas.openFundingAttempt([participants, fundingTargetsWei]),
+  );
+  const hash = await pool.write.openFundingAttempt([participants, fundingTargetsWei], fields);
   const receipt = await waitForSenderVerifiedReceipt(
     publicClient,
     hash,

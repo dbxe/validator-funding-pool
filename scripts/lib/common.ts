@@ -2547,10 +2547,10 @@ export async function assertBeaconValidatorReadyForFunding(
 ///
 /// It removes the largest part of the window: the funding review and everything the operator
 /// reads before deciding are behind it. What it does NOT remove is everything after it, and
-/// that is not seconds. Between this check and the signature sit hardhat's own request
-/// handlers filling the fee fields from `eth_feeHistory`, the gas limit from
-/// `eth_estimateGas`, and the nonce from `eth_getTransactionCount` — and, on the Ledger path,
-/// the device confirmation, which is a person pressing buttons and is bounded by nothing.
+/// that is not seconds. The gas limit and fee fields are already resolved by then
+/// (`resolveTransactionFields` runs just before this check); between this check and the
+/// signature sit the signer's nonce and chain-id round trips — and, on the Ledger path, the
+/// device confirmation, which is a person pressing buttons and is bounded by nothing.
 ///
 /// Nor can anything re-check after that approval. `@nomicfoundation/hardhat-ledger` handles a
 /// single `eth_sendTransaction` by signing on the device and returning an
@@ -3459,23 +3459,33 @@ export function formatGasPrice(value: bigint): string {
 }
 
 // ---------------------------------------------------------------------------
-// Transaction fees
+// Transaction fields: gas limit and fees
 //
-// Nothing in this repository chooses a fee. Hardhat's `AutomaticGasPriceHandler`
-// fills `maxFeePerGas` and `maxPriorityFeePerGas` from the connected endpoint's
-// `eth_feeHistory`, and `AutomaticGasHandler` fills the gas limit from
-// `eth_estimateGas`, on the way past — so the numbers a transaction is signed
-// with come from the same endpoint as every other read, and are covered by the
-// same trusted-endpoint assumption (`SECURITY.md` §2).
+// Every write sets `gas`, `maxFeePerGas`, and `maxPriorityFeePerGas` itself, through
+// `resolveTransactionFields`, before the request leaves viem. Leaving them to hardhat is not
+// an option on the Ledger path. Hardhat builds the plugin list as
+// `[...builtinPlugins, ...userPlugins]`
+// (`node_modules/hardhat/dist/src/internal/hre-initialization.js` line 24) and runs chained
+// hook handlers in reverse registration order
+// (`.../internal/core/hook-manager.js`, `plugins.toReversed()` at line 57), so the Ledger
+// plugin's `network.onRequest` sees `eth_sendTransaction` BEFORE the built-in network
+// manager's `AutomaticGasHandler` and `AutomaticGasPriceHandler` ever run. The plugin signs
+// what it is handed and refuses a request with no `gas`
+// (`node_modules/@nomicfoundation/hardhat-ledger/dist/src/internal/handler.js` lines 447-470,
+// `HHE713`) or no fee fields; viem forwards a JSON-RPC account's request without either
+// (`node_modules/viem/_esm/actions/wallet/sendTransaction.js`, the `json-rpc` branch). Setting
+// them here makes the request complete before any plugin sees it, independent of that
+// ordering, and on the `rpc` network hardhat's handlers leave fields that are already set
+// alone — so both networks sign exactly the numbers printed.
 //
-// On the mainnet path that assumption has a second layer under it: a Ledger
-// renders the fee for approval, so a fee an endpoint inflated is a fee a person
-// is shown before it is signed. The keystore path has no such gate — it signs
-// whatever came back. What follows is not a gate either. It prints the numbers,
-// so that path at least sees them.
+// The numbers still come from the connected endpoint — `eth_estimateGas`, `eth_feeHistory`,
+// and the latest block's gas limit — and are covered by the same trusted-endpoint assumption
+// as every other read (`SECURITY.md` §2). Nothing here bounds a fee. On the Ledger path the
+// device renders the fee it signs, so an inflated one is shown to a person first; the
+// keystore path has no such gate, which is why the fields are printed before every write.
 // ---------------------------------------------------------------------------
 
-/// The public actions the fee preview needs. Structural, so the tests can drive it.
+/// The public actions the fee fields need. Structural, so the tests can drive it.
 export type FeeSuggestionClient = Pick<
   PublicClient,
   "getFeeHistory" | "estimateMaxPriorityFeePerGas"
@@ -3489,17 +3499,13 @@ export type FeeSuggestionClient = Pick<
 const FEE_REWARD_PERCENTILE = 50;
 const FEE_BASE_FEE_FULL_BLOCKS = 2n;
 
-/// The fee fields hardhat is about to fill in, computed the way hardhat computes them.
+/// The two EIP-1559 fee fields, computed the way hardhat's `AutomaticGasPriceHandler` computes
+/// them when it is left to fill them.
 ///
-/// This deliberately reproduces `AutomaticGasPriceHandler`'s arithmetic rather than viem's
-/// `estimateFeesPerGas`, which uses a different formula: a printed number that is not the
-/// number the device will render would be worse than printing nothing, because the operator's
-/// job at the device is to compare.
-///
-/// It is a PREVIEW and says so. Hardhat makes its own `eth_feeHistory` request when it
-/// composes the transaction, moments later and against a chain that has moved, so the signed
-/// values may differ by a block's worth of base fee. What the preview establishes is the order
-/// of magnitude and the endpoint's answer, which is what an inflated fee shows up in.
+/// Hardhat's arithmetic rather than viem's `estimateFeesPerGas`, which uses a different
+/// formula: these values used to be a preview of what hardhat would fill, and keeping the
+/// formula means the fee a keystore run pays is the fee it always paid. They are no longer a
+/// preview — `resolveTransactionFields` sets them on the transaction.
 export async function resolveSuggestedFees(
   publicClient: FeeSuggestionClient,
 ): Promise<{ baseFeePerGas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
@@ -3529,40 +3535,117 @@ export async function resolveSuggestedFees(
   return { baseFeePerGas, maxFeePerGas, maxPriorityFeePerGas };
 }
 
-/// Prints the fee fields the endpoint is about to supply, immediately before a write.
+/// The gas limit every write signs, as a percentage of the endpoint's `eth_estimateGas`.
 ///
-/// The reason it exists is narrow and worth stating exactly. A dishonest EL RPC can choose an
-/// extreme priority fee, and the keystore path signs it with no human in the loop — the
-/// Ledger path shows it on the device, which is the gate. This is not a second gate: there is
-/// no ceiling and nothing is refused. It is the number, on the screen, before the signature,
-/// for the path that would otherwise never see it. An endpoint willing to inflate your fees is
-/// an endpoint §2 already tells you not to use.
+/// An estimate is exact for the state it was computed against, and the transaction executes
+/// against a later one. The one cost in these transactions that ordinary third-party traffic
+/// moves is the beacon deposit contract's incremental Merkle update, which `commitAndPredeposit`
+/// and `topUpValidator` both call: its loop hashes once for every trailing zero bit of the
+/// incremented deposit count, at about 2,976 gas per hash (a cold `branch[height]` read plus
+/// the SHA-256 precompile call), and anyone's deposit landing first changes that count. A
+/// `topUpValidator` estimate is about 213,000 gas (233,555 on the default build in the
+/// end-to-end harness), so a 20% margin is 42,000 gas or more — some fourteen extra hashes,
+/// and needing that many more than the estimate's requires the count to land on a long run of
+/// trailing ones. `commitAndPredeposit` estimates at about 500,000, where 20% covers all 32
+/// levels of the tree. Unused gas is not charged: the margin raises the most a transaction CAN
+/// cost in fees, not what it does cost.
+export const GAS_MARGIN_PERCENT = 120n;
+
+/// The ceiling, as a percentage of the latest block's gas limit. The same 95% hardhat's own
+/// `MultipliedGasEstimation` uses (`.../handlers/gas/multiplied-gas-estimation.js`), for its
+/// reason: a block's gas limit may move a little from one block to the next, and a transaction
+/// above the limit of the block it is proposed for cannot be included at all.
+const BLOCK_GAS_LIMIT_CEILING_PERCENT = 95n;
+
+/// `estimate × GAS_MARGIN_PERCENT`, rounded down, and never above 95% of the block gas limit.
 ///
-/// A failure here is swallowed and reported as a line rather than raised. A preview must never
-/// be the thing that ends a capital operation.
-export async function printSuggestedFees(publicClient: FeeSuggestionClient, label: string) {
+/// An estimate that is itself above that ceiling is refused rather than signed: capping the
+/// limit below the estimate would sign a transaction certain to run out of gas.
+export function applyGasMargin(estimate: bigint, blockGasLimit: bigint, label: string): bigint {
+  const ceiling = (blockGasLimit * BLOCK_GAS_LIMIT_CEILING_PERCENT) / 100n;
+  if (estimate > ceiling) {
+    throw new Error(
+      `${label}: eth_estimateGas returned ${estimate} gas, above ${BLOCK_GAS_LIMIT_CEILING_PERCENT}% ` +
+        `of the latest block's gas limit (${blockGasLimit}). Nothing has been sent. No transaction ` +
+        `this repository composes comes close to that, so check which endpoint RPC_URL names`,
+    );
+  }
+  const withMargin = (estimate * GAS_MARGIN_PERCENT) / 100n;
+  return withMargin > ceiling ? ceiling : withMargin;
+}
+
+/// The three fields every write sets. Spread into the viem call as they are.
+export interface TransactionFields {
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+}
+
+/// The public actions `resolveTransactionFields` needs beyond the fee reads. Structural, so
+/// the tests can drive it.
+export type TransactionFieldsClient = FeeSuggestionClient & {
+  getBlock: () => Promise<{ gasLimit: bigint }>;
+};
+
+/// Resolves the gas limit and both fee fields for one write, prints them, and returns them for
+/// the caller to set on the transaction.
+///
+/// `estimateGas` is the transaction's own estimate — `pool.estimateGas.<function>(...)` with
+/// the same arguments and value as the write, or `publicClient.estimateGas` with the same
+/// request for a plain transfer or a deployment. A contract estimate is taken through the
+/// contract's ABI on purpose: a revert is decoded to its custom error, so a transaction that
+/// would fail is refused here, named, before anything is signed.
+///
+/// Every failure is fatal. These values are not a preview any more: without them there is
+/// nothing to sign, and on the Ledger path the plugin would refuse the request anyway.
+///
+/// The print is the reason the keystore path sees the fee at all, and it is exactly what is
+/// signed: nothing downstream re-reads or rewrites these fields.
+export async function resolveTransactionFields(
+  publicClient: TransactionFieldsClient,
+  label: string,
+  estimateGas: () => Promise<bigint>,
+): Promise<TransactionFields> {
+  let estimate: bigint;
+  try {
+    estimate = await estimateGas();
+  } catch (error) {
+    throw new Error(
+      `${label}: eth_estimateGas failed for this transaction, so it was not signed. Nothing has ` +
+        `been sent. A revert here means the transaction would fail as composed against the ` +
+        `current chain state`,
+      { cause: error },
+    );
+  }
+
   let fees: Awaited<ReturnType<typeof resolveSuggestedFees>>;
+  let blockGasLimit: bigint;
   try {
     fees = await resolveSuggestedFees(publicClient);
+    blockGasLimit = (await publicClient.getBlock()).gasLimit;
   } catch (error) {
-    console.log(
-      `${label} fees: could not be previewed ` +
-        `(${error instanceof Error ? error.message : String(error)}). Hardhat will still fill ` +
-        `them from this endpoint; on the Ledger path the device renders what it filled`,
+    throw new Error(
+      `${label}: could not read the fee fields or the block gas limit from this endpoint ` +
+        `(eth_feeHistory, latest block). Nothing has been sent`,
+      { cause: error },
     );
-    return;
   }
+  const gas = applyGasMargin(estimate, blockGasLimit, label);
+  const { baseFeePerGas, maxFeePerGas, maxPriorityFeePerGas } = fees;
+
   console.log(
-    `${label} fees, as this endpoint suggests them and hardhat will fill them:\n` +
-      `  base fee per gas:         ${formatGasPrice(fees.baseFeePerGas)}\n` +
-      `  max priority fee per gas: ${formatGasPrice(fees.maxPriorityFeePerGas)}\n` +
-      `  max fee per gas:          ${formatGasPrice(fees.maxFeePerGas)}\n` +
-      `  gas limit:                filled from eth_estimateGas when the transaction is ` +
-      `composed, so it is not previewed here\n` +
-      `  These come from the connected endpoint, and hardhat re-reads them a moment from now, ` +
-      `so the signed values may differ by a block. On the Ledger path the device renders the ` +
-      `fee it was actually given; compare it against the line above.`,
+    `${label} fees, as this endpoint suggests them and as this command signs them:\n` +
+      `  base fee per gas:         ${formatGasPrice(baseFeePerGas)}\n` +
+      `  max priority fee per gas: ${formatGasPrice(maxPriorityFeePerGas)}\n` +
+      `  max fee per gas:          ${formatGasPrice(maxFeePerGas)}\n` +
+      `  gas limit:                ${gas} (eth_estimateGas ${estimate} ` +
+      `+ ${GAS_MARGIN_PERCENT - 100n}% margin)\n` +
+      `  max total fee:            ${formatWei(gas * maxFeePerGas)} (gas limit × max fee per gas)\n` +
+      `  These come from the connected endpoint and are set on the transaction by this command, ` +
+      `so they are the values that get signed. On the Ledger path the device renders the fee ` +
+      `it was given; compare it against the lines above.`,
   );
+  return { gas, maxFeePerGas, maxPriorityFeePerGas };
 }
 
 // ---------------------------------------------------------------------------

@@ -9,9 +9,9 @@ import {
   assertDeploymentIntegrity,
   envBigInt,
   formatWei,
-  printSuggestedFees,
   readDeployment,
   reportFatalError,
+  resolveTransactionFields,
   waitForSenderVerifiedReceipt,
 } from "./lib/common.js";
 
@@ -73,8 +73,10 @@ async function main() {
   console.log(`Requesting full exit for ${pubkey}`);
   console.log(`EIP-7002 fee: ${formatWei(fee)}`);
   console.log(`Max fee sent: ${formatWei(maxFee)} (the excess above the fee charged is refunded)`);
-  await printSuggestedFees(publicClient, "request-exit");
-  const hash = await pool.write.requestExit([maxFee], { value: maxFee });
+  const fields = await resolveTransactionFields(publicClient, "request-exit", () =>
+    pool.estimateGas.requestExit([maxFee], { value: maxFee }),
+  );
+  const hash = await pool.write.requestExit([maxFee], { value: maxFee, ...fields });
   const receipt = await waitForSenderVerifiedReceipt(publicClient, hash, signer, "request-exit");
   console.log(`Exit requested in block ${receipt.blockNumber}`);
 }
