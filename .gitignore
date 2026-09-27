@@ -7,4 +7,6 @@ docs/
 .env.*
 !.env.example
 deployments/*.json
+# Per-deployment validator deposit data: public once on chain, but never part of the repository
+deposit-data.json
 .DS_STORE
