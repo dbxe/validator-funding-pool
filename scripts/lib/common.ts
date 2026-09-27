@@ -3568,9 +3568,10 @@ const FEE_BASE_FEE_FULL_BLOCKS = 2n;
 /// The two EIP-1559 fee fields, computed the way hardhat's `AutomaticGasPriceHandler` computes
 /// them when it is left to fill them.
 ///
-/// Hardhat's arithmetic rather than viem's `estimateFeesPerGas`, which uses a different
-/// formula: these values used to be a preview of what hardhat would fill, and keeping the
-/// formula means the fee a keystore run pays is the fee it always paid. They are no longer a
+/// Hardhat's formula rather than viem's `estimateFeesPerGas`, which uses a different one:
+/// these values used to be a preview of what hardhat would fill, and keeping the formula means
+/// the fee a keystore run pays is the fee it always paid. It is the same read and the same
+/// arithmetic in every case but one fallback, described below. They are no longer a
 /// preview — `resolveTransactionFields` sets them on the transaction.
 export async function resolveSuggestedFees(
   publicClient: FeeSuggestionClient,
@@ -3586,8 +3587,11 @@ export async function resolveSuggestedFees(
 
   let maxPriorityFeePerGas = history.reward?.[0]?.[0] ?? 0n;
   if (maxPriorityFeePerGas === 0n) {
-    // Hardhat's fallback chain, in order: the node's own suggestion, then 1 wei. An empty
-    // chain reports a zero reward at every percentile, which is the local-devnet case.
+    // Hardhat's fallback is the node's `eth_maxPriorityFeePerGas`, then 1 wei. viem's
+    // estimator differs in the middle: when the endpoint lacks `eth_maxPriorityFeePerGas` it
+    // falls back to `eth_gasPrice` minus the base fee before this 1 wei is reached. Kept,
+    // because on a live chain a market-derived number is the better tip; the case needs a
+    // zero 50th-percentile reward, which is the empty-chain, local-devnet case.
     try {
       maxPriorityFeePerGas = await publicClient.estimateMaxPriorityFeePerGas();
     } catch {
@@ -3698,14 +3702,19 @@ export async function resolveTransactionFields(
   }
   const gas = applyGasMargin(estimate, blockGasLimit, label);
   const { baseFeePerGas, maxFeePerGas, maxPriorityFeePerGas } = fees;
+  // Said as it happened: when the ceiling clamped the margin, the limit is not the margin.
+  const gasSource =
+    gas === (estimate * GAS_MARGIN_PERCENT) / 100n
+      ? `eth_estimateGas ${estimate} + ${GAS_MARGIN_PERCENT - 100n}% margin`
+      : `eth_estimateGas ${estimate}, margin capped at ${BLOCK_GAS_LIMIT_CEILING_PERCENT}% of ` +
+        `the block gas limit ${blockGasLimit}`;
 
   console.log(
     `${label} fees, as this endpoint suggests them and as this command signs them:\n` +
       `  base fee per gas:         ${formatGasPrice(baseFeePerGas)}\n` +
       `  max priority fee per gas: ${formatGasPrice(maxPriorityFeePerGas)}\n` +
       `  max fee per gas:          ${formatGasPrice(maxFeePerGas)}\n` +
-      `  gas limit:                ${gas} (eth_estimateGas ${estimate} ` +
-      `+ ${GAS_MARGIN_PERCENT - 100n}% margin)\n` +
+      `  gas limit:                ${gas} (${gasSource})\n` +
       `  max total fee:            ${formatWei(gas * maxFeePerGas)} (gas limit × max fee per gas)\n` +
       `  These come from the connected endpoint and are set on the transaction by this command, ` +
       `so they are the values that get signed. On the Ledger path the device renders the fee ` +

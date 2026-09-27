@@ -1,4 +1,5 @@
-import { network } from "hardhat";
+import { artifacts, network } from "hardhat";
+import { getContract } from "viem";
 
 import {
   assertCompilationNotSkipped,
@@ -29,7 +30,16 @@ async function main() {
   const deployment = readDeployment();
   const { viem } = connection;
   const publicClient = await viem.getPublicClient();
-  const pool = await viem.getContractAt("ValidatorFundingPool", deployment.pool);
+  // A read-only contract over the public client, deliberately not `viem.getContractAt`:
+  // hardhat-viem's helper fetches a default WALLET client whether or not one is used, and
+  // that throws `HHE40002` when `eth_accounts` is empty — which is what a public provider, or
+  // the operator's own node exposing no accounts, answers. `status` signs nothing and must not
+  // need an account to exist.
+  const pool = getContract({
+    address: deployment.pool,
+    abi: (await artifacts.readArtifact("ValidatorFundingPool")).abi,
+    client: publicClient,
+  });
   // `"report-forwarder"`: nothing about the sidecar is evaluated inside this gate, not even
   // the `EXPECTED_FORWARDER` pin. All of it runs at the end, below, inside a boundary that
   // warns instead of refusing — because a gate is a refusal, and any forwarder-related

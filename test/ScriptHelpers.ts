@@ -1752,6 +1752,23 @@ describe("the transaction fields every write signs", function () {
     assert.doesNotMatch(printed, /may differ/);
   });
 
+  it("says so when the block-gas-limit ceiling, not the margin, set the gas limit", async function () {
+    const log = captureLog();
+    let fields: Awaited<ReturnType<typeof resolveTransactionFields>>;
+    try {
+      // 900,000 * 1.2 is above 95% of a 1,000,000 block gas limit.
+      fields = await resolveTransactionFields(fieldsClient(1_000_000n), "deploy", async () => 900_000n);
+    } finally {
+      log.restore();
+    }
+    assert.equal(fields.gas, 950_000n);
+    assert.match(
+      log.lines[0],
+      /gas limit: +950000 \(eth_estimateGas 900000, margin capped at 95% of the block gas limit 1000000\)/,
+    );
+    assert.doesNotMatch(log.lines[0], /\+ 20% margin/);
+  });
+
   it("refuses, naming the command and the decoded revert, when the estimate fails", async function () {
     // The shape viem gives a contract estimate that reverts: the decoded custom error rides on
     // `data` somewhere down the cause chain.

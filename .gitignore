@@ -4,5 +4,7 @@ cache/
 coverage/
 docs/
 *.env
+.env.*
+!.env.example
 deployments/*.json
 .DS_STORE

@@ -38,6 +38,7 @@ import {
 } from "./mock-beacon.js";
 import { REPO_ROOT } from "./paths.js";
 import { POOL_ABI } from "./pool.js";
+import { MARKED_PRIORITY_FEE_BASE, RpcProxy } from "./rpc-proxy.js";
 import {
   assertActiveSignerPrinted,
   assertOutputContains,
@@ -88,6 +89,12 @@ const ACTIONABLE_WITHIN_LINES = 6;
 
 describe("commands, end to end", { timeout: 900_000 }, () => {
   let chain: LocalChain;
+  /// Every command reaches the chain through this, not directly: it marks each
+  /// `eth_feeHistory` answer with a distinct priority fee, which is what lets
+  /// `assertSignedAsPrinted` tell a fee the command set from one hardhat filled in. See
+  /// `rpc-proxy.ts`.
+  let feeMarkingProxy: RpcProxy;
+  let rpcUrl: string;
   let beacon: MockBeaconNode;
   let workdir: string;
 
@@ -103,6 +110,8 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
 
   before(async () => {
     chain = await LocalChain.start();
+    feeMarkingProxy = await RpcProxy.start(chain.url, { markFees: true });
+    rpcUrl = feeMarkingProxy.url;
     beacon = new MockBeaconNode(LOCAL_CHAIN_ID, DEPOSIT_CONTRACT_ADDRESS);
     await beacon.start();
     workdir = mkdtempSync(path.join(tmpdir(), "validator-funding-pool-e2e-"));
@@ -115,6 +124,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
 
   after(async () => {
     await beacon.stop();
+    await feeMarkingProxy.stop();
     await chain.stop();
   });
 
@@ -124,7 +134,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
 
   function baseEnv(extra: Record<string, string | undefined> = {}) {
     return {
-      RPC_URL: chain.url,
+      RPC_URL: rpcUrl,
       BEACON_NODE_URL: beacon.url,
       DEPLOYMENT_FILE: deploymentFile,
       DEPOSIT_DATA_FILE: depositDataFile,
@@ -216,10 +226,14 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
   ///
   /// This is the property the Ledger path depends on: `@nomicfoundation/hardhat-ledger` signs
   /// only a request that already carries `gas` and the fee fields, because hardhat's own
-  /// fillers run after it. On this keystore path hardhat would have filled them had the
-  /// command not, so equality with the printed numbers is what proves the command set them
-  /// itself. Every command mines one transaction into its own block under automine, so the
-  /// latest block holds exactly it.
+  /// fillers run after it. On this keystore path hardhat WOULD fill any field the command left
+  /// out, from the same endpoint and with the same formula, so equality alone would prove
+  /// nothing about the fees. Two things make it prove it. The gas limit hardhat fills is the
+  /// bare estimate, never the estimate times the margin. And every `eth_feeHistory` answer
+  /// passes through `feeMarkingProxy`, which gives each one a priority fee no other answer
+  /// has: a fee hardhat filled comes from a second read and cannot equal the printed one.
+  /// Every command mines one transaction into its own block under automine, so the latest
+  /// block holds exactly it.
   async function assertSignedAsPrinted(result: CommandResult, script: string, signer: Address) {
     const printed = printedFields(result, script);
     const block = await chain.publicClient.getBlock({ blockTag: "latest", includeTransactions: true });
@@ -230,6 +244,11 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     const [transaction] = mined;
 
     assert.equal(transaction.type, "eip1559");
+    // Read through the fee-marking proxy, so it is a marked value and not the node's own.
+    assert.ok(
+      printed.maxPriorityFeePerGas > MARKED_PRIORITY_FEE_BASE,
+      `${script} printed a priority fee that did not come through the fee-marking proxy`,
+    );
     assert.equal(transaction.gas, printed.gas, `${script} signed a gas limit it did not print`);
     assert.equal(transaction.maxFeePerGas, printed.maxFeePerGas, `${script} max fee`);
     assert.equal(
@@ -266,7 +285,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         // No BEACON_NODE_URL: `deploy` touches no beacon endpoint, and a test that supplied
         // one would not notice if it started to.
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: deploymentFile,
           // Required now, and bounded: the window becomes an immutable no command can change.
@@ -335,7 +354,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         await runCommand({
           script: "deploy",
           env: {
-            RPC_URL: chain.url,
+            RPC_URL: rpcUrl,
             PRIVATE_KEY: operator.privateKey,
             DEPLOYMENT_FILE: deploymentFile,
             FUNDING_WINDOW_SECONDS: declared,
@@ -354,7 +373,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     const unset = expectFailure(
       await runCommand({
         script: "deploy",
-        env: { RPC_URL: chain.url, PRIVATE_KEY: operator.privateKey, DEPLOYMENT_FILE: deploymentFile },
+        env: { RPC_URL: rpcUrl, PRIVATE_KEY: operator.privateKey, DEPLOYMENT_FILE: deploymentFile },
       }),
     );
     assertOutputContains(unset, "FUNDING_WINDOW_SECONDS=86400");
@@ -372,7 +391,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       await runCommand({
         script: "deploy",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: deploymentFile,
           FUNDING_WINDOW_SECONDS: "86400",
@@ -1095,7 +1114,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
 
   it("status reads the pool on the read-only network with no PRIVATE_KEY set", async () => {
     const env = {
-      RPC_URL: chain.url,
+      RPC_URL: rpcUrl,
       DEPLOYMENT_FILE: deploymentFile,
       // Named explicitly rather than merely omitted: this is the Ledger-only operator's
       // case, and the `read` network exists because the `rpc` network cannot answer a single
@@ -1121,6 +1140,38 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     assertOutputLacks(result, "active signer:");
   });
 
+  it("status reads the pool through an endpoint that exposes no accounts", async () => {
+    // A public provider answers `eth_accounts` with an empty list, and so does an operator's
+    // own node once it exposes no account of its own. `status` signs nothing, so it must not
+    // need an account to exist: nothing on the read path may ask hardhat-viem for a default
+    // wallet client, which is exactly what fails when the list is empty.
+    const proxy = await RpcProxy.start(chain.url, { hideAccounts: true });
+    try {
+      assert.deepEqual(
+        await (
+          await fetch(proxy.url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_accounts", params: [] }),
+          })
+        ).json(),
+        { jsonrpc: "2.0", id: 1, result: [] },
+      );
+      const result = expectSuccess(
+        await runCommand({
+          script: "status",
+          network: "read",
+          env: { RPC_URL: proxy.url, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
+        }),
+      );
+      assertOutputContains(result, `Pool: ${pool}`);
+      assertOutputContains(result, "State: ToppedUp (3)");
+      assertOutputContains(result, "Top-up submitted: true");
+    } finally {
+      await proxy.stop();
+    }
+  });
+
   it("EXPECTED_CHAIN_ID pins the connection, and refuses a chain that is not it", async () => {
     // The pin is hardhat's own `chainId` field on the http network, which installs a
     // ChainIdValidatorHandler ahead of every other request handler. Mainnet operators set
@@ -1130,7 +1181,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         script: "status",
         network: "read",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           DEPLOYMENT_FILE: deploymentFile,
           PRIVATE_KEY: undefined,
           EXPECTED_CHAIN_ID: "1",
@@ -1152,7 +1203,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         script: "status",
         network: "read",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           DEPLOYMENT_FILE: deploymentFile,
           PRIVATE_KEY: undefined,
           EXPECTED_CHAIN_ID: `${LOCAL_CHAIN_ID}`,
@@ -1173,7 +1224,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         script: "status",
         network: "read",
         args: ["--no-compile"],
-        env: { RPC_URL: chain.url, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
+        env: { RPC_URL: rpcUrl, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
       }),
     );
 
@@ -1573,7 +1624,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         script: "status",
         network: "read",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           DEPLOYMENT_FILE: brokenFile,
           PRIVATE_KEY: undefined,
           // The last lines of pool state, so this run also proves the forwarder block is
@@ -1609,7 +1660,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       await runCommand({
         script: "status",
         network: "read",
-        env: { RPC_URL: chain.url, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
+        env: { RPC_URL: rpcUrl, DEPLOYMENT_FILE: deploymentFile, PRIVATE_KEY: undefined },
       }),
     );
     assertOutputContains(healthy, `Fee recipient forwarder: ${forwarder}`);
@@ -1630,7 +1681,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
         script: "status",
         network: "read",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           DEPLOYMENT_FILE: deploymentFile,
           PRIVATE_KEY: undefined,
           EXPECTED_FORWARDER: outsider.address,
@@ -1683,7 +1734,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     const raceDeploymentFile = path.join(workdir, "deployment-race.json");
     const raceDepositDataFile = path.join(workdir, "deposit-data-race.json");
     const raceEnv = (extra: Record<string, string | undefined> = {}) => ({
-      RPC_URL: chain.url,
+      RPC_URL: rpcUrl,
       BEACON_NODE_URL: beacon.url,
       DEPLOYMENT_FILE: raceDeploymentFile,
       DEPOSIT_DATA_FILE: raceDepositDataFile,
@@ -1695,7 +1746,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       await runCommand({
         script: "deploy",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: raceDeploymentFile,
           FUNDING_WINDOW_SECONDS: "86400",
@@ -1819,7 +1870,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
     const refundDeploymentFile = path.join(workdir, "deployment-redirected-refund.json");
     const refundDepositDataFile = path.join(workdir, "deposit-data-redirected-refund.json");
     const refundEnv = (extra: Record<string, string | undefined> = {}) => ({
-      RPC_URL: chain.url,
+      RPC_URL: rpcUrl,
       BEACON_NODE_URL: beacon.url,
       DEPLOYMENT_FILE: refundDeploymentFile,
       DEPOSIT_DATA_FILE: refundDepositDataFile,
@@ -1831,7 +1882,7 @@ describe("commands, end to end", { timeout: 900_000 }, () => {
       await runCommand({
         script: "deploy",
         env: {
-          RPC_URL: chain.url,
+          RPC_URL: rpcUrl,
           PRIVATE_KEY: operator.privateKey,
           DEPLOYMENT_FILE: refundDeploymentFile,
           FUNDING_WINDOW_SECONDS: "3600",

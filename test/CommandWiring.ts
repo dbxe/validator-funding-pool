@@ -35,15 +35,60 @@ const TRANSACTING_COMMANDS = [
   "top-up",
 ];
 
+/// The script's source with `//` comments removed, so a comment inside a call's argument list
+/// is never read as part of an argument. Only a `//` at the start of a line or after
+/// whitespace is a comment here, which leaves `https://` inside a string alone.
 function scriptSource(command: string): string {
-  return readFileSync(path.join(SCRIPTS_DIR, `${command}.ts`), "utf8");
+  return readFileSync(path.join(SCRIPTS_DIR, `${command}.ts`), "utf8").replace(
+    /(^|\s)\/\/[^\n]*/g,
+    "$1",
+  );
 }
 
-/// Every call in a script that hands a transaction to the signer — a contract write, a plain
-/// `sendTransaction`, or a `sendDeploymentTransaction` — with its full argument text, found by
-/// matching parentheses from the opening one.
+/// Every call in a script that can hand a transaction to the signer, with its full argument
+/// text, found by matching parentheses from the opening one. Deliberately wide: a contract
+/// write reached through `.write.` or a destructured `write.`, `writeContract`, `deployContract`,
+/// `sendTransaction`, and `sendDeploymentTransaction`, whatever object they are called on.
 function signingCalls(source: string): string[] {
-  return callsMatching(source, /(\.write\.\w+|\.sendTransaction|\.sendDeploymentTransaction)\(/g);
+  return callsMatching(
+    source,
+    /\b(write\.\w+|writeContract|deployContract|sendTransaction|sendDeploymentTransaction)\s*\(/g,
+  );
+}
+
+/// Splits `text` at the commas that are not nested inside (), [], or {}.
+function topLevelParts(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const character of text) {
+    if ("([{".includes(character)) depth += 1;
+    if (")]}".includes(character)) depth -= 1;
+    if (character === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  parts.push(current.trim());
+  return parts.filter((part) => part !== "");
+}
+
+const FEE_KEYS = /^(gas|gasPrice|maxFeePerGas|maxPriorityFeePerGas|type)\s*[:,]?/;
+
+/// Whether a signing call carries the resolved fields WHOLE, and last: its final argument is
+/// either `fields` itself or an object literal whose final element is `...fields`, with no fee
+/// key written anywhere in it. `{ gas: fields.gas }` fails, because it drops both fee fields
+/// and hardhat would quietly fill them from the endpoint; so does `{ ...fields, maxFeePerGas:
+/// undefined }`, and so does a write with no options at all.
+function carriesFieldsLast(call: string): boolean {
+  const open = call.indexOf("(");
+  const last = topLevelParts(call.slice(open + 1, -1)).at(-1);
+  if (last === "fields") return true;
+  if (last === undefined || !last.startsWith("{") || !last.endsWith("}")) return false;
+  const elements = topLevelParts(last.slice(1, -1));
+  return elements.at(-1) === "...fields" && !elements.some((element) => FEE_KEYS.test(element));
 }
 
 /// Every call whose opening matches `opener` (which must end at the opening parenthesis), with
@@ -79,6 +124,39 @@ function callsMatching(source: string, opener: RegExp): string[] {
 /// unreachable would pass here. The e2e suite is what establishes the calls actually fire; the
 /// job of this file is to make deleting one from ANY command fail the suite.
 describe("transacting-command wiring", function () {
+  it("recognises a signing call that drops or overrides the resolved fields", function () {
+    // The scan is only as good as what it rejects, so its rejections are pinned here: the
+    // mutations two reviewers used to show the previous `/\bfields\b/` check passed anything.
+    for (const call of [
+      "pool.write.claim({ gas: fields.gas })",
+      "pool.write.claim()",
+      "pool.write.claimTo([recipient])",
+      "pool.write.fund({ value: amount, ...fields, maxFeePerGas: undefined })",
+      "pool.write.fund({ ...fields, value: amount })",
+      "pool.write.fund({ maxFeePerGas: 1n, ...fields })",
+      "wallet.sendTransaction({ to: pool, value: amount })",
+      "viem.sendDeploymentTransaction(\"X\", args, { client: { wallet } })",
+    ]) {
+      assert.equal(signingCalls(call).length, 1, call);
+      assert.equal(carriesFieldsLast(call), false, call);
+    }
+    for (const call of [
+      "pool.write.claim(fields)",
+      "pool.write.claimTo([recipient], fields)",
+      "pool.write.fund({ value: amount, ...fields })",
+      "viem.sendDeploymentTransaction(\"X\", args, { client: { wallet }, ...fields },)",
+    ]) {
+      assert.equal(carriesFieldsLast(call), true, call);
+    }
+    for (const opener of [
+      "write.fund(fields)",
+      "walletClient.writeContract({ ...fields })",
+      "viem.deployContract(\"X\", [], fields)",
+    ]) {
+      assert.equal(signingCalls(opener).length, 1, opener);
+    }
+  });
+
   it("enumerates exactly the scripts on disk, so a new command cannot skip the table", function () {
     const onDisk = readdirSync(SCRIPTS_DIR)
       .filter((entry) => entry.endsWith(".ts"))
@@ -101,14 +179,20 @@ describe("transacting-command wiring", function () {
           `Ledger plugin refuses a transaction without gas and fee fields (HHE713), and the ` +
           `keystore path would otherwise sign a fee nobody was shown.`,
       );
-      // And every write carries them. A write without `fields` is one the Ledger plugin
-      // refuses, and on the keystore path one whose fee was never printed.
+      assert.ok(
+        source.includes(`const fields = await resolveTransactionFields(publicClient, "${command}",`),
+        `scripts/${command}.ts does not bind the resolved fields to \`fields\``,
+      );
+      // And every write carries them, whole and last. A write that drops a field is one the
+      // Ledger plugin refuses, and on the keystore path one hardhat fills from the endpoint
+      // with a number nobody was shown.
       const calls = signingCalls(source);
       assert.ok(calls.length > 0, `scripts/${command}.ts has no signing call this scan recognises`);
       for (const call of calls) {
         assert.ok(
-          /\bfields\b/.test(call),
-          `scripts/${command}.ts sends a transaction without the resolved fields: ${call}`,
+          carriesFieldsLast(call),
+          `scripts/${command}.ts sends a transaction without the whole resolved fields as its ` +
+            `last options: ${call}`,
         );
       }
 
@@ -147,5 +231,8 @@ describe("transacting-command wiring", function () {
     assert.ok(source.includes(`assertCompilationNotSkipped("${NON_TRANSACTING}")`));
     assert.ok(!source.includes("resolveTransactionFields"));
     assert.deepEqual(signingCalls(source), []);
+    // Read-only for real: hardhat-viem's `getContractAt` fetches a default wallet client, which
+    // throws when the endpoint lists no accounts.
+    assert.ok(!source.includes("getContractAt("));
   });
 });
